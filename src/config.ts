@@ -20,7 +20,23 @@ export interface Config {
   logLevel: "debug" | "info" | "warn" | "error";
   /** Requests per minute allowed for each API key. */
   keyRatePerMinute: number;
+  /** Background jobs (NSE files, queued backfills). Off for one-off tools and tests. */
+  jobsEnabled: boolean;
+  /** How long a /v1/candles request waits for missing data from the broker before answering 503. */
+  fetchWaitMs: number;
+  fyers: FyersConfig;
+  /** NSE hosts (overridable for testing against a local server). */
+  nse: { archiveUrl: string; wwwUrl: string };
   secrets: Secrets;
+}
+
+/** Non-secret broker settings. URLs are overridable so tests can point at a mock server. */
+export interface FyersConfig {
+  apiUrl: string;
+  dataUrl: string;
+  /** Must match the redirect URL registered for the Fyers app (the login flow sends it). */
+  redirectUrl: string;
+  plan: "standard" | "prime";
 }
 
 export class ConfigError extends Error {}
@@ -35,6 +51,25 @@ function int(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number
   return value;
 }
 
+function fyersConfig(env: NodeJS.ProcessEnv): FyersConfig {
+  const apiUrl = (env.FYERS_API_URL || "https://api-t1.fyers.in/api/v3").replace(/\/+$/, "");
+  let origin: string;
+  try {
+    origin = new URL(apiUrl).origin;
+  } catch {
+    throw new ConfigError("FYERS_API_URL must be a URL.");
+  }
+  const plan = (env.FYERS_PLAN || "standard").toLowerCase();
+  if (plan !== "standard" && plan !== "prime") throw new ConfigError("FYERS_PLAN must be standard or prime.");
+  return {
+    apiUrl,
+    // Market data (history, quotes) lives under <origin>/data, not under /api/v3.
+    dataUrl: (env.FYERS_DATA_URL || `${origin}/data`).replace(/\/+$/, ""),
+    redirectUrl: env.FYERS_REDIRECT_URL || "http://localhost:3000/api/broker/callback",
+    plan,
+  };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const logLevel = (env.HUB_LOG_LEVEL ?? "info") as Config["logLevel"];
   if (!LOG_LEVELS.includes(logLevel)) throw new ConfigError(`HUB_LOG_LEVEL must be one of ${LOG_LEVELS.join(", ")}.`);
@@ -45,6 +80,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dataDir: path.resolve(env.HUB_DATA_DIR || "data"),
     logLevel,
     keyRatePerMinute: int(env, "HUB_KEY_RATE_PER_MINUTE", 600, 1, 100_000),
+    jobsEnabled: (env.HUB_JOBS ?? "on").toLowerCase() !== "off",
+    fetchWaitMs: int(env, "HUB_FETCH_WAIT_MS", 20_000, 0, 300_000),
+    fyers: fyersConfig(env),
+    nse: {
+      archiveUrl: (env.NSE_ARCHIVE_URL || "https://nsearchives.nseindia.com").replace(/\/+$/, ""),
+      wwwUrl: (env.NSE_WWW_URL || "https://www.nseindia.com").replace(/\/+$/, ""),
+    },
     secrets: {
       fyersClientId: env.FYERS_CLIENT_ID ?? "",
       fyersSecretKey: env.FYERS_SECRET_KEY ?? "",
