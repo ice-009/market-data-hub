@@ -1,0 +1,22 @@
+# docker compose up -d                      → hub only, on http://127.0.0.1:8787
+# docker compose --profile tunnel up -d     → hub + Cloudflare Tunnel (needs TUNNEL_TOKEN in .env)
+services:
+  hub:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    ports:
+      # Published on the host's loopback only — never on the LAN or the internet.
+      - "127.0.0.1:8787:8787"
+
+  tunnel:
+    image: cloudflare/cloudflared:latest  # pin a release tag once you've set it up
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env to use the tunnel profile}
+    depends_on:
+      - hub

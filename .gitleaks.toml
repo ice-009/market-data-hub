@@ -1,0 +1,7 @@
+# Default gitleaks rules, plus: test fixtures use deliberately fake credentials.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake credentials in unit tests"
+paths = ['''^test/''']

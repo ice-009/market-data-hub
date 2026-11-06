@@ -1,0 +1,8 @@
+node_modules
+dist
+data
+backups
+.env*
+.git
+*.db
+*.db-*
