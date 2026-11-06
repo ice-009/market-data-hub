@@ -7,6 +7,7 @@ import { RateLimiter } from "../src/auth/rateLimit.js";
 import { ConfigError, brokerConfigured, loadConfig, secretValues } from "../src/config.js";
 import { openDb, type Db } from "../src/db.js";
 import { createApp } from "../src/http/app.js";
+import { createHub } from "../src/hub.js";
 import { createLogger, redact } from "../src/log.js";
 
 let dir: string;
@@ -54,6 +55,14 @@ describe("log scrubber", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).not.toContain("S3cr3tKeyValue");
   });
+
+  it("scrubs values registered at runtime (the broker token)", () => {
+    const lines: string[] = [];
+    const log = createLogger({ level: "info", secrets: [], write: (line) => lines.push(line) });
+    log.addSecret("runtime-token-123456");
+    log.info("call failed with runtime-token-123456");
+    expect(lines[0]).not.toContain("runtime-token-123456");
+  });
 });
 
 describe("api keys", () => {
@@ -93,16 +102,19 @@ describe("rate limiter", () => {
 });
 
 describe("http", () => {
-  const app = (overrides: { keyRatePerMinute?: number } = {}) =>
-    createApp({
+  const app = (overrides: { keyRatePerMinute?: number } = {}) => {
+    const log = createLogger({ level: "error", secrets: [], write: () => {} });
+    const config = loadConfig({ ...SECRETS, HUB_DATA_DIR: dir, HUB_JOBS: "off" });
+    return createApp({
       db,
       dbPath: path.join(dir, "hub.db"),
-      log: createLogger({ level: "error", secrets: [], write: () => {} }),
+      log,
       version: "0.0.0-test",
       startedAt: Date.now(),
       keyRatePerMinute: overrides.keyRatePerMinute ?? 600,
-      brokerConfigured: true,
+      hub: createHub({ config, db, log, owner: true }),
     });
+  };
   const auth = (key: string) => ({ headers: { authorization: `Bearer ${key}` } });
 
   it("serves /healthz without a key", async () => {

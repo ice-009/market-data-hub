@@ -1,15 +1,22 @@
 import { statSync } from "node:fs";
-import { Hono, type MiddlewareHandler } from "hono";
-import type { ApiKey, Scope } from "../auth/keys.js";
+import { Hono } from "hono";
 import { verifyKey } from "../auth/keys.js";
 import { RateLimiter } from "../auth/rateLimit.js";
 import type { Db } from "../db.js";
+import type { Hub } from "../hub.js";
 import type { Logger } from "../log.js";
+import { brokerStatus, dataFreshness, recentJobs } from "../status.js";
+import { errorBody, type HubEnv } from "./common.js";
+import { candleRoutes } from "./routes/candles.js";
+import { referenceRoutes } from "./routes/reference.js";
+
+export { errorBody, requireScope, type HubEnv } from "./common.js";
 
 // The HTTP surface. Everything under /v1 needs an API key (Authorization:
 // Bearer mdh_…); /healthz is open so the container and tunnel can check the
 // process is alive, and says nothing else. Error bodies are always
-// { error, code } and never echo request headers or configuration.
+// { error, code } and never echo request headers or configuration. Data routes
+// live in ./routes; they read the hub's store and services.
 
 export interface AppDeps {
   db: Db;
@@ -18,21 +25,8 @@ export interface AppDeps {
   version: string;
   startedAt: number;
   keyRatePerMinute: number;
-  brokerConfigured: boolean;
+  hub: Hub;
 }
-
-export type HubEnv = { Variables: { apiKey: ApiKey } };
-
-export const errorBody = (error: string, code: string) => ({ error, code });
-
-/** Route guard: the calling key must hold `scope` (admin holds every scope). */
-export const requireScope =
-  (scope: Scope): MiddlewareHandler<HubEnv> =>
-  async (c, next) => {
-    const key = c.get("apiKey");
-    if (!key.scopes.includes(scope) && !key.scopes.includes("admin")) return c.json(errorBody(`This key lacks the "${scope}" scope.`, "forbidden"), 403);
-    await next();
-  };
 
 export function createApp(deps: AppDeps) {
   const app = new Hono<HubEnv>();
@@ -64,10 +58,14 @@ export function createApp(deps: AppDeps) {
       time: Date.now(),
       uptimeSec: Math.round((Date.now() - deps.startedAt) / 1000),
       key: { name: c.get("apiKey").name, scopes: c.get("apiKey").scopes },
-      broker: { configured: deps.brokerConfigured, connected: false },
-      data: { dbBytes },
+      broker: brokerStatus(deps.hub),
+      data: { dbBytes, ...dataFreshness(deps.db) },
+      jobs: recentJobs(deps.db),
     });
   });
+
+  candleRoutes(app, deps.hub);
+  referenceRoutes(app, deps.hub);
 
   app.notFound((c) => c.json(errorBody("Not found.", "not_found"), 404));
   app.onError((error, c) => {

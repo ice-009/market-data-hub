@@ -1,0 +1,127 @@
+import type { Hono } from "hono";
+import { normalizeSymbol } from "../../broker/symbols.js";
+import type { Hub } from "../../hub.js";
+import { combinedOiChangePct, oiFact } from "../../nse/openInterest.js";
+import { foMembersOn, latestBan, readFoSymbol, readLots, readResults, readRuns } from "../../nse/store.js";
+import { computeRegime } from "../../reference/marketRegime.js";
+import { getUniverse, isUniverse, UNIVERSES } from "../../reference/universe.js";
+import { banTarget } from "../../jobs/scheduler.js";
+import { DAY_MS, isoDay, istDayKey } from "../../time.js";
+import { errorBody, requireScope, type HubEnv } from "../common.js";
+import { ParamError, parseRange, parseTime } from "../params.js";
+
+// Reference data, all from the hub's own store (filled by the NSE jobs):
+//   GET /v1/universe/:name                 history  fno | nifty50 | nifty100 | nifty200 | nifty500
+//   GET /v1/fo/oi?symbol&from&to           fo       stock futures OI from the NSE F&O bhavcopy
+//   GET /v1/fo/members?date                fo       F&O list on a date (point-in-time)
+//   GET /v1/fo/ban                         fo       the F&O ban list
+//   GET /v1/lots[?symbol]                  history  stock-futures lot sizes
+//   GET /v1/results-calendar?from&to       history  results dates from NSE's event calendar
+//   GET /v1/market/regime[?universe]       history  NIFTY trend + breadth
+// Dates in responses are IST trade dates, as YYYY-MM-DD and as day keys (ms).
+
+const notReady = (what: string) => errorBody(`${what} hasn't been downloaded from NSE yet; the hub fetches it in the evening and on start.`, "not_ready");
+
+export function referenceRoutes(app: Hono<HubEnv>, hub: Hub) {
+  const bad = (error: unknown) => {
+    if (error instanceof ParamError) return errorBody(error.message, "bad_request");
+    throw error;
+  };
+
+  app.get("/v1/universe/:name", requireScope("history"), (c) => {
+    const name = c.req.param("name");
+    if (!isUniverse(name)) return c.json(errorBody(`Unknown universe. Choose from ${UNIVERSES.join(", ")}.`, "not_found"), 404);
+    const universe = getUniverse(hub.db, name);
+    return c.json({ ...universe, count: universe.members.length });
+  });
+
+  app.get("/v1/fo/oi", requireScope("fo"), (c) => {
+    const symbol = normalizeSymbol(c.req.query("symbol") ?? "");
+    if (!symbol) return c.json(errorBody("symbol is required (an NSE ticker such as SBIN).", "bad_request"), 400);
+    let range: { from: number; to: number };
+    try {
+      range = parseRange({ from: c.req.query("from"), to: c.req.query("to") }, true, 30, Date.now());
+    } catch (error) {
+      return c.json(bad(error), 400);
+    }
+    const days = readFoSymbol(hub.db, symbol, range.from, range.to).map((record) => {
+      const fact = oiFact(record);
+      return {
+        date: isoDay(record.day),
+        day: record.day,
+        nseSymbol: record.nseSymbol,
+        expiries: record.expiries,
+        lot: record.lot,
+        underlying: record.underlying,
+        near: { ...record.near, expiry: isoDay(record.near.expiry) },
+        next: record.next ? { ...record.next, expiry: isoDay(record.next.expiry) } : null,
+        oi: record.oi,
+        chgOi: record.chgOi,
+        oiChangePct: combinedOiChangePct(record),
+        pricePct: fact.pricePct,
+        buildup: fact.buildup,
+        basisPct: fact.basisPct,
+      };
+    });
+    return c.json({ symbol, from: isoDay(range.from), to: isoDay(range.to), days });
+  });
+
+  app.get("/v1/fo/members", requireScope("fo"), (c) => {
+    let day: number;
+    try {
+      day = parseTime("date", c.req.query("date"), "start", true) ?? istDayKey();
+    } catch (error) {
+      return c.json(bad(error), 400);
+    }
+    const members = foMembersOn(hub.db, day);
+    if (!members) return c.json(errorBody(`No F&O bhavcopy is stored on or before ${isoDay(day)}.`, "no_data"), 404);
+    return c.json({ date: isoDay(day), tradeDate: isoDay(members.day), count: members.symbols.length, symbols: members.symbols });
+  });
+
+  app.get("/v1/fo/ban", requireScope("fo"), (c) => {
+    const ban = latestBan(hub.db);
+    if (!ban) return c.json(notReady("The F&O ban list"), 503);
+    return c.json({ tradeDate: isoDay(ban.tradeDate), symbols: ban.symbols, fetchedAt: ban.fetchedAt, current: ban.tradeDate >= banTarget(Date.now()) });
+  });
+
+  app.get("/v1/lots", requireScope("history"), (c) => {
+    const lots = readLots(hub.db);
+    const run = readRuns(hub.db).get("lots");
+    if (!Object.keys(lots).length) return c.json(notReady("The lot-size file"), 503);
+    const symbol = c.req.query("symbol");
+    if (symbol !== undefined) {
+      const ticker = normalizeSymbol(symbol);
+      if (!ticker || !(ticker in lots)) return c.json(errorBody(`No lot size for ${symbol}.`, "not_found"), 404);
+      return c.json({ symbol: ticker, lot: lots[ticker], source: run?.info?.source ?? null, fetchedAt: run?.lastSuccessAt ?? null });
+    }
+    return c.json({ source: run?.info?.source ?? null, fetchedAt: run?.lastSuccessAt ?? null, count: Object.keys(lots).length, lots });
+  });
+
+  app.get("/v1/results-calendar", requireScope("history"), (c) => {
+    const today = istDayKey();
+    let range: { from: number; to: number };
+    try {
+      range = {
+        from: parseTime("from", c.req.query("from"), "start", true) ?? today - 7 * DAY_MS,
+        to: parseTime("to", c.req.query("to"), "end", true) ?? today + 60 * DAY_MS,
+      };
+      if (range.from > range.to) throw new ParamError("from must not be after to.");
+    } catch (error) {
+      return c.json(bad(error), 400);
+    }
+    const run = readRuns(hub.db).get("results");
+    if (!run?.lastSuccessAt) return c.json(notReady("The results calendar"), 503);
+    const symbol = c.req.query("symbol") ? (normalizeSymbol(c.req.query("symbol")!) ?? "") : undefined;
+    const events = readResults(hub.db, range.from, range.to, symbol).map((event) => ({ ...event, date: isoDay(event.date), day: event.date }));
+    return c.json({ from: isoDay(range.from), to: isoDay(range.to), fetchedAt: run.lastSuccessAt, events });
+  });
+
+  app.get("/v1/market/regime", requireScope("history"), async (c) => {
+    const universe = c.req.query("universe") ?? "nifty500";
+    if (!isUniverse(universe)) return c.json(errorBody(`universe must be one of ${UNIVERSES.join(", ")}.`, "bad_request"), 400);
+    const answer = await computeRegime(hub.db, hub.history, universe);
+    if (!answer.regime) return c.json(errorBody(`NIFTY history isn't available (${answer.error ?? "unknown"}).`, answer.status === "pending" ? "fetch_pending" : "broker_unavailable"), 503, { "Retry-After": answer.status === "pending" ? "10" : "60" });
+    if (answer.status !== "ok") return c.json({ ...errorBody(`Computed from stored data only (${answer.error ?? "broker unavailable"}).`, "broker_unavailable"), ...answer.regime }, 503, { "Retry-After": "60" });
+    return c.json(answer.regime);
+  });
+}
