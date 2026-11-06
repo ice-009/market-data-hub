@@ -1,0 +1,17 @@
+Market Data Hub
+Copyright (c) 2026 Market Data Hub contributors. Licensed under the MIT License (see LICENSE).
+
+Portions adapted from Tradex (MIT), https://github.com/ice-009/tradex-public,
+Copyright (c) 2026 Tradex contributors:
+  - the Fyers client, TOTP login and token cache (src/broker/fyers.ts, fyersAuth.ts, totp.ts)
+  - the request budget (src/broker/budget.ts)
+  - candle storage and history planning (src/history/store.ts, plan.ts, resample.ts, fromBhav.ts)
+  - NSE parsers and storage: cash and F&O bhavcopy, OI buildup, lot sizes, F&O ban list,
+    results calendar, zip reader (src/nse/)
+  - universes and their snapshots (src/reference/universe.ts, reference/universe/)
+  - the market regime (src/reference/regime.ts)
+  - test fixtures test/fixtures/fo-bhav-20251001.csv and fo-bhav-20251029.csv.zip
+
+Index constituent lists in reference/universe/ are snapshots of files published by NSE Indices
+Ltd (niftyindices.com). Market data fetched by the hub is subject to the terms of its source
+(the broker, NSE) and is not part of this repository.
