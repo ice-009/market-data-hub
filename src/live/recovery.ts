@@ -200,6 +200,7 @@ export class LiveRecovery {
   private readonly sessions: number;
   private running: Promise<RecoveryReport> | null = null;
   private lastCallAt = -Infinity;
+  private stopped = false;
 
   constructor(private readonly options: RecoveryOptions) {
     this.clock = options.clock ?? Date.now;
@@ -255,6 +256,14 @@ export class LiveRecovery {
     return this.enqueue([], "resume");
   }
 
+  /**
+   * Shutdown: no new call is started and nothing more is written; a run in
+   * progress ends after its current wait or call. Queued work stays for the next start.
+   */
+  stop(): void {
+    this.stopped = true;
+  }
+
   /** Queued tasks, newest first. */
   pending(): RecoveryTask[] {
     return this.load().pending;
@@ -269,6 +278,10 @@ export class LiveRecovery {
   private readonly repaired = (symbol: string, from: number, to: number) => this.options.store.brokerMinutes(symbol, from, to) >= (to - from) / MINUTE_MS;
 
   private enqueue(tasks: RecoveryTask[], reason: RecoveryReport["reason"]): Promise<RecoveryReport> {
+    if (this.stopped) {
+      const now = this.clock();
+      return Promise.resolve({ reason, startedAt: now, finishedAt: now, planned: 0, calls: 0, bars: 0, skipped: 0, failed: 0, pending: 0 });
+    }
     const saved = this.load();
     this.save({ ...saved, pending: mergeTasks(saved.pending, tasks) });
     // A run in progress picks the new tasks up from the queue.
@@ -288,6 +301,7 @@ export class LiveRecovery {
     const holidays = new Set<number>();
 
     for (;;) {
+      if (this.stopped) break;
       const task = this.load().pending[0];
       if (!task) break;
       if (holidays.has(task.day) || this.repaired(task.symbol, task.from, task.to)) {
@@ -299,6 +313,7 @@ export class LiveRecovery {
       const ready = Math.max(task.to + this.settleMs, this.lastCallAt + this.minIntervalMs);
       const wait = ready - this.clock();
       if (wait > 0) await this.sleep(wait);
+      if (this.stopped) break;
 
       let bars: MinuteBar[];
       try {
@@ -306,6 +321,7 @@ export class LiveRecovery {
         report.calls += 1;
         bars = await this.options.fetch(task.symbol, task.from, task.to);
       } catch (error) {
+        if (this.stopped) break;
         if (error instanceof BrokerError && error.kind === "bad_symbol") {
           report.failed += 1;
           this.done(task);
@@ -316,6 +332,7 @@ export class LiveRecovery {
         break;
       }
 
+      if (this.stopped) break; // the database may be closing; the task stays queued
       const closedBefore = minuteOf(this.clock());
       const keep = bars
         .filter((bar) => bar.t >= task.from && bar.t < task.to && bar.t < closedBefore && Number.isFinite(bar.c))
@@ -337,6 +354,7 @@ export class LiveRecovery {
     }
 
     report.finishedAt = this.clock();
+    if (this.stopped) return report;
     report.pending = this.load().pending.length;
     this.save({ ...this.load(), last: report });
     if (report.planned) log?.info("live recovery finished", { ...report });

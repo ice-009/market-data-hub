@@ -78,6 +78,8 @@ export interface LiveDeps {
   clock?: () => number;
   limits?: Partial<LiveLimits>;
   log?: Logger;
+  /** Called with newly pinned symbols (the hub repairs their session so far from broker history). */
+  onPinned?: (symbols: string[]) => void;
 }
 
 /** A quote as served: the tick plus its age and whether it came from a fallback. */
@@ -377,18 +379,18 @@ export function liveRoutes(app: Hono<HubEnv>, deps: LiveDeps): LiveRoutes {
       const next = [...current, ...added];
       if (next.length > limits.maxPinned) return c.json(errorBody(`At most ${limits.maxPinned} pinned symbols (${current.length} pinned now).`, "too_many_symbols"), 400);
       if (added.length) {
-        deps.store.setPersistentSymbols(next);
+        deps.store.pin(added);
         deps.feed.subscribe("persistent", added);
+        deps.onPinned?.(added);
       }
-      return c.json({ persistentSymbols: next, added });
+      return c.json({ persistentSymbols: deps.store.persistentSymbols(), added });
     }
-    const removed = parsed.value.filter((symbol) => current.includes(symbol));
-    const next = current.filter((symbol) => !removed.includes(symbol));
-    if (removed.length) {
-      deps.store.setPersistentSymbols(next);
-      deps.feed.unsubscribe("persistent", removed);
-    }
-    return c.json({ persistentSymbols: next, removed });
+    // Symbols listed in HUB_LIVE_SYMBOLS can't be unpinned through the API: they stay ("kept").
+    const candidates = parsed.value.filter((symbol) => current.includes(symbol));
+    const kept = candidates.length ? deps.store.unpin(candidates) : [];
+    const removed = candidates.filter((symbol) => !kept.includes(symbol));
+    if (removed.length) deps.feed.unsubscribe("persistent", removed);
+    return c.json({ persistentSymbols: deps.store.persistentSymbols(), removed, kept });
   };
   app.post("/v1/live/pin", requireScope("admin"), pinRoute("pin"));
   app.delete("/v1/live/pin", requireScope("admin"), pinRoute("unpin"));

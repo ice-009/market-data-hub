@@ -102,9 +102,13 @@ export interface LiveStore {
   lastQuotes(symbols: string[]): Map<string, Quote>;
   /** 1-minute bars for a symbol in [from, to), broker bars winning over live ones. */
   minuteBars(symbol: string, from: number, to: number): MinuteBar[];
-  /** Symbols to keep subscribed across restarts, with their owners. */
+  /** Symbols to keep subscribed across restarts (HUB_LIVE_SYMBOLS plus API pins). */
   persistentSymbols(): string[];
   setPersistentSymbols(symbols: string[]): void;
+  /** Pin symbols (POST /v1/live/pin). */
+  pin(symbols: string[]): void;
+  /** Unpin symbols; returns those that stay because HUB_LIVE_SYMBOLS lists them. */
+  unpin(symbols: string[]): string[];
   /** Write anything buffered (shutdown). */
   flush(): void;
 }

@@ -2,10 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createKey, type Scope } from "../src/auth/keys.js";
 import { BrokerError } from "../src/broker/errors.js";
 import { BudgetExhaustedError } from "../src/broker/gate.js";
-import { liveRoutes, liveStatus, type LiveDeps, type LiveLimits } from "../src/http/routes/live.js";
+import { liveStatus, type LiveDeps, type LiveLimits } from "../src/http/routes/live.js";
 import { Fanout } from "../src/live/fanout.js";
 import type { FeedStatus, LiveFeed, LiveStore, MinuteBar, Quote, QuoteFetcher, Tick } from "../src/live/types.js";
 import { makeHub, ist, type TestHub } from "./support/hub.js";
+import { SseReader, type SseEvent } from "./support/sse.js";
 
 // The live API against fakes of the feed, store and broker quotes: no broker,
 // no sockets. Streams are read straight from the Response body, so a test
@@ -69,8 +70,17 @@ class FakeStore implements LiveStore {
   persistentSymbols() {
     return [...this.pinned];
   }
+  config: string[] = [];
   setPersistentSymbols(symbols: string[]) {
     this.pinned = [...symbols];
+  }
+  pin(symbols: string[]) {
+    this.pinned.push(...symbols.filter((s) => !this.pinned.includes(s)));
+  }
+  unpin(symbols: string[]) {
+    const kept = symbols.filter((s) => this.config.includes(s));
+    this.pinned = this.pinned.filter((s) => !symbols.includes(s) || kept.includes(s));
+    return kept;
   }
   flush() {}
 }
@@ -107,8 +117,9 @@ function setup(options: { scopes?: Scope[]; limits?: Partial<LiveLimits>; quotes
   const store = new FakeStore();
   const quotes = options.quotes === undefined ? new FakeQuotes() : options.quotes;
   const deps: LiveDeps = { feed, store, quotes, clock: () => clockNow, limits: options.limits };
-  const app = t.app();
-  close = liveRoutes(app, deps).close;
+  // The hub's app mounts the live routes on these fake deps (its own feed and store are unused).
+  const app = t.app({ live: deps });
+  close = () => void t.hub.live.stop();
   const { key } = createKey(t.db, "test", options.scopes ?? ["live"]);
   const headers = (extra: Record<string, string> = {}) => ({ authorization: `Bearer ${key}`, ...extra });
   const get = async (path: string) => {
@@ -123,58 +134,6 @@ function setup(options: { scopes?: Scope[]; limits?: Partial<LiveLimits>; quotes
   };
   const stream = (path: string, extra: Record<string, string> = {}, signal?: AbortSignal) => app.request(path, { headers: headers(extra), signal });
   return { feed, store, quotes, deps, app, key, get, send, stream };
-}
-
-interface SseEvent {
-  event: string;
-  id?: string;
-  data?: unknown;
-  comment?: string;
-  retry?: number;
-}
-
-/** Reads SSE frames from a stream body, one `read()` at a time. */
-class SseReader {
-  private buffer = "";
-  private decoder = new TextDecoder();
-  constructor(private reader: ReadableStreamDefaultReader<Uint8Array>) {}
-  static of(res: Response) {
-    return new SseReader(res.body!.getReader());
-  }
-  /** One read() of the body, parsed into its events. */
-  async chunk(timeoutMs = 1000): Promise<SseEvent[]> {
-    const read = this.reader.read();
-    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("no data from stream")), timeoutMs));
-    const { value, done } = await Promise.race([read, timeout]);
-    if (done) return [];
-    this.buffer += this.decoder.decode(value, { stream: true });
-    const frames = this.buffer.split("\n\n");
-    this.buffer = frames.pop()!;
-    return frames.map(parseFrame);
-  }
-  async until(count: number): Promise<SseEvent[]> {
-    const events: SseEvent[] = [];
-    while (events.length < count) events.push(...(await this.chunk()));
-    return events;
-  }
-  cancel() {
-    return this.reader.cancel();
-  }
-}
-
-function parseFrame(frame: string): SseEvent {
-  const event: SseEvent = { event: "message" };
-  const data: string[] = [];
-  for (const line of frame.split("\n")) {
-    if (line.startsWith(":")) event.comment = line.slice(1).trim();
-    else if (line.startsWith("event: ")) event.event = line.slice(7);
-    else if (line.startsWith("id: ")) event.id = line.slice(4);
-    else if (line.startsWith("retry: ")) event.retry = Number(line.slice(7));
-    else if (line.startsWith("data: ")) data.push(line.slice(6));
-  }
-  if (data.length) event.data = JSON.parse(data.join("\n"));
-  if (event.comment !== undefined && !data.length) event.event = "comment";
-  return event;
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -471,16 +430,25 @@ describe("Fanout", () => {
 describe("pins and status", () => {
   it("POST/DELETE /v1/live/pin update the persistent set and the feed", async () => {
     const { feed, store, send, deps } = setup({ scopes: ["admin"], limits: { maxPinned: 3 } });
+    const pinned: string[][] = [];
+    deps.onPinned = (symbols) => pinned.push(symbols);
     store.pinned = ["NIFTY"];
+    store.config = ["NIFTY"];
     const pin = await send("POST", "/v1/live/pin", { symbols: ["sbin", "NIFTY", "infy"] });
     expect(pin).toEqual({ status: 200, body: { persistentSymbols: ["NIFTY", "SBIN", "INFY"], added: ["SBIN", "INFY"] } });
     expect(feed.calls).toEqual(["sub persistent SBIN,INFY"]);
+    expect(pinned).toEqual([["SBIN", "INFY"]]);
     expect((await send("POST", "/v1/live/pin", { symbols: ["TCS"] })).body).toMatchObject({ code: "too_many_symbols" });
 
     const unpin = await send("DELETE", "/v1/live/pin", { symbols: ["SBIN", "TCS"] });
-    expect(unpin.body).toEqual({ persistentSymbols: ["NIFTY", "INFY"], removed: ["SBIN"] });
+    expect(unpin.body).toEqual({ persistentSymbols: ["NIFTY", "INFY"], removed: ["SBIN"], kept: [] });
     expect(feed.calls.at(-1)).toBe("unsub persistent SBIN");
     expect(store.pinned).toEqual(["NIFTY", "INFY"]);
+
+    // A HUB_LIVE_SYMBOLS symbol stays subscribed: the feed isn't told to drop it.
+    const config = await send("DELETE", "/v1/live/pin", { symbols: ["NIFTY"] });
+    expect(config.body).toEqual({ persistentSymbols: ["NIFTY", "INFY"], removed: [], kept: ["NIFTY"] });
+    expect(feed.calls.at(-1)).toBe("unsub persistent SBIN");
 
     expect((await send("POST", "/v1/live/pin", "not json")).status).toBe(400);
     expect((await send("POST", "/v1/live/pin", { symbols: "SBIN" })).status).toBe(400);
