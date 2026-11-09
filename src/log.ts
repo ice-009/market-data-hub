@@ -21,20 +21,26 @@ export interface Logger {
   info(msg: string, fields?: Record<string, unknown>): void;
   warn(msg: string, fields?: Record<string, unknown>): void;
   error(msg: string, fields?: Record<string, unknown>): void;
+  /** Also scrub a value learned at runtime (e.g. the broker access token). */
+  addSecret(value: string): void;
 }
 
 export function createLogger(options: { level: Level; secrets: string[]; write?: (line: string) => void }): Logger {
   const write = options.write ?? ((line: string) => process.stdout.write(`${line}\n`));
+  const secrets = [...options.secrets];
   const emit = (level: Level, msg: string, fields?: Record<string, unknown>) => {
     if (RANK[level] < RANK[options.level]) return;
     const entry = { time: new Date().toISOString(), level, msg, ...fields };
     const json = JSON.stringify(entry, (_key, value: unknown) => (value instanceof Error ? { name: value.name, message: value.message } : value));
-    write(redact(json, options.secrets));
+    write(redact(json, secrets));
   };
   return {
     debug: (msg, fields) => emit("debug", msg, fields),
     info: (msg, fields) => emit("info", msg, fields),
     warn: (msg, fields) => emit("warn", msg, fields),
     error: (msg, fields) => emit("error", msg, fields),
+    addSecret: (value) => {
+      if (value.length >= 4 && !secrets.includes(value)) secrets.push(value);
+    },
   };
 }

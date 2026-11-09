@@ -9,8 +9,19 @@
   per-minute limit, and can be revoked (`npm run hub -- keys revoke <id>`).
 - **Network**: the server binds `127.0.0.1`. Remote access goes through a Cloudflare Tunnel (no
   open router ports); Cloudflare Access can add a second check in front.
-- **The broker account**: a global request budget (from milestone H1) keeps all clients together
-  inside the broker's rate limits.
+- **The broker account**: a global request budget keeps all clients together inside the broker's
+  rate limits (60% of the per-second, 80% of the per-minute and 95% of the daily limit, with
+  shares per priority). A 429 is never retried: it pauses every call for a minute and slows the
+  rest of the day; after 2 such strikes in an IST day the hub makes no more broker calls until the
+  next day (Fyers blocks an account on the 4th). Counts and strikes are saved in the database, so a
+  restart doesn't reset them. Only one process — the holder of `data/owner.lock`, normally the
+  server — ever calls the broker; a CLI backfill started while the server runs is handed to the
+  server instead.
+- **Broker login**: unattended TOTP login; the access token is cached in `data/fyers-token.json`
+  (mode 600) and is scrubbed from logs. A failed login isn't retried for 15 minutes (repeated
+  wrong-PIN attempts can lock an account).
+- **NSE**: the hub fetches NSE's public files at most once every 1.1 seconds, backs off on
+  403/429, and stops a run after three failed days in a row.
 
 ## Operating it safely
 
