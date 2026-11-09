@@ -4,7 +4,9 @@ One private service that owns the broker connection and serves Indian market dat
 F&O, indices) to all of your projects — Tradex, the Pine Lab, and anything else — over a small
 authenticated API. Free to run; secrets never leave it.
 
-Status: **plan only** (2026-11-06).
+Status (2026-11-09): **H0, H1 and H2 done** — server and keys, history and reference data, live
+prices (one socket, SSE stream, restart-proof storage and gap repair; design and the few details
+still to confirm on a live account in [h2-design.md](h2-design.md)). Next: H3.
 
 ---
 
@@ -70,7 +72,8 @@ date at UTC midnight for daily bars, as Tradex does).
 |---|---|---|
 | `GET /v1/candles?symbol&tf=1d\|1w\|1h\|15m\|5m&from&to` | OHLCV (+ delivery % on daily) | From the store; missing ranges are fetched from Fyers at background priority |
 | `GET /v1/quotes?symbols=…` | last price, change, OHLC, volume | Cached a few seconds: many clients cost one broker call |
-| `GET /v1/stream?symbols=…` | SSE: `status`, `tick` events | All clients share one upstream socket; falls back to polling |
+| `GET /v1/stream?symbols=…` | SSE: `status`, `snapshot`, `bars` replay, `tick` events | All clients share one upstream socket; falls back to polling; resumes with `Last-Event-ID`, across hub restarts too |
+| `POST`/`DELETE /v1/live/pin` | the persistent live set | Kept subscribed (and recorded minute by minute) across restarts |
 | `GET /v1/universe/{fno\|nifty50\|…}` | symbols, names, sectors | |
 | `GET /v1/fo/oi?symbol&from&to` | near/next futures, combined OI and change, buildup class | From NSE F&O bhavcopy |
 | `GET /v1/fo/members?date` | F&O list on that date | Point-in-time, for survivorship-free backtests |
@@ -126,9 +129,9 @@ Open question to test early: whether NSE's archive site accepts requests from th
 
 | # | Deliverable | Effort |
 |---|---|---|
-| **H0** | Repo skeleton, Docker + compose (hub + cloudflared), config, API-key CLI and auth, `/v1/status`, tunnel guide for the Mac | 1–2 days |
-| **H1** | History + reference data: candle store and fetch planning, Fyers history (background priority), NSE cash + F&O bhavcopy jobs, universes, lots, ban list, results calendar, regime | 3–4 days |
-| **H2** | Live: quotes cache, SSE stream from one Fyers socket with polling fallback, global budget and strike protection, TOTP login and daily refresh | 2–3 days |
+| **H0** ✅ | Repo skeleton, Docker + compose (hub + cloudflared), config, API-key CLI and auth, `/v1/status`, tunnel guide for the Mac | 1–2 days |
+| **H1** ✅ | History + reference data: candle store and fetch planning, Fyers history (background priority), NSE cash + F&O bhavcopy jobs, universes, lots, ban list, results calendar, regime | 3–4 days |
+| **H2** ✅ | Live: quotes cache, SSE stream from one Fyers socket with polling fallback, global budget and strike protection, TOTP login and daily refresh; restart-proof storage (last quotes, 1-minute bars, persistent subscriptions) and gap repair from broker 1-minute history | 2–3 days |
 | **H3** | `market-data-client` package; Tradex `hub` data source (Fyers optional in Tradex) | 2 days |
 | **H4** | Backups, freshness monitoring (status page + optional alert), Oracle VM guide, migration of existing Tradex `.cache/market.db` into the hub | 1–2 days |
 

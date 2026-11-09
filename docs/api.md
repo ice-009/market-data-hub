@@ -46,6 +46,12 @@ Common error codes: `bad_request` (400), `unauthorized` (401), `forbidden` (403,
 - Daily bars carry `dp`, the delivery % from NSE's bhavcopy (`null` when not stored).
 - The broker serves about 5 years of daily and 1 year of intraday history; earlier `from` values
   are clamped. `complete` says every final bar of the (clamped) range is stored.
+- **Current to the minute.** The newest candle is brought up to date from the hub's 1-minute live
+  bars (built from ticks, or downloaded from the broker where a gap was repaired) and later
+  buckets — today's daily bar, the hours since the last sync — are built from them; today's daily
+  bar takes its open/high/low/close/volume from the latest quote. `liveThrough` is the start of the
+  newest minute used (`null` when none). This needs live prices for the symbol (a pinned symbol, or
+  one a client is streaming); the 503 answer below gets it too.
 - Stored daily series move forward from NSE's cash bhavcopy each evening without broker calls.
   When a split or bonus is detected (NSE's `PREV_CLOSE`, or the broker's history changing), the
   symbol's stored series are dropped and downloaded again, adjusted.
@@ -55,7 +61,7 @@ GET /v1/candles?symbol=SBIN&tf=1d&from=2026-11-04&to=2026-11-05
 200
 {
   "symbol": "SBIN", "tf": "1d", "from": 1793750400000, "to": 1793836800000, "complete": true,
-  "coverage": { "from": 1792972800000, "to": 1793923200000 },
+  "coverage": { "from": 1792972800000, "to": 1793923200000 }, "liveThrough": null,
   "candles": [
     { "t": 1793750400000, "o": 348.9, "h": 351.9, "l": 347.9, "c": 349.9, "v": 1000, "dp": null },
     { "t": 1793836800000, "o": 349, "h": 352, "l": 348, "c": 350, "v": 1000, "dp": 54.1 }
@@ -298,21 +304,30 @@ async function follow(symbols, onEvent) {
 
 Pinned symbols stay subscribed whether or not a client is connected, and across restarts (with
 `HUB_LIVE_SYMBOLS`), so their minute bars are always being recorded. At most 100 (the socket's
-capacity; more would be polled against the broker budget).
+capacity; more would be polled against the broker budget). A newly pinned symbol's session so far
+is downloaded from broker 1-minute history in the background (one call), so its bars start at 09:15.
+Symbols listed in `HUB_LIVE_SYMBOLS` can't be unpinned through the API: they come back in `kept`.
 
 ```json
 POST /v1/live/pin     { "symbols": ["SBIN", "INFY"] }
-200 { "persistentSymbols": ["NIFTY", "SBIN", "INFY"], "added": ["SBIN", "INFY"] }
+200 { "persistentSymbols": ["NIFTY", "INFY", "SBIN"], "added": ["SBIN", "INFY"] }
 
-DELETE /v1/live/pin   { "symbols": ["SBIN"] }
-200 { "persistentSymbols": ["NIFTY", "INFY"], "removed": ["SBIN"] }
+DELETE /v1/live/pin   { "symbols": ["SBIN", "NIFTY"] }
+200 { "persistentSymbols": ["NIFTY", "INFY"], "removed": ["SBIN"], "kept": ["NIFTY"] }
 ```
 
 ## GET /v1/status
 
 Version, uptime, the calling key, the broker connection and today's budget, data freshness per
-dataset, recent jobs and, with live prices, a `live` section (`{ feed, persistentSymbols,
-quotesCached, streams }`). Never credentials, tokens or keys.
+dataset, recent jobs and a `live` section. Never credentials, tokens or keys.
+
+`live`: `enabled` (a broker is configured and `HUB_LIVE` isn't off), `running` (this process runs
+the feed — false while another process owns the broker connection), `feed` (the stream's `status`
+object plus `pollingStopped: "budget" | null`), `persistentSymbols` and `persistent` (with origin
+`config` or `pin` and when added), `streams`, `quotesCached`, `recovery` (`{ running, pending,
+last }`: the latest gap repair — reason `start` / `gap` / `symbols` / `resume`, calls, bars,
+skipped, failed, pending, error) and `store` (buffered writes, `lastTickAt`, and `previousRun`:
+the last tick and heartbeat the previous run left, which is where restart recovery starts).
 
 ```json
 { "service": "market-data-hub", "version": "0.1.0", "uptimeSec": 20, "key": { "name": "smoke", "scopes": ["history", "fo"] },
@@ -324,8 +339,28 @@ quotesCached, streams }`). Never credentials, tokens or keys.
     "foBhav": { "lastSession": "2026-11-05", … }, "lots": { "count": 224, "source": "nse_mktlots", … },
     "foBan": { "tradeDate": "2026-11-06", … }, "resultsCalendar": { "events": 462, … },
     "candles": [ { "tf": "1d", "series": 2, "candles": 310, "lastSession": "2026-11-06" } ] },
-  "jobs": [] }
+  "jobs": [],
+  "live": { "enabled": true, "running": true,
+    "feed": { "mode": "socket", "socket": "connected", "socketSymbols": 3, "polledSymbols": 0, "capacity": 100, "lastTickAt": 1794200401230, "reconnects": 0, "pollingStopped": null },
+    "persistentSymbols": ["NIFTY", "BANKNIFTY", "SBIN"], "persistent": [ { "symbol": "NIFTY", "origin": "config", "addedAt": 1794196500000 }, … ],
+    "streams": 1, "quotesCached": 0,
+    "recovery": { "running": false, "pending": 0, "last": { "reason": "start", "startedAt": 1794200100000, "finishedAt": 1794200173000, "planned": 3, "calls": 3, "bars": 21, "skipped": 0, "failed": 0, "pending": 0 } },
+    "store": { "bufferedQuotes": 0, "bufferedBars": 2, "symbolsSeen": 3, "lastTickAt": 1794200401230, "lastPruneAt": 1794200100000,
+      "previousRun": { "lastTickAt": 1794199680000, "aliveAt": 1794199690000 } } } }
 ```
+
+## After a restart
+
+What the hub does by itself when it starts again (details in [h2-design.md](h2-design.md)):
+
+1. The persistent set (`HUB_LIVE_SYMBOLS` + pins) is subscribed upstream before any client connects.
+2. `/v1/quotes` and stream snapshots answer from the stored last quotes (`source: "store"`) at once.
+3. The session minutes since the previous run's last tick are downloaded from broker 1-minute
+   history in the background (one call per symbol per day, 4 s apart, through the request budget),
+   once the current minute has closed. They replace any tick-built minutes.
+4. A stream client that reconnects with `Last-Event-ID` gets the snapshot, the bars it missed (the
+   repaired ones once the repair has run; reconnect again or re-request candles if it hasn't yet),
+   then live ticks. `/v1/candles` includes the repaired minutes.
 
 ## Background jobs (in the server)
 
@@ -361,7 +396,8 @@ npm run hub -- data cancel <job id>
   (09:15–15:30 IST) and when the day's background budget is spent; the server resumes paused jobs
   after the close or the next day.
 - `data status` shows the owner process, broker login and today's budget, each NSE dataset's last
-  session, candle counts, how much of the F&O universe is stored per timeframe, and recent jobs.
+  session, candle counts, how much of the F&O universe is stored per timeframe, live prices (the
+  persistent symbols, the last tick, queued or stopped gap repair) and recent jobs.
 
 ## Schema (SQLite, `data/hub.db`)
 
@@ -377,8 +413,12 @@ npm run hub -- data cancel <job id>
 | `fo_ban` | trade date → symbols |
 | `results_events` | (symbol, date) → company, purpose |
 | `datasets` | per dataset: last attempt, last success, last error, info |
-| `kv` | small hub state (the broker budget: today's counts, strikes, cooldown) |
+| `kv` | small hub state: the broker budget (today's counts, strikes, cooldown), the live heartbeat (`live.heartbeat`: when the last run was known alive) and the gap-repair queue (`live.recovery`) |
 | `jobs` | backfill jobs: params, state, progress, resume time |
+| `live_quotes` | symbol → the last tick (ltp, change, day OHLC, cumulative volume, trade and receive times, source) |
+| `live_bars_1m` | (symbol, t) → o, h, l, c, v, source `live` (from ticks) or `broker` (repaired; never replaced by a live write). Kept `HUB_LIVE_RETENTION_DAYS` |
+| `live_subscriptions` | the persistent set: symbol → origin `config` (`HUB_LIVE_SYMBOLS`) or `pin` (API), added time |
 
-Other files in the data directory: `fyers-token.json` (mode 600, the broker access token) and
-`owner.lock` (pid of the process that owns the broker/NSE connection).
+Other files in the data directory: `fyers-token.json` (mode 600, the broker access token),
+`owner.lock` (pid of the process that owns the broker/NSE connection) and `fyers-sdk/` (mode 700,
+the broker socket SDK's own log files).
