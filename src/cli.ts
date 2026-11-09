@@ -1,8 +1,10 @@
+import path from "node:path";
 import { createKey, listKeys, parseScopes, revokeKey } from "./auth/keys.js";
 import { loadConfig, secretValues } from "./config.js";
 import { openDb, type Db } from "./db.js";
 import { BASE, finalBefore, type BaseTf } from "./history/timeframes.js";
 import { createHub } from "./hub.js";
+import { ImportError, formatImportReport, importTradexLocked } from "./import/tradex.js";
 import { DEFAULT_INDICES, cancelJob, enqueueBackfill, listJobs, maxYears, recoverJobs, runBackfill, validateBackfill, type Job } from "./jobs/backfill.js";
 import { createLogger } from "./log.js";
 import { acquireOwner, ownerPid } from "./owner.js";
@@ -18,6 +20,7 @@ import { DAY_MS } from "./time.js";
 //   npm run hub -- data backfill --tf 1d --years 5 [--symbols SBIN,INFY]
 //   npm run hub -- data status
 //   npm run hub -- data cancel <job id>
+//   npm run hub -- data import-tradex --db ../tradex/.cache/market.db [--screener ../tradex/.cache/screener] [--dry-run]
 //
 // A backfill runs in this process when no hub server is running; otherwise it
 // is queued and the server (which owns the broker connection) runs it.
@@ -28,7 +31,8 @@ const USAGE = `Usage:
   hub keys revoke <id>
   hub data backfill --tf 1d|15m|5m [--years N] [--symbols SBIN,INFY,…]
   hub data status
-  hub data cancel <job id>`;
+  hub data cancel <job id>
+  hub data import-tradex --db <market.db> [--screener <dir>] [--dry-run]`;
 
 const fmt = (ms: number | null) => (ms ? `${new Date(ms).toISOString().replace("T", " ").slice(0, 19)} UTC` : "—");
 
@@ -153,6 +157,34 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     if (!jobs.length) console.log("  none");
     for (const job of jobs) console.log(`  ${jobLine(job)}`);
     return 0;
+  }
+
+  if (action === "import-tradex") {
+    const file = flag(rest, "--db");
+    if (!file) {
+      console.error("--db <path to Tradex's .cache/market.db> is required.");
+      return 1;
+    }
+    const dryRun = rest.includes("--dry-run");
+    try {
+      const report = importTradexLocked(config.dataDir, {
+        db,
+        tradexDb: path.resolve(file),
+        screenerDir: flag(rest, "--screener") ? path.resolve(flag(rest, "--screener")!) : null,
+        dryRun,
+        progress: (line) => process.stderr.write(`\r${line}   `),
+      });
+      process.stderr.write("\r");
+      for (const line of formatImportReport(report)) console.log(line);
+      if (dryRun) console.log("\nRun again without --dry-run to import (with the hub server stopped).");
+      return 0;
+    } catch (error) {
+      if (error instanceof ImportError) {
+        console.error(error.message);
+        return 1;
+      }
+      throw error;
+    }
   }
 
   if (action === "cancel") {
