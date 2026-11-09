@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { verifyKey } from "../auth/keys.js";
 import { RateLimiter } from "../auth/rateLimit.js";
 import type { Db } from "../db.js";
+import { hubHealth } from "../health.js";
 import type { Hub } from "../hub.js";
 import type { Logger } from "../log.js";
 import { brokerStatus, dataFreshness, recentJobs } from "../status.js";
@@ -49,6 +50,7 @@ export function createApp(deps: AppDeps) {
     await next();
   });
 
+  // `?strict=1` answers 503 when unhealthy, for uptime checkers that only look at the status code.
   app.get("/v1/status", (c) => {
     let dbBytes: number | null;
     try {
@@ -56,7 +58,13 @@ export function createApp(deps: AppDeps) {
     } catch {
       dbBytes = null;
     }
+    const liveNow = liveStatus(live);
+    const health = hubHealth(deps.hub, liveNow.feed);
+    const strict = ["1", "true"].includes(c.req.query("strict") ?? "");
+    const unhealthy = strict && !health.healthy ? { ...errorBody(`Unhealthy: ${health.problems.join(" ")}`, "unhealthy") } : {};
     return c.json({
+      ...unhealthy,
+      ...health,
       service: "market-data-hub",
       version: deps.version,
       time: Date.now(),
@@ -65,8 +73,8 @@ export function createApp(deps: AppDeps) {
       broker: brokerStatus(deps.hub),
       data: { dbBytes, ...dataFreshness(deps.db) },
       jobs: recentJobs(deps.db),
-      live: { ...liveStatus(live), ...deps.hub.live.status() },
-    });
+      live: { ...liveNow, ...deps.hub.live.status() },
+    }, strict && !health.healthy ? 503 : 200);
   });
 
   candleRoutes(app, deps.hub);

@@ -68,7 +68,7 @@ export function createHub(options: HubOptions): Hub {
     clock,
   });
   hub.nse = { db, nse: new NseClient({ log, fetch: options.fetch, clock }), log, urls: config.nse, clock } satisfies NseContext;
-  hub.scheduler = new Scheduler({ nse: hub.nse, backfill: { db, history: hub.history, log, clock }, log });
+  hub.scheduler = new Scheduler({ nse: hub.nse, backfill: { db, history: hub.history, log, clock }, log, ...(config.backupDir ? { backup: { db, dir: config.backupDir, keep: config.backupKeep } } : {}) });
   hub.live = new LiveService({ config, db, log, clock, client, auth, test: options.live });
   return hub;
 }

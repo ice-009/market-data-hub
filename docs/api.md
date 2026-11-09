@@ -318,8 +318,29 @@ DELETE /v1/live/pin   { "symbols": ["SBIN", "NIFTY"] }
 
 ## GET /v1/status
 
-Version, uptime, the calling key, the broker connection and today's budget, data freshness per
-dataset, recent jobs and a `live` section. Never credentials, tokens or keys.
+Health first, then version, uptime, the calling key, the broker connection and today's budget,
+data freshness per dataset, recent jobs and a `live` section. Never credentials, tokens or keys.
+
+**Health** (for people and uptime checkers): `healthy` (no problems), `problems` (strings: something
+is stale or down — worth an alert) and `warnings` (worth knowing, not an alert). `?strict=1` answers
+**503** with `code: "unhealthy"` when `healthy` is false, for checkers that only look at the status
+code. A problem is raised when:
+
+| Check | Problem when |
+|---|---|
+| Cash / F&O bhavcopy | a trading day's file isn't stored after 20:00 IST that day (days NSE had no file for — `holiday`/`mismatch` — don't count), or nothing is stored at all. Today's file missing with no sign of a session today (no live minutes, no daily bar) is only a *warning*: it may be an exchange holiday, which the hub learns from NSE the next day |
+| Lot sizes, ban list, results calendar | never fetched, or last fetched over 4 days ago |
+| Broker | configured, and the login is failing (in its retry wait), or calls are stopped for today (budget spent / strikes). Cooling down after a rate-limit warning, or another process owning the connection, is a warning |
+| Live feed | during market hours (09:15–15:30 IST, weekdays) the feed isn't running or is `down` (no socket, no polling). Socket down but polling is a warning |
+| Backups | `HUB_BACKUP_DIR` is set and it holds no backup, or the newest is over 2 days old |
+
+`HUB_JOBS=off` adds a warning (NSE files then go stale by design).
+
+```bash
+# An uptime checker (Uptime Kuma, Healthchecks, a cron + curl) with a key of its own:
+npm run hub -- keys create uptime --scopes history
+curl -fsS -H "Authorization: Bearer mdh_…" "https://data.example.com/v1/status?strict=1" > /dev/null || echo "hub unhealthy"
+```
 
 `live`: `enabled` (a broker is configured and `HUB_LIVE` isn't off), `running` (this process runs
 the feed — false while another process owns the broker connection), `feed` (the stream's `status`
@@ -330,7 +351,8 @@ skipped, failed, pending, error) and `store` (buffered writes, `lastTickAt`, and
 the last tick and heartbeat the previous run left, which is where restart recovery starts).
 
 ```json
-{ "service": "market-data-hub", "version": "0.1.0", "uptimeSec": 20, "key": { "name": "smoke", "scopes": ["history", "fo"] },
+{ "healthy": true, "problems": [], "warnings": [],
+  "service": "market-data-hub", "version": "0.1.0", "uptimeSec": 20, "key": { "name": "smoke", "scopes": ["history", "fo"] },
   "broker": { "configured": true, "connected": true, "ownsConnection": true, "lastLoginAt": 1793946107241, "lastLoginError": null, "loginRetryAfter": null,
     "budget": { "plan": "standard", "usedToday": 4, "dayCap": 4750, "usedThisMinute": 4, "minuteCap": 40,
       "byPriority": { "user": 0, "refresh": 0, "background": 4 }, "strikes": 0, "slowed": false, "coolingDown": false, "stoppedForToday": false } },
@@ -372,8 +394,10 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
   The trade date inside each file must match the day asked for; a file for another date is
   recorded as `mismatch` and asked for again in the evening.
 - **Queued backfills** from the CLI, one at a time.
+- **Nightly backup** when `HUB_BACKUP_DIR` is set: once a day (at least 22 hours apart), never
+  between 08:45 and 16:00 IST on weekdays, keeping the newest `HUB_BACKUP_KEEP` (default 7).
 
-`HUB_JOBS=off` disables both.
+`HUB_JOBS=off` disables all three.
 
 ## Admin CLI
 
@@ -382,6 +406,8 @@ npm run hub -- data backfill --tf 1d --years 5                  # F&O stocks + N
 npm run hub -- data backfill --tf 15m --years 1 --symbols SBIN,INFY
 npm run hub -- data status
 npm run hub -- data cancel <job id>
+npm run hub -- data backup [--to ./backups] [--keep 7]
+npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tradex .cache/screener>] [--dry-run]
 ```
 
 (In Docker: `docker compose exec hub node dist/cli.js data status`.)
@@ -395,9 +421,50 @@ npm run hub -- data cancel <job id>
   are skipped, so re-running continues where it stopped. It **pauses in market hours**
   (09:15–15:30 IST) and when the day's background budget is spent; the server resumes paused jobs
   after the close or the next day.
-- `data status` shows the owner process, broker login and today's budget, each NSE dataset's last
+- `data status` starts with the same health check as `/v1/status` (without the live feed, which
+  only the server can see), then shows the owner process, broker login and today's budget, each NSE dataset's last
   session, candle counts, how much of the F&O universe is stored per timeframe, live prices (the
   persistent symbols, the last tick, queued or stopped gap repair) and recent jobs.
+
+### data backup
+
+A consistent snapshot through SQLite's online backup API — **safe while the server runs**. Written
+as `hub-YYYYMMDD-HHMMSS.db` (UTC) under a temporary name, switched to a single self-contained file
+(no `-wal`/`-shm`), checked with `quick_check`, then renamed into place; older ones beyond `--keep`
+(default `HUB_BACKUP_KEEP`, 7) are deleted. `--to` defaults to `HUB_BACKUP_DIR`, else `./backups`.
+
+**Restore:** stop the hub; copy the backup over `hub.db` in `HUB_DATA_DIR`; delete `hub.db-wal` and
+`hub.db-shm` next to it; start the hub. (The broker token file isn't in the backup; the hub logs
+in again.) Keep a copy off the machine too — see [oracle.md](oracle.md#backups).
+
+### data import-tradex
+
+Brings a Tradex install's stored data into the hub, without broker or NSE calls. Step by step:
+[migrate-tradex.md](migrate-tradex.md).
+
+- **Refuses while a hub server owns the data directory** (`owner.lock`); stop the server first.
+  `--dry-run` only reads, so it may run alongside it.
+- **Candles** from Tradex's `series`/`candles`: `NSE:SBIN-EQ:D|15|5` → `SBIN` `1d|15m|5m`;
+  `NSE:NIFTY50-INDEX` → `NIFTY` (and the other indices the hub knows). Other resolutions, BSE and
+  non-equity keys are skipped and listed. Coverage claimed = from Tradex's `covered_from` (rounded up
+  to a bar) to the end of its newest bar, but never past the bars that were final when Tradex synced
+  — a bar stored mid-session is left out and fetched by the hub like any tail. A series with a
+  malformed bar is skipped whole. When the hub already has the series: already covered → unchanged;
+  ranges touch or overlap → only bars outside the hub's coverage are added and the coverage grows
+  (the hub's own bars win); a gap between them → skipped; overlapping closes differ by over 1 %
+  (split/bonus adjusted on one side only) → skipped.
+- **Cash bhavcopy** (delivery %) from `screener/bhav/DDMMYYYY.json`. Tradex never checked the date
+  inside NSE's file, so each day is checked against stored daily closes (≥ 90 % of the symbols
+  within 0.5 % when at least 5 can be compared); a day with no session in the candles, or a file
+  identical to its neighbour's that the candles can't place, is skipped. Imported days are marked
+  `ok` in `nse_days` with note `imported from Tradex`, and `series` is recorded as `EQ/BE` (Tradex's
+  cache doesn't say which). `null` files become `holiday` unless the candles show a session.
+  `screener/daily/*.json` isn't imported (no coverage record); the report counts what it holds.
+- **F&O bhavcopy**: `fo_bhav_days` + `fo_futures` copied as they are (same parser and columns). A
+  day the hub already has stays; a stored file replaces a hub `holiday`/`mismatch`; a day whose row
+  count doesn't match its record is skipped.
+- Each series and day is its own transaction; anything already in the hub is left alone, so a
+  second run changes nothing and an interrupted run can simply be run again.
 
 ## Schema (SQLite, `data/hub.db`)
 
@@ -406,8 +473,8 @@ npm run hub -- data cancel <job id>
 | `api_keys` | key hashes, scopes, last use (H0) |
 | `series` | per (symbol, tf ∈ 1d/15m/5m): coverage `[covered_from, covered_to)` of final bars, `synced_at`, count, first/last bar |
 | `candles` | (symbol, tf, t) → o, h, l, c, v |
-| `nse_days` | per (dataset ∈ cash_bhav/fo_bhav, day): `ok` / `holiday` / `mismatch`, rows, checked time |
-| `cash_bhav` | (symbol, day) → series, prev close, OHLC, volume, delivery % |
+| `nse_days` | per (dataset ∈ cash_bhav/fo_bhav, day): `ok` / `holiday` / `mismatch`, rows, checked time, note (`imported from Tradex` for imported days) |
+| `cash_bhav` | (symbol, day) → series (`EQ`/`BE`; `EQ/BE` on days imported from Tradex), prev close, OHLC, volume, delivery % |
 | `fo_futures` | (day, symbol) → near/next month close, settle, prev close, volume, OI, ΔOI; combined OI and ΔOI; lot; underlying |
 | `lot_sizes` | symbol → lot |
 | `fo_ban` | trade date → symbols |

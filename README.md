@@ -25,9 +25,10 @@ notebook, a bot) asks the hub for data with an API key instead of talking to the
 - **Code public, data private.** The code is MIT. The data belongs to *your* broker subscription
   and NSE's terms — so this is a private API for your own projects, not a public data service.
 
-> **Status:** milestones **H0** (server, keys, Docker, tunnel), **H1** (history and reference data)
-> and **H2** (live quotes, one shared broker socket, a Server-Sent Events stream that survives hub
-> restarts) are done. Next: a TypeScript client and the Tradex data source (H3). See the
+> **Status:** milestones **H0** (server, keys, Docker, tunnel), **H1** (history and reference data),
+> **H2** (live quotes, one shared broker socket, a Server-Sent Events stream that survives hub
+> restarts) and **H4** (backups, health monitoring, the Oracle Cloud guide, importing Tradex's
+> stored data) are done. In progress: a TypeScript client and the Tradex data source (H3). See the
 > [roadmap](#roadmap). Endpoints below are marked ✅ (works today) or 🚧 (planned).
 
 ---
@@ -141,6 +142,9 @@ curl -H "Authorization: Bearer mdh_Zm9vYmFyLi4u…" http://127.0.0.1:8787/v1/sta
 
 ```json
 {
+  "healthy": false,
+  "problems": ["Cash bhavcopy: nothing stored yet.", "…"],
+  "warnings": [],
   "service": "market-data-hub",
   "version": "0.1.0",
   "time": 1793944324209,
@@ -381,6 +385,8 @@ environment in Docker). Copy [.env.example](.env.example) to start.
 | `HUB_LIVE` | `on` | Live prices (socket, polling, gap repair). Only runs with a broker configured; `off` = stored quotes and bars only. |
 | `HUB_LIVE_SYMBOLS` | `NIFTY,BANKNIFTY` | Symbols always subscribed (comma-separated, at most 100), on top of those pinned through the API. Empty = none. |
 | `HUB_LIVE_RETENTION_DAYS` | `30` | Days of 1-minute live bars kept (last quotes are kept forever, one row per symbol). |
+| `HUB_BACKUP_DIR` | — | Set it to back the database up there every night (outside market hours). Empty = no scheduled backups. |
+| `HUB_BACKUP_KEEP` | `7` | Backups kept (nightly and `hub data backup`); older ones are deleted. |
 | `FYERS_CLIENT_ID` | — | Fyers app ID, e.g. `ABCD1234EF-100`. |
 | `FYERS_SECRET_KEY` | — | Fyers app secret. |
 | `FYERS_FY_ID` | — | Your Fyers login ID. |
@@ -429,10 +435,20 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 - **Logs** are JSON lines on stdout (`docker compose logs -f hub`). Set `HUB_LOG_LEVEL=debug` when
   investigating. Secrets are scrubbed before anything is written.
 - **Data** lives in `HUB_DATA_DIR` (default `./data`): `hub.db` plus SQLite's `-wal`/`-shm` files.
-  Back it up with the hub stopped, or with `sqlite3 data/hub.db ".backup backup.db"` while running.
+- **Backups:** `npm run hub -- data backup [--to ./backups] [--keep 7]` takes a checked, consistent
+  copy while the hub runs (SQLite's online backup) and keeps the newest 7. Set `HUB_BACKUP_DIR` to
+  have the server do it every night. **Restore:** stop the hub, copy a backup over `hub.db` in
+  `HUB_DATA_DIR`, delete `hub.db-wal` and `hub.db-shm`, start it. Keep copies off the machine too.
+- **Health:** `/v1/status` starts with `healthy`, `problems` and `warnings` — stale NSE files (a
+  trading day's file not stored by 20:00 IST), reference files not refreshed in 4 days, broker login
+  failing or stopped for the day, the live feed down during market hours, backups over 2 days old.
+  Point an uptime checker at `/v1/status?strict=1` (503 when unhealthy) with a key of its own.
+- **Coming from Tradex?** `npm run hub -- data import-tradex --db <Tradex .cache/market.db>
+  --screener <.cache/screener> --dry-run` shows what Tradex's stored candles, delivery % and F&O
+  history would bring; the whole move is in [docs/migrate-tradex.md](docs/migrate-tradex.md).
 - **Updating:** `git pull && npm install && npm run build` (or `docker compose up -d --build`).
   Database migrations run automatically at start-up.
-- **Status at a glance:** `npm run hub -- data status` (or `GET /v1/status`) shows the broker
+- **Status at a glance:** `npm run hub -- data status` (or `GET /v1/status`) shows the health check, the broker
   connection and today's budget, dataset freshness, and a live line: the persistent symbols, when
   the last tick arrived and whether a gap repair is queued or stopped.
 - **Live prices:** the socket opens at 09:15 IST and closes after 15:30 on weekdays. In
@@ -448,7 +464,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
   (System Settings → Energy) or move the same Docker setup to an always-on machine later. If it
   slept, the minutes it missed are repaired from broker history when it wakes up and reconnects.
 - **Free always-on option:** an Oracle Cloud Always Free ARM VM in an Indian region runs the same
-  compose file. A step-by-step guide is planned for H4.
+  compose file, behind the same tunnel with no open ports: [docs/oracle.md](docs/oracle.md).
 
 ---
 
@@ -458,7 +474,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 market-data-hub/
 ├─ src/
 │  ├─ server.ts          # entry point: config → database → HTTP server, graceful shutdown
-│  ├─ cli.ts             # admin CLI (API keys, backfills, data status)
+│  ├─ cli.ts             # admin CLI (API keys, backfills, data status, backup, import-tradex)
 │  ├─ config.ts          # environment parsing; broker secrets kept apart for the scrubber
 │  ├─ log.ts             # JSON logger + secret scrubber (the only way the server logs)
 │  ├─ db.ts              # SQLite (WAL) + ordered migrations
@@ -467,12 +483,15 @@ market-data-hub/
 │  │  └─ rateLimit.ts    # per-key token bucket
 │  ├─ owner.ts           # owner lock: one process at a time talks to the broker and NSE
 │  ├─ hub.ts             # wires the services below for one process
+│  ├─ health.ts          # healthy / problems / warnings for /v1/status and `data status`
+│  ├─ backup.ts          # online SQLite backups, rotation, the nightly schedule
 │  ├─ broker/            # Fyers: login, request budget, history + quotes, the data socket
 │  ├─ history/           # candle store, fetch planning, resampling
 │  ├─ nse/               # NSE daily files: parsers, downloads, store
 │  ├─ live/              # live prices: feed, store (quotes, 1-minute bars), gap repair,
 │  │                     #   candle merge, stream fan-out, and service.ts wiring them
-│  ├─ jobs/              # scheduler and backfill jobs
+│  ├─ jobs/              # scheduler (NSE files, backfills, nightly backup) and backfill jobs
+│  ├─ import/            # `data import-tradex`: Tradex's stored data → the hub (mapping rules in tradexMap.ts)
 │  └─ http/
 │     ├─ app.ts          # Hono app: /healthz, auth middleware, requireScope, /v1/status, errors
 │     └─ routes/         # candles, reference data, live (quotes, stream, pins)
@@ -480,6 +499,8 @@ market-data-hub/
 ├─ docs/
 │  ├─ api.md             # API and CLI reference
 │  ├─ h2-design.md       # live prices: design, restart recovery, what's unverified
+│  ├─ migrate-tradex.md  # moving Tradex onto the hub, with its data
+│  ├─ oracle.md          # always-on on an Oracle Cloud Always Free ARM VM
 │  ├─ plan.md            # design and milestones
 │  └─ tunnel.md          # Cloudflare Tunnel guide
 ├─ Dockerfile            # multi-stage, non-root, /data volume, health check
@@ -566,7 +587,7 @@ F&O open interest and membership.
 | **H1** | History and reference data: broker login and request budget, candle store, NSE cash and F&O bhavcopy, universes, lots, ban list, results calendar, regime | ✅ done |
 | **H2** | Live: quotes cache, one shared broker socket with polling fallback, Server-Sent Events stream, restart-proof storage and gap repair | ✅ done (a few broker details still to confirm on a live account — see [docs/h2-design.md](docs/h2-design.md#not-yet-verified-against-a-live-account)) |
 | **H3** | TypeScript client package; a `hub` data source in Tradex | 🚧 |
-| **H4** | Backups, freshness monitoring, Oracle Cloud guide, importing Tradex's stored data | 🚧 |
+| **H4** | Backups (online, rotated, nightly), health in `/v1/status` for uptime checks, [Oracle Cloud guide](docs/oracle.md), [importing Tradex's stored data](docs/migrate-tradex.md) | ✅ done |
 
 Design details: [docs/plan.md](docs/plan.md).
 
