@@ -18,8 +18,11 @@ function main() {
   // server; if a CLI backfill holds it, serve the store and take over when it exits.
   let release = acquireOwner(config.dataDir);
   const hub = createHub({ config, db, log, owner: release !== null });
+  // Owner-only work: background jobs and live prices (which resume their subscriptions and repair
+  // the minutes missed while the hub was down — see src/live/service.ts).
   const startJobs = () => {
     if (config.jobsEnabled) hub.scheduler.start();
+    hub.live.start();
   };
   let ownerRetry: ReturnType<typeof setInterval> | null = null;
   if (release) startJobs();
@@ -46,20 +49,37 @@ function main() {
   });
 
   const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
-    log.info("listening", { host: config.host, port: info.port, version, broker: brokerConfigured(config.secrets) ? "configured" : "not configured", jobs: config.jobsEnabled ? "on" : "off" });
+    log.info("listening", {
+      host: config.host,
+      port: info.port,
+      version,
+      broker: brokerConfigured(config.secrets) ? "configured" : "not configured",
+      jobs: config.jobsEnabled ? "on" : "off",
+      live: hub.live.running ? "on" : config.liveEnabled && brokerConfigured(config.secrets) ? "waiting for the owner lock" : "off",
+    });
   });
 
+  let stopping = false;
   const stop = (signal: string) => {
+    if (stopping) return;
+    stopping = true;
     log.info("shutting down", { signal });
-    hub.scheduler.stop();
-    if (ownerRetry) clearInterval(ownerRetry);
-    hub.gate?.flush();
-    server.close(() => {
-      release?.();
-      db.close();
-      process.exit(0);
-    });
     setTimeout(() => process.exit(1), 10_000).unref();
+    if (ownerRetry) clearInterval(ownerRetry);
+    // Live first: end the streams (so server.close isn't held open by them), close the
+    // broker socket, then write the buffered quotes and minute bars.
+    void hub.live
+      .stop()
+      .catch((error: unknown) => log.error("live shutdown failed", { error }))
+      .finally(() => {
+        hub.scheduler.stop();
+        hub.gate?.flush();
+        server.close(() => {
+          release?.();
+          db.close();
+          process.exit(0);
+        });
+      });
   };
   process.on("SIGINT", () => stop("SIGINT"));
   process.on("SIGTERM", () => stop("SIGTERM"));
