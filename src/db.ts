@@ -11,6 +11,7 @@ import Database from "better-sqlite3";
 //   1  series + candles        broker history per (symbol, base timeframe); see src/history/store.ts
 //   2  NSE datasets            nse_days, cash_bhav, fo_futures, lot_sizes, fo_ban, results_events, datasets
 //   3  hub state               kv (broker budget), jobs (queued backfills)
+//   4  live prices             live_quotes, live_bars_1m, live_subscriptions; see src/live/store.ts
 
 export type Db = Database.Database;
 
@@ -122,6 +123,40 @@ const MIGRATIONS: string[] = [
      finished_at integer,
      updated_at integer not null
    );`,
+  // Live prices (H2). live_quotes: the last tick per symbol, so quotes survive a
+  // restart. live_bars_1m: ticks folded into minute bars ('live') or minutes
+  // downloaded to repair a gap ('broker', authoritative — a live write never
+  // replaces one). The primary key serves (symbol, t) range reads; the index on t
+  // serves the retention sweep. live_subscriptions: symbols kept subscribed
+  // across restarts ('config' from HUB_LIVE_SYMBOLS, 'pin' from the API).
+  `create table live_quotes (
+     symbol text primary key,
+     ltp real not null,
+     ch real not null,
+     chp real not null,
+     open real not null,
+     high real not null,
+     low real not null,
+     prev_close real not null,
+     volume real not null,
+     ltt integer not null,
+     ts integer not null,
+     source text not null,
+     updated_at integer not null
+   ) without rowid;
+   create table live_bars_1m (
+     symbol text not null,
+     t integer not null,
+     o real not null, h real not null, l real not null, c real not null, v real not null,
+     source text not null check (source in ('live', 'broker')),
+     primary key (symbol, t)
+   ) without rowid;
+   create index live_bars_1m_t on live_bars_1m (t);
+   create table live_subscriptions (
+     symbol text primary key,
+     added_at integer not null,
+     origin text not null check (origin in ('config', 'pin'))
+   ) without rowid;`,
 ];
 
 /** Small JSON values the hub keeps between restarts (e.g. the broker budget). */
