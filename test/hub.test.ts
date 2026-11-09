@@ -32,6 +32,17 @@ describe("config", () => {
     expect(() => loadConfig({ HUB_LOG_LEVEL: "loud" })).toThrow(ConfigError);
   });
 
+  it("reads and validates the live settings", () => {
+    const defaults = loadConfig({});
+    expect(defaults).toMatchObject({ liveEnabled: true, liveSymbols: ["NIFTY", "BANKNIFTY"], liveRetentionDays: 30 });
+    expect(loadConfig({ HUB_LIVE: "OFF", HUB_LIVE_SYMBOLS: " sbin, NIFTY ,sbin,", HUB_LIVE_RETENTION_DAYS: "7" })).toMatchObject({ liveEnabled: false, liveSymbols: ["SBIN", "NIFTY"], liveRetentionDays: 7 });
+    expect(loadConfig({ HUB_LIVE_SYMBOLS: "" }).liveSymbols).toEqual([]);
+    expect(() => loadConfig({ HUB_LIVE: "yes" })).toThrow(ConfigError);
+    expect(() => loadConfig({ HUB_LIVE_SYMBOLS: "SBIN,BAD:SYM" })).toThrow(/HUB_LIVE_SYMBOLS/);
+    expect(() => loadConfig({ HUB_LIVE_SYMBOLS: Array.from({ length: 101 }, (_, i) => `S${i}`).join(",") })).toThrow(/at most 100/);
+    expect(() => loadConfig({ HUB_LIVE_RETENTION_DAYS: "0" })).toThrow(ConfigError);
+  });
+
   it("knows whether a broker is configured without exposing it", () => {
     expect(brokerConfigured(loadConfig({}).secrets)).toBe(false);
     const config = loadConfig(SECRETS);
