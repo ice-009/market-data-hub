@@ -1,3 +1,5 @@
+import { backupDb, backupDue, listBackups } from "../backup.js";
+import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
 import { recentDays, refreshBan, refreshLots, refreshResults, syncDays, type NseContext } from "../nse/datasets.js";
 import { latestBan, readRuns, type DatasetName, type DatasetRun } from "../nse/store.js";
@@ -12,6 +14,7 @@ import { nextRunnableJob, recoverJobs, runBackfill, type BackfillDeps } from "./
 //     once NSE has published it. Lots, the F&O ban list and the results
 //     calendar are refreshed once each evening (and on start when stale).
 //   - queued backfill jobs (from `hub data backfill`), one at a time.
+//   - a nightly database backup when HUB_BACKUP_DIR is set (src/backup.ts).
 // Every attempt is spaced at least RETRY_MS from the last one per dataset, so a
 // file NSE hasn't published yet costs one request every half hour.
 
@@ -73,12 +76,15 @@ export interface SchedulerDeps {
   nse: NseContext;
   backfill: BackfillDeps;
   log: Logger;
+  /** Nightly backups; absent when HUB_BACKUP_DIR isn't set. */
+  backup?: { db: Db; dir: string; keep: number };
 }
 
 export class Scheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private nseBusy = false;
   private jobBusy = false;
+  private backupBusy = false;
   private stopping = false;
 
   constructor(private readonly deps: SchedulerDeps) {}
@@ -97,7 +103,23 @@ export class Scheduler {
 
   /** One round: start NSE refreshes and a queued job if due (each runs in the background). */
   async tick() {
-    await Promise.all([this.nseRound(), this.jobRound()]);
+    await Promise.all([this.nseRound(), this.jobRound(), this.backupRound()]);
+  }
+
+  private async backupRound() {
+    const backup = this.deps.backup;
+    if (!backup || this.backupBusy || this.stopping) return;
+    const now = this.deps.nse.clock();
+    if (!backupDue(now, listBackups(backup.dir)[0]?.at ?? null)) return;
+    this.backupBusy = true;
+    try {
+      const result = await backupDb(backup.db, backup.dir, backup.keep, now);
+      this.deps.log.info("database backed up", { file: result.file, bytes: result.bytes, removed: result.removed.length });
+    } catch (error) {
+      this.deps.log.error("database backup failed", { error });
+    } finally {
+      this.backupBusy = false;
+    }
   }
 
   private async nseRound() {

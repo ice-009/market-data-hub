@@ -31,6 +31,10 @@ export interface Config {
   liveSymbols: string[];
   /** Days of 1-minute live bars kept. */
   liveRetentionDays: number;
+  /** Nightly backups go here (HUB_BACKUP_DIR); null = no scheduled backups. */
+  backupDir: string | null;
+  /** Backups kept (newest first) by the nightly backup and `hub data backup`. */
+  backupKeep: number;
   fyers: FyersConfig;
   /** NSE hosts (overridable for testing against a local server). */
   nse: { archiveUrl: string; wwwUrl: string };
@@ -111,6 +115,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     liveEnabled: onOff(env, "HUB_LIVE", true),
     liveSymbols: symbolList(env, "HUB_LIVE_SYMBOLS", "NIFTY,BANKNIFTY"),
     liveRetentionDays: int(env, "HUB_LIVE_RETENTION_DAYS", 30, 1, 3650),
+    backupDir: env.HUB_BACKUP_DIR ? path.resolve(env.HUB_BACKUP_DIR) : null,
+    backupKeep: int(env, "HUB_BACKUP_KEEP", 7, 1, 365),
     fyers: fyersConfig(env),
     nse: {
       archiveUrl: (env.NSE_ARCHIVE_URL || "https://nsearchives.nseindia.com").replace(/\/+$/, ""),

@@ -1,8 +1,10 @@
 import path from "node:path";
+import { backupDb } from "./backup.js";
 import { createKey, listKeys, parseScopes, revokeKey } from "./auth/keys.js";
 import { loadConfig, secretValues } from "./config.js";
 import { openDb, type Db } from "./db.js";
 import { BASE, finalBefore, type BaseTf } from "./history/timeframes.js";
+import { hubHealth } from "./health.js";
 import { createHub } from "./hub.js";
 import { ImportError, formatImportReport, importTradexLocked } from "./import/tradex.js";
 import { DEFAULT_INDICES, cancelJob, enqueueBackfill, listJobs, maxYears, recoverJobs, runBackfill, validateBackfill, type Job } from "./jobs/backfill.js";
@@ -20,6 +22,7 @@ import { DAY_MS } from "./time.js";
 //   npm run hub -- data backfill --tf 1d --years 5 [--symbols SBIN,INFY]
 //   npm run hub -- data status
 //   npm run hub -- data cancel <job id>
+//   npm run hub -- data backup [--to ./backups] [--keep 7]
 //   npm run hub -- data import-tradex --db ../tradex/.cache/market.db [--screener ../tradex/.cache/screener] [--dry-run]
 //
 // A backfill runs in this process when no hub server is running; otherwise it
@@ -32,6 +35,7 @@ const USAGE = `Usage:
   hub data backfill --tf 1d|15m|5m [--years N] [--symbols SBIN,INFY,…]
   hub data status
   hub data cancel <job id>
+  hub data backup [--to <dir>] [--keep N]
   hub data import-tradex --db <market.db> [--screener <dir>] [--dry-run]`;
 
 const fmt = (ms: number | null) => (ms ? `${new Date(ms).toISOString().replace("T", " ").slice(0, 19)} UTC` : "—");
@@ -127,6 +131,12 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     const fresh = dataFreshness(db);
     const broker = brokerStatus(hub);
     const pid = ownerPid(config.dataDir);
+    // The live feed runs in the server process and can't be seen from here (see /v1/status for it).
+    const health = hubHealth({ ...hub, owner: pid !== null }, null);
+    console.log(health.healthy ? "Health: OK" : `Health: ${health.problems.length} problem(s)`);
+    for (const problem of health.problems) console.log(`  ✗ ${problem}`);
+    for (const warning of health.warnings) console.log(`  ! ${warning}`);
+    console.log("");
     console.log(`Owner process: ${pid ? `pid ${pid}` : "none (no hub server running)"}`);
     console.log(`Broker: ${broker.configured ? "configured" : "not configured"}, ${broker.connected ? "token valid" : "no valid token"}, last login ${fmt(broker.lastLoginAt)}${broker.lastLoginError ? `, last error: ${broker.lastLoginError}` : ""}`);
     if (broker.budget) console.log(`Budget today: ${broker.budget.usedToday} calls (user ${broker.budget.byPriority.user}, background ${broker.budget.byPriority.background}), strikes ${broker.budget.strikes}`);
@@ -156,6 +166,21 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     console.log("\nRecent jobs:");
     if (!jobs.length) console.log("  none");
     for (const job of jobs) console.log(`  ${jobLine(job)}`);
+    return 0;
+  }
+
+  if (action === "backup") {
+    // Safe while the server runs: SQLite's online backup copies a consistent snapshot.
+    const dir = path.resolve(flag(rest, "--to") ?? config.backupDir ?? "backups");
+    const keepRaw = flag(rest, "--keep");
+    const keep = keepRaw === undefined ? config.backupKeep : Number(keepRaw);
+    if (!Number.isInteger(keep) || keep < 1) {
+      console.error("--keep must be a whole number of at least 1.");
+      return 1;
+    }
+    const result = await backupDb(db, dir, keep);
+    console.log(`Backed up to ${result.file} (${(result.bytes / 1e6).toFixed(1)} MB, checked).${result.removed.length ? ` Removed ${result.removed.length} older backup(s); keeping ${keep}.` : ""}`);
+    console.log("Restore: stop the hub, copy the file over hub.db in HUB_DATA_DIR, delete hub.db-wal and hub.db-shm, start the hub.");
     return 0;
   }
 
