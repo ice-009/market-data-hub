@@ -4,9 +4,11 @@ One private service that owns the broker connection and serves Indian market dat
 F&O, indices) to all of your projects — Tradex, the Pine Lab, and anything else — over a small
 authenticated API. Free to run; secrets never leave it.
 
-Status (2026-11-09): **H0, H1 and H2 done** — server and keys, history and reference data, live
+Status (2026-11-09): **H0, H1, H2 and H4 done** — server and keys, history and reference data, live
 prices (one socket, SSE stream, restart-proof storage and gap repair; design and the few details
-still to confirm on a live account in [h2-design.md](h2-design.md)). Next: H3.
+still to confirm on a live account in [h2-design.md](h2-design.md)), and operations: backups,
+health monitoring, the [Oracle VM guide](oracle.md) and the [Tradex data import](migrate-tradex.md).
+In progress: H3 (the Tradex `hub` data source).
 
 ---
 
@@ -51,7 +53,7 @@ still to confirm on a live account in [h2-design.md](h2-design.md)). Next: H3.
   no Next.js. One process; background jobs in-process.
 - **Packaging**: Docker image + `docker compose` (hub + `cloudflared`). Also runs with plain
   `npm start` for development.
-- **Storage**: one SQLite file in a mounted volume, WAL mode, nightly backup copy.
+- **Storage**: one SQLite file in a mounted volume, WAL mode, nightly backup copy (`HUB_BACKUP_DIR`).
   Size estimate: 5 years daily × ~250 symbols ≈ 0.3 M rows; 1 year of 15-minute ≈ 1.4 M rows;
   1 year of 5-minute ≈ 4 M rows — a few hundred MB.
 
@@ -133,7 +135,19 @@ Open question to test early: whether NSE's archive site accepts requests from th
 | **H1** ✅ | History + reference data: candle store and fetch planning, Fyers history (background priority), NSE cash + F&O bhavcopy jobs, universes, lots, ban list, results calendar, regime | 3–4 days |
 | **H2** ✅ | Live: quotes cache, SSE stream from one Fyers socket with polling fallback, global budget and strike protection, TOTP login and daily refresh; restart-proof storage (last quotes, 1-minute bars, persistent subscriptions) and gap repair from broker 1-minute history | 2–3 days |
 | **H3** | `market-data-client` package; Tradex `hub` data source (Fyers optional in Tradex) | 2 days |
-| **H4** | Backups, freshness monitoring (status page + optional alert), Oracle VM guide, migration of existing Tradex `.cache/market.db` into the hub | 1–2 days |
+| **H4** ✅ | Backups, freshness monitoring (status page + optional alert), Oracle VM guide, migration of existing Tradex `.cache/market.db` into the hub | 1–2 days |
+
+### H4 as built
+
+- **Import** (`hub data import-tradex`): candles keep Tradex's coverage honestly (from
+  `covered_from` to the last bar that was final when Tradex synced; forming bars left out), merge
+  into existing hub series only where the ranges touch, and skip series whose closes disagree
+  (split adjusted on one side). Cached cash bhavcopies are checked against daily closes because
+  Tradex never checked the date inside NSE's file — on a real install this caught two holidays NSE
+  had answered with the previous day's file. F&O days are copied as they are. Idempotent, one
+  transaction per series/day, refuses while a server owns the data directory.
+- **Alerts** are pull-based: `/v1/status?strict=1` answers 503 when unhealthy, so any uptime checker
+  can alert; the hub sends nothing itself.
 
 Total ≈ 2 weeks. Tests: unit tests for parsers, budget and auth; an end-to-end test with a mock
 broker server (Tradex already supports overriding Fyers endpoints for this).
