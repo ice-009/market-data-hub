@@ -144,6 +144,10 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
       const stored = symbols.filter((symbol) => hub.history.isStored(symbol, tf, want)).length;
       console.log(`  ${tf.padEnd(4)} ${years}y: ${stored}/${symbols.length} stored`);
     }
+    const live = hub.live.status();
+    const recovery = live.recovery?.last;
+    console.log(`\nLive prices: ${live.enabled ? "on" : "off"}; persistent ${live.persistent.map((entry) => entry.symbol).join(", ") || "none"}`);
+    console.log(`  last tick ${fmt(live.store.previousRun.lastTickAt)}   recovery: ${live.recovery ? `${live.recovery.pending} task(s) queued, last run ${recovery ? `${fmt(recovery.startedAt)} (${recovery.calls} calls, ${recovery.bars} bars${recovery.error ? `, stopped: ${recovery.error}` : ""})` : "never"}` : "—"}`);
     const jobs = listJobs(db, 5);
     console.log("\nRecent jobs:");
     if (!jobs.length) console.log("  none");

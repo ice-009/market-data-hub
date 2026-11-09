@@ -8,6 +8,7 @@ import type { Logger } from "../log.js";
 import { brokerStatus, dataFreshness, recentJobs } from "../status.js";
 import { errorBody, type HubEnv } from "./common.js";
 import { candleRoutes } from "./routes/candles.js";
+import { liveRoutes, liveStatus, type LiveDeps } from "./routes/live.js";
 import { referenceRoutes } from "./routes/reference.js";
 
 export { errorBody, requireScope, type HubEnv } from "./common.js";
@@ -26,11 +27,14 @@ export interface AppDeps {
   startedAt: number;
   keyRatePerMinute: number;
   hub: Hub;
+  /** Live routes' dependencies; default the hub's (tests pass fakes). */
+  live?: LiveDeps;
 }
 
 export function createApp(deps: AppDeps) {
   const app = new Hono<HubEnv>();
   const limiter = new RateLimiter(deps.keyRatePerMinute);
+  const live = deps.live ?? deps.hub.live.deps;
 
   app.get("/healthz", (c) => c.text("ok"));
 
@@ -61,11 +65,14 @@ export function createApp(deps: AppDeps) {
       broker: brokerStatus(deps.hub),
       data: { dbBytes, ...dataFreshness(deps.db) },
       jobs: recentJobs(deps.db),
+      live: { ...liveStatus(live), ...deps.hub.live.status() },
     });
   });
 
   candleRoutes(app, deps.hub);
   referenceRoutes(app, deps.hub);
+  // The live routes share one fan-out per hub (keyed on hub.live.deps); the hub closes their streams at shutdown.
+  deps.hub.live.attach(liveRoutes(app, live));
 
   app.notFound((c) => c.json(errorBody("Not found.", "not_found"), 404));
   app.onError((error, c) => {

@@ -7,6 +7,7 @@ import { FyersAuth } from "./broker/fyersAuth.js";
 import { BrokerGate } from "./broker/gate.js";
 import { HistoryService } from "./history/service.js";
 import { Scheduler } from "./jobs/scheduler.js";
+import { LiveService, type LiveTestHooks } from "./live/service.js";
 import type { Logger } from "./log.js";
 import { NseClient } from "./nse/client.js";
 import type { NseContext } from "./nse/datasets.js";
@@ -15,17 +16,22 @@ import type { NseContext } from "./nse/datasets.js";
 // whether this process holds the owner lock (src/owner.ts): only the owner may
 // call the broker or NSE. A non-owner (a CLI command while the server runs)
 // still reads the store; requests that would need the broker get a clear error.
+// Live prices (`live`) are built here but only started by the owner
+// (`hub.live.start()`, from src/server.ts) — see src/live/service.ts.
 
 export interface Hub {
   config: Config;
   db: Db;
   log: Logger;
+  /** The hub's time source (injected in tests). */
+  clock: () => number;
   owner: boolean;
   gate: BrokerGate | null;
   auth: FyersAuth | null;
   history: HistoryService;
   nse: NseContext;
   scheduler: Scheduler;
+  live: LiveService;
 }
 
 export interface HubOptions {
@@ -36,6 +42,8 @@ export interface HubOptions {
   /** Injected in tests (mock broker / NSE servers or fakes). */
   fetch?: typeof fetch;
   clock?: () => number;
+  /** Test stand-ins for the live socket, timers and waits. */
+  live?: LiveTestHooks;
 }
 
 export function createHub(options: HubOptions): Hub {
@@ -47,10 +55,10 @@ export function createHub(options: HubOptions): Hub {
   if (brokerConfigured(config.secrets)) {
     gate = new BrokerGate(db, config.fyers.plan, clock);
     auth = new FyersAuth({ secrets: config.secrets, fyers: config.fyers, dataDir: config.dataDir, log, fetch: options.fetch, clock });
-    client = new FyersClient({ fyers: config.fyers, secrets: config.secrets, auth, gate, log, fetch: options.fetch });
+    client = new FyersClient({ fyers: config.fyers, secrets: config.secrets, auth, gate, log, fetch: options.fetch, clock });
   }
   // `owner` can change while running (the server takes the lock once a CLI backfill exits).
-  const hub = { config, db, log, owner: options.owner, gate, auth } as Hub;
+  const hub = { config, db, log, clock, owner: options.owner, gate, auth } as Hub;
   hub.history = new HistoryService({
     db,
     broker: client,
@@ -61,5 +69,6 @@ export function createHub(options: HubOptions): Hub {
   });
   hub.nse = { db, nse: new NseClient({ log, fetch: options.fetch, clock }), log, urls: config.nse, clock } satisfies NseContext;
   hub.scheduler = new Scheduler({ nse: hub.nse, backfill: { db, history: hub.history, log, clock }, log });
+  hub.live = new LiveService({ config, db, log, clock, client, auth, test: options.live });
   return hub;
 }

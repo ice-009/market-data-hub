@@ -25,10 +25,10 @@ notebook, a bot) asks the hub for data with an API key instead of talking to the
 - **Code public, data private.** The code is MIT. The data belongs to *your* broker subscription
   and NSE's terms — so this is a private API for your own projects, not a public data service.
 
-> **Status: early.** Milestone **H0** is done: the server, API keys, status endpoint, Docker setup
-> and tunnel guide. Market-data endpoints arrive in **H1** (history and reference data) and **H2**
-> (live quotes and streaming). See the [roadmap](#roadmap). Endpoints below are marked ✅ (works
-> today) or 🚧 (planned).
+> **Status:** milestones **H0** (server, keys, Docker, tunnel), **H1** (history and reference data)
+> and **H2** (live quotes, one shared broker socket, a Server-Sent Events stream that survives hub
+> restarts) are done. Next: a TypeScript client and the Tradex data source (H3). See the
+> [roadmap](#roadmap). Endpoints below are marked ✅ (works today) or 🚧 (planned).
 
 ---
 
@@ -42,6 +42,7 @@ notebook, a bot) asks the hub for data with an API key instead of talking to the
 - [Connect a project](#connect-a-project)
 - [API keys and scopes](#api-keys-and-scopes)
 - [API reference](#api-reference)
+- [Live prices and restarts](#live-prices-and-restarts)
 - [Configuration](#configuration)
 - [Security model](#security-model)
 - [Running it day to day](#running-it-day-to-day)
@@ -59,16 +60,19 @@ notebook, a bot) asks the hub for data with an API key instead of talking to the
 ```
                  ┌──────────────────────── Market Data Hub ────────────────────────┐
                  │                                                                  │
- Fyers API  ───▶ │  broker layer   · one login (TOTP, unattended)            🚧 H1  │
+ Fyers API  ───▶ │  broker layer   · one login (TOTP, unattended)             ✅    │
                  │                 · request budget: per-second/minute/day caps,    │
                  │                   priorities, rate-limit strike protection       │
-                 │                 · one live socket, shared by every client 🚧 H2  │
+                 │                 · one live socket, shared by every client  ✅    │
+                 │                   (REST polling as the fallback)                 │
                  │                                                                  │
- NSE archives ─▶ │  daily jobs     · cash bhavcopy (prices, delivery %)      🚧 H1  │
+ NSE archives ─▶ │  daily jobs     · cash bhavcopy (prices, delivery %)       ✅    │
                  │                 · F&O bhavcopy (open interest, membership)       │
                  │                 · lot sizes, ban list, results calendar          │
                  │                                                                  │
                  │  store          · one SQLite file (WAL), in ./data         ✅    │
+                 │                 · candles, NSE datasets, last quotes,            │
+                 │                   1-minute bars, the live subscription set       │
                  │                                                                  │
                  │  HTTP API       · /v1/* behind API keys with scopes        ✅    │
                  │                 · per-key rate limits                      ✅    │
@@ -118,7 +122,7 @@ Please read this before deploying.
 git clone https://github.com/ice-009/market-data-hub.git
 cd market-data-hub
 npm install
-cp .env.example .env        # broker credentials are optional until H1
+cp .env.example .env        # without broker credentials: NSE datasets and stored data only
 npm run dev                 # starts on http://127.0.0.1:8787 and reloads on changes
 ```
 
@@ -290,27 +294,73 @@ Errors always look like this and never echo your headers or the hub's configurat
 | 404 | `not_found` | Unknown path |
 | 429 | `rate_limited` | Over the key's per-minute limit — see `Retry-After` |
 | 500 | `internal` | Unexpected error (details go to the hub's scrubbed log only) |
-| 503 | `broker_unavailable` 🚧 | The broker is needed but not connected; stored data is returned where possible |
+| 503 | `broker_unavailable` | The broker is needed but not connected; stored data is returned where possible |
 
 ### Endpoints
 
 | Endpoint | Scope | Status | Description |
 |---|---|---|---|
 | `GET /healthz` | — | ✅ | Plain-text `ok` if the process is up. No key needed; says nothing else. |
-| `GET /v1/status` | any | ✅ | Version, uptime, the calling key's name and scopes, whether a broker is configured, database size. Freshness, broker connection and budget use are added in H1. |
-| `GET /v1/candles?symbol=SBIN&tf=1d&from=…&to=…` | history | 🚧 H1 | OHLCV bars. `tf`: `1d`, `1w`, `1h`, `15m`, `5m`. Daily bars include delivery %. Served from the store; missing ranges are fetched from the broker. |
-| `GET /v1/universe/{fno\|nifty50\|nifty100\|nifty200\|nifty500}` | history | 🚧 H1 | Symbols with names and sectors. |
-| `GET /v1/fo/oi?symbol=SBIN&from=…&to=…` | fo | 🚧 H1 | Near/next-month futures, combined open interest and its change, buildup class. |
-| `GET /v1/fo/members?date=…` | fo | 🚧 H1 | The F&O list on a past date (for backtests without survivorship bias). |
-| `GET /v1/fo/ban` | history | 🚧 H1 | Today's F&O ban list. |
-| `GET /v1/lots` | history | 🚧 H1 | Futures lot sizes. |
-| `GET /v1/results-calendar` | history | 🚧 H1 | Upcoming and recent results dates. |
-| `GET /v1/market/regime` | history | 🚧 H1 | NIFTY vs its 50- and 200-day averages, breadth. |
-| `GET /v1/quotes?symbols=SBIN,TCS` | live | 🚧 H2 | Last price, change, OHLC, volume. Cached briefly so many clients cost one broker call. |
-| `GET /v1/stream?symbols=SBIN,TCS` | live | 🚧 H2 | Server-Sent Events: `status` and `tick` events from one shared broker socket. |
+| `GET /v1/status` | any | ✅ | Version, uptime, the calling key, the broker connection and today's budget, data freshness, recent jobs, and a `live` section (feed mode, persistent symbols, streams, gap repair). |
+| `GET /v1/candles?symbol=SBIN&tf=1d&from=…&to=…` | history | ✅ | OHLCV bars. `tf`: `1d`, `1w`, `1h`, `15m`, `5m`. Daily bars include delivery %. Served from the store; missing ranges are fetched from the broker; the newest bar is brought up to the minute from live prices (`liveThrough`). |
+| `GET /v1/universe/{fno\|nifty50\|nifty100\|nifty200\|nifty500}` | history | ✅ | Symbols with names and sectors. |
+| `GET /v1/fo/oi?symbol=SBIN&from=…&to=…` | fo | ✅ | Near/next-month futures, combined open interest and its change, buildup class. |
+| `GET /v1/fo/members?date=…` | fo | ✅ | The F&O list on a past date (for backtests without survivorship bias). |
+| `GET /v1/fo/ban` | fo | ✅ | Today's F&O ban list. |
+| `GET /v1/lots` | history | ✅ | Futures lot sizes. |
+| `GET /v1/results-calendar` | history | ✅ | Upcoming and recent results dates. |
+| `GET /v1/market/regime` | history | ✅ | NIFTY vs its 50- and 200-day averages, breadth. |
+| `GET /v1/quotes?symbols=SBIN,TCS` | live | ✅ | Last price, change, OHLC, volume, with `ageMs`, `source` and `stale`. From the live feed when fresh, else one batched broker call (cached 3 s), else the last stored quote — never an error because the broker is down. |
+| `GET /v1/stream?symbols=SBIN,TCS` | live | ✅ | Server-Sent Events: `status`, a `snapshot` of last quotes, a `bars` replay of 1-minute bars (resumes from `Last-Event-ID`), then `tick` events from one shared broker socket. |
+| `POST` / `DELETE /v1/live/pin` | admin | ✅ | Add or remove symbols kept subscribed across restarts (on top of `HUB_LIVE_SYMBOLS`). |
+
+Full request/response details: **[docs/api.md](docs/api.md)**.
 
 Conventions (all endpoints): times are epoch milliseconds; a daily bar's time is the trading date at
 00:00 UTC; symbols are plain NSE tickers (`SBIN`, `NIFTY`, `BANKNIFTY`).
+
+---
+
+## Live prices and restarts
+
+One broker socket feeds every client. The symbols in `HUB_LIVE_SYMBOLS` plus any pinned through
+`POST /v1/live/pin` (the *persistent set*) are always subscribed, whether or not a client is
+connected, and every tick is saved: the last quote per symbol and 1-minute bars, written in batches
+about once a second. Streams subscribe their own symbols on top, for as long as they're open.
+
+Symbols beyond the plan's socket capacity (100 on Fyers Standard), and socket symbols while the
+socket is down or silent, are polled with batched REST quotes every 15 s through the same request
+budget as everything else — polling stops for the day before it could cause a rate-limit strike.
+Outside market hours the socket is closed and quotes come from the store.
+
+**When the hub goes down and comes back up, it carries on by itself:**
+
+1. **Subscriptions resume.** The persistent set is in the database; at start it is subscribed
+   upstream before any client connects.
+2. **Last quotes are served at once.** `/v1/quotes` and the stream's `snapshot` answer from the
+   stored last quotes (`source: "store"`, `stale: true`) until fresh ticks arrive.
+3. **Missed minutes are repaired.** The store remembers when the previous run last saw a tick. The
+   hub plans the session minutes from there to now (today's session, and the previous one if it was
+   down across it) and downloads them from the broker's 1-minute history in the background: one
+   call per symbol per day, 4 s apart, at background priority, after the restart minute has closed.
+   Downloaded minutes replace the tick-built ones. The plan is saved, so a second restart mid-repair
+   just continues it, and a repair stopped by the budget is retried later. The same repair runs
+   whenever the socket reconnects after a silent spell.
+4. **Clients catch up.** A stream client that reconnects (an `EventSource` does it by itself, sending
+   `Last-Event-ID`) gets a snapshot, then the 1-minute bars since the last tick it saw — the repaired
+   ones included — then live ticks.
+5. **Candles stay current.** `/v1/candles` folds the stored minutes into the newest bar of every
+   timeframe, so a chart is right to the minute after a restart too.
+
+A crash (power cut, `kill -9`) loses at most the last few seconds of ticks (quotes are written every
+second, the forming minute every 5 s); those minutes are repaired from broker history like the rest
+of the gap. A clean stop (`Ctrl-C`, `docker compose down`) ends
+the streams, closes the socket and writes everything first.
+
+When another hub process holds the broker connection (a CLI backfill run while no server was up),
+the server serves stored quotes and bars with the feed reported `down`, and starts the live feed as
+soon as it takes the connection over (checked every minute). Without broker credentials, or with
+`HUB_LIVE=off`, the same read-only behaviour applies.
 
 ---
 
@@ -323,14 +373,21 @@ environment in Docker). Copy [.env.example](.env.example) to start.
 |---|---|---|
 | `HUB_HOST` | `127.0.0.1` | Address to listen on. Keep loopback; use the tunnel for remote access. |
 | `HUB_PORT` | `8787` | Port. |
-| `HUB_DATA_DIR` | `./data` | Folder for the SQLite database (and, from H1, the broker token cache). |
+| `HUB_DATA_DIR` | `./data` | Folder for the SQLite database, the broker token cache and the broker SDK's logs. |
 | `HUB_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `HUB_KEY_RATE_PER_MINUTE` | `600` | Requests per minute allowed per API key. |
-| `FYERS_CLIENT_ID` | — | Fyers app ID, e.g. `ABCD1234EF-100` (used from H1). |
+| `HUB_JOBS` | `on` | Background jobs: NSE files in the evening IST, queued backfills. `off` = none. |
+| `HUB_FETCH_WAIT_MS` | `20000` | How long `/v1/candles` waits for missing data from the broker before answering 503 with what is stored. |
+| `HUB_LIVE` | `on` | Live prices (socket, polling, gap repair). Only runs with a broker configured; `off` = stored quotes and bars only. |
+| `HUB_LIVE_SYMBOLS` | `NIFTY,BANKNIFTY` | Symbols always subscribed (comma-separated, at most 100), on top of those pinned through the API. Empty = none. |
+| `HUB_LIVE_RETENTION_DAYS` | `30` | Days of 1-minute live bars kept (last quotes are kept forever, one row per symbol). |
+| `FYERS_CLIENT_ID` | — | Fyers app ID, e.g. `ABCD1234EF-100`. |
 | `FYERS_SECRET_KEY` | — | Fyers app secret. |
 | `FYERS_FY_ID` | — | Your Fyers login ID. |
 | `FYERS_PIN` | — | Your 4-digit PIN. |
 | `FYERS_TOTP_SECRET` | — | The base32 TOTP seed from enabling external 2FA (not a 6-digit code). |
+| `FYERS_PLAN` | `standard` | `standard` or `prime`: sets the request budget, quote batch size and socket capacity. |
+| `FYERS_REDIRECT_URL` | `http://localhost:3000/api/broker/callback` | The redirect URL registered for your Fyers app. |
 | `TUNNEL_TOKEN` | — | Cloudflare Tunnel token, only for `docker compose --profile tunnel`. |
 
 Invalid values stop the hub at start-up with a message naming the variable.
@@ -346,7 +403,7 @@ Invalid values stop the hub at start-up with a message naming the variable.
 | Broker credentials and token | Only in the hub's environment and data folder. No endpoint returns them. Every log line passes through a scrubber that removes them, plus bearer tokens and hub keys, even inside third-party error messages. |
 | API keys | Shown once; stored as SHA-256 hashes; scoped; rate-limited; revocable; last-use recorded. |
 | The machine | Listens on `127.0.0.1` only. Remote access goes through an outbound Cloudflare Tunnel — no open router ports. Docker image runs as a non-root user. |
-| The broker account | (H1) One shared request budget for all clients, with strike protection, so no app can push the account into a block. |
+| The broker account | One shared request budget for all clients — history, quote polling and gap repair alike — with strike protection, so no app can push the account into a block. One live socket for everyone. |
 | The repository | `.env` and `data/` are gitignored; CI runs a secret scanner (gitleaks); GitHub secret scanning and push protection are on; `main` only changes through reviewed pull requests with CI green. |
 
 **What it doesn't protect against**
@@ -375,8 +432,21 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
   Back it up with the hub stopped, or with `sqlite3 data/hub.db ".backup backup.db"` while running.
 - **Updating:** `git pull && npm install && npm run build` (or `docker compose up -d --build`).
   Database migrations run automatically at start-up.
+- **Status at a glance:** `npm run hub -- data status` (or `GET /v1/status`) shows the broker
+  connection and today's budget, dataset freshness, and a live line: the persistent symbols, when
+  the last tick arrived and whether a gap repair is queued or stopped.
+- **Live prices:** the socket opens at 09:15 IST and closes after 15:30 on weekdays. In
+  `/v1/status`, `live.feed.mode` is `socket` when all is well, `polling`/`mixed` when the socket is
+  down or over capacity, `idle` outside market hours, and `down` when this process isn't running the
+  feed. `live.recovery.last` is the latest gap repair (calls, bars, any error).
+- **Restarting is safe at any time,** market hours included: see
+  [Live prices and restarts](#live-prices-and-restarts). Restarting during the session costs one
+  broker call per persistent symbol to repair the gap.
+- **Pin what you follow:** `POST /v1/live/pin` with an admin key keeps a symbol recording 1-minute
+  bars all session, so charts and replays have every minute even when no client is connected.
 - **On a Mac:** the hub serves data only while the Mac is awake. During market hours, prevent sleep
-  (System Settings → Energy) or move the same Docker setup to an always-on machine later.
+  (System Settings → Energy) or move the same Docker setup to an always-on machine later. If it
+  slept, the minutes it missed are repaired from broker history when it wakes up and reconnects.
 - **Free always-on option:** an Oracle Cloud Always Free ARM VM in an Indian region runs the same
   compose file. A step-by-step guide is planned for H4.
 
@@ -388,17 +458,28 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 market-data-hub/
 ├─ src/
 │  ├─ server.ts          # entry point: config → database → HTTP server, graceful shutdown
-│  ├─ cli.ts             # admin CLI (API keys; data jobs from H1)
+│  ├─ cli.ts             # admin CLI (API keys, backfills, data status)
 │  ├─ config.ts          # environment parsing; broker secrets kept apart for the scrubber
 │  ├─ log.ts             # JSON logger + secret scrubber (the only way the server logs)
 │  ├─ db.ts              # SQLite (WAL) + ordered migrations
 │  ├─ auth/
 │  │  ├─ keys.ts         # create / verify / list / revoke; SHA-256 hashes; scopes
 │  │  └─ rateLimit.ts    # per-key token bucket
+│  ├─ owner.ts           # owner lock: one process at a time talks to the broker and NSE
+│  ├─ hub.ts             # wires the services below for one process
+│  ├─ broker/            # Fyers: login, request budget, history + quotes, the data socket
+│  ├─ history/           # candle store, fetch planning, resampling
+│  ├─ nse/               # NSE daily files: parsers, downloads, store
+│  ├─ live/              # live prices: feed, store (quotes, 1-minute bars), gap repair,
+│  │                     #   candle merge, stream fan-out, and service.ts wiring them
+│  ├─ jobs/              # scheduler and backfill jobs
 │  └─ http/
-│     └─ app.ts          # Hono app: /healthz, auth middleware, requireScope, /v1/status, errors
+│     ├─ app.ts          # Hono app: /healthz, auth middleware, requireScope, /v1/status, errors
+│     └─ routes/         # candles, reference data, live (quotes, stream, pins)
 ├─ test/                 # Vitest tests (fake credentials only)
 ├─ docs/
+│  ├─ api.md             # API and CLI reference
+│  ├─ h2-design.md       # live prices: design, restart recovery, what's unverified
 │  ├─ plan.md            # design and milestones
 │  └─ tunnel.md          # Cloudflare Tunnel guide
 ├─ Dockerfile            # multi-stage, non-root, /data volume, health check
@@ -445,6 +526,8 @@ smoke-tests it.
 | `401 unauthorized` | Check the header is exactly `Authorization: Bearer mdh_…`, and that the key isn't revoked (`keys list`). |
 | `403 forbidden` | The key lacks the endpoint's scope. Create a key with that scope. |
 | `429 rate_limited` | Wait for `Retry-After` seconds, or raise `HUB_KEY_RATE_PER_MINUTE`. |
+| Stream `status` says `down`, quotes are `stale` | This process isn't running the live feed: no broker configured, `HUB_LIVE=off`, or another hub process (a CLI backfill) holds the broker connection — the server takes over within a minute of it exiting. `/v1/status` → `broker.ownsConnection`. |
+| `live.recovery.last.error` mentions the budget | Gap repair stopped to protect the account; the work is kept and retried every 5 minutes (and at the next start). |
 | `better-sqlite3` fails to install | Use Node 22; on Linux install build tools (`python3 make g++`), or use Docker. |
 | `Cannot connect to the Docker daemon` | Start Docker Desktop. |
 | Tunnel URL returns 502 | The hub isn't running, or the tunnel points to the wrong address (`http://hub:8787` in compose, `http://127.0.0.1:8787` otherwise). |
@@ -480,8 +563,8 @@ F&O open interest and membership.
 | Milestone | What | Status |
 |---|---|---|
 | **H0** | Server, API keys with scopes and rate limits, status, scrubbed logging, SQLite, Docker, tunnel guide, CI | ✅ done |
-| **H1** | History and reference data: broker login and request budget, candle store, NSE cash and F&O bhavcopy, universes, lots, ban list, results calendar, regime | 🚧 in progress |
-| **H2** | Live: quotes cache, one shared broker socket, Server-Sent Events stream | 🚧 |
+| **H1** | History and reference data: broker login and request budget, candle store, NSE cash and F&O bhavcopy, universes, lots, ban list, results calendar, regime | ✅ done |
+| **H2** | Live: quotes cache, one shared broker socket with polling fallback, Server-Sent Events stream, restart-proof storage and gap repair | ✅ done (a few broker details still to confirm on a live account — see [docs/h2-design.md](docs/h2-design.md#not-yet-verified-against-a-live-account)) |
 | **H3** | TypeScript client package; a `hub` data source in Tradex | 🚧 |
 | **H4** | Backups, freshness monitoring, Oracle Cloud guide, importing Tradex's stored data | 🚧 |
 

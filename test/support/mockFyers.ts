@@ -30,6 +30,8 @@ export interface MockFyers {
   price: (symbol: string, t: number) => number;
   /** History requests starting before this day key answer 422 (the plan's window). */
   windowStart: number | null;
+  /** When set, bars starting at or after this time aren't returned (the broker doesn't know the future). */
+  until: (() => number) | null;
   wrongPin: boolean;
   close: () => Promise<void>;
 }
@@ -59,6 +61,7 @@ export async function startMockFyers(): Promise<MockFyers> {
     failNext: (status, count = 1) => failures.push(...Array.from({ length: count }, () => status)),
     price: (_symbol, t) => 100 + Math.round((t - Date.UTC(2020, 0, 1)) / DAY_MS) / 10,
     windowStart: null,
+    until: null,
     wrongPin: false,
     close: async () => {},
   };
@@ -119,6 +122,7 @@ export async function startMockFyers(): Promise<MockFyers> {
           const start = day - IST_OFFSET_MS; // IST midnight
           const times = daily ? [start] : Array.from({ length: Math.floor((375 * MINUTE_MS) / step) }, (_, i) => start + 555 * MINUTE_MS + i * step);
           for (const t of times) {
+            if (mock.until && t >= mock.until()) continue;
             const key = daily ? day : t;
             const c = mock.price(entry.symbol, key);
             candles.push([t / 1000, c - 1, c + 2, c - 2, c, 1000]);
