@@ -21,6 +21,7 @@
   "dependencies": {
     "@hono/node-server": "^2.1.6",
     "better-sqlite3": "^13.0.3",
+    "fyers-api-v3": "2.0.0",
     "hono": "^4.13.16"
   },
   "devDependencies": {
