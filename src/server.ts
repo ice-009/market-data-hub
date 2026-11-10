@@ -73,6 +73,7 @@ function main() {
       .catch((error: unknown) => log.error("live shutdown failed", { error }))
       .finally(() => {
         hub.scheduler.stop();
+        hub.historyQueue.stop();
         hub.gate?.flush();
         server.close(() => {
           release?.();

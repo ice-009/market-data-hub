@@ -67,10 +67,7 @@ export class HistoryService {
 
   /** Bars of `tf` from the one containing `from` through the one starting at or before `to`. */
   async candles(symbol: string, tf: Tf, from: number, to: number): Promise<CandleAnswer> {
-    const now = this.clock();
-    const range = baseRange(tf, from, to);
-    const base = this.baseFor(symbol, tf, range, now);
-    const want = { from: Math.max(range.from, windowStart(base, now)), to: range.to };
+    const { base, want } = this.plan(symbol, tf, from, to);
 
     let status: CandleAnswer["status"] = "ok";
     let error: BrokerError | undefined;
@@ -81,9 +78,20 @@ export class HistoryService {
       status = outcome.kind === "bad_symbol" ? "unknown_symbol" : "unavailable";
     } else if (outcome instanceof Error) throw outcome;
 
+    const stored = this.stored(symbol, tf, from, to);
+    if (status === "unknown_symbol" && stored.candles.length) status = "unavailable";
+    return { status, ...stored, ...(error ? { error } : {}) };
+  }
+
+  /**
+   * What the store holds for a request, without any broker call (the batch
+   * endpoint answers from this and fetches the rest in the background). `want`
+   * is the base-series range a fetch would need, already clamped to the broker's window.
+   */
+  stored(symbol: string, tf: Tf, from: number, to: number): Omit<CandleAnswer, "status" | "error"> & { want: Range } {
+    const { range, base, want } = this.plan(symbol, tf, from, to);
     const meta = readSeries(this.deps.db, symbol, base);
     let bars: CandleRow[] = readBars(this.deps.db, symbol, base, range.from, range.to);
-    if (status === "unknown_symbol" && bars.length) status = "unavailable";
     if (tf === "1w") bars = resample(bars, weekStart);
     else if (tf === "1h") bars = resample(bars, hourStart);
     else if (tf === "1d") {
@@ -93,7 +101,14 @@ export class HistoryService {
     // A week (hour) is included when it contains `from`.
     bars = bars.filter((bar) => bar.t >= range.from && bar.t <= to);
     const complete = covers(meta?.coverage ?? null, { from: want.from, to: Math.min(want.to, finalBefore(base, this.clock())) });
-    return { status, base, candles: bars, complete, coverage: meta?.coverage ?? null, ...(error ? { error } : {}) };
+    return { base, candles: bars, complete, coverage: meta?.coverage ?? null, want };
+  }
+
+  private plan(symbol: string, tf: Tf, from: number, to: number) {
+    const now = this.clock();
+    const range = baseRange(tf, from, to);
+    const base = this.baseFor(symbol, tf, range, now);
+    return { range, base, want: { from: Math.max(range.from, windowStart(base, now)), to: range.to } };
   }
 
   /** Make sure `want` of a base series is stored (backfills). Throws BrokerError. */

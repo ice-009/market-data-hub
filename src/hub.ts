@@ -5,6 +5,7 @@ import { BrokerError } from "./broker/errors.js";
 import { FyersClient } from "./broker/fyers.js";
 import { FyersAuth } from "./broker/fyersAuth.js";
 import { BrokerGate } from "./broker/gate.js";
+import { HistoryQueue } from "./history/queue.js";
 import { HistoryService } from "./history/service.js";
 import { Scheduler } from "./jobs/scheduler.js";
 import { LiveService, type LiveTestHooks } from "./live/service.js";
@@ -29,6 +30,10 @@ export interface Hub {
   gate: BrokerGate | null;
   auth: FyersAuth | null;
   history: HistoryService;
+  /** Background downloads for the batch candles endpoint (deduplicated, at background priority). */
+  historyQueue: HistoryQueue;
+  /** Why history can't be fetched from the broker right now, or null when it can. */
+  brokerUnavailable: () => BrokerError | null;
   nse: NseContext;
   scheduler: Scheduler;
   live: LiveService;
@@ -59,14 +64,15 @@ export function createHub(options: HubOptions): Hub {
   }
   // `owner` can change while running (the server takes the lock once a CLI backfill exits).
   const hub = { config, db, log, clock, owner: options.owner, gate, auth } as Hub;
-  hub.history = new HistoryService({
-    db,
-    broker: client,
-    blocked: () => (hub.owner ? null : new BrokerError("Another hub process owns the broker connection; try again when it's done.", "not_owner")),
-    log,
-    fetchWaitMs: config.fetchWaitMs,
-    clock,
-  });
+  const blocked = () => (hub.owner ? null : new BrokerError("Another hub process owns the broker connection; try again when it's done.", "not_owner"));
+  hub.history = new HistoryService({ db, broker: client, blocked, log, fetchWaitMs: config.fetchWaitMs, clock });
+  hub.historyQueue = new HistoryQueue({ history: hub.history, log, clock });
+  hub.brokerUnavailable = () => {
+    if (!client) return new BrokerError("No broker is configured.", "not_configured");
+    const snapshot = gate?.snapshot();
+    if (snapshot?.stoppedForToday) return new BrokerError("Today's broker data budget is used up, or calls are stopped after rate-limit strikes.", "budget");
+    return blocked();
+  };
   hub.nse = { db, nse: new NseClient({ log, fetch: options.fetch, clock }), log, urls: config.nse, clock } satisfies NseContext;
   hub.scheduler = new Scheduler({ nse: hub.nse, backfill: { db, history: hub.history, log, clock }, log, ...(config.backupDir ? { backup: { db, dir: config.backupDir, keep: config.backupKeep } } : {}) });
   hub.live = new LiveService({ config, db, log, clock, client, auth, test: options.live });

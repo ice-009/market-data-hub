@@ -44,6 +44,16 @@ export function extendCoverage(coverage: Range | null, claimed: Range): Range | 
   return { from: Math.min(coverage.from, claimed.from), to: Math.max(coverage.to, claimed.to) };
 }
 
+/**
+ * Does a daily range need the broker when the newest final session (`latestFinal`,
+ * a day key) may still arrive from NSE's cash bhavcopy that evening? Only when
+ * something other than that one session is missing.
+ */
+export function needsBrokerBeyond(coverage: Range | null, want: Range, latestFinal: number): boolean {
+  const required = { from: want.from, to: Math.min(want.to, latestFinal) };
+  return required.from < required.to && !covers(coverage, required);
+}
+
 /** A past close moving this much means the broker adjusted history (split, bonus). */
 export const ADJUSTMENT_TOLERANCE = 0.01;
 
