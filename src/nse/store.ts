@@ -145,6 +145,37 @@ export function readFoSymbol(db: Db, symbol: string, from: number, to: number): 
   return (db.prepare("select * from fo_futures where symbol = ? and day between ? and ? order by day").all(symbol, from, to) as FoRow[]).map(toRecord);
 }
 
+/** Every underlying's record on one stored trade day, by symbol. */
+export function readFoDay(db: Db, day: number): FoDayRecord[] {
+  return (db.prepare("select * from fo_futures where day = ? order by symbol").all(day) as FoRow[]).map(toRecord);
+}
+
+/** One underlying's record on the newest stored F&O day (null when it had no futures that day, or nothing is stored). */
+export function latestFoRecord(db: Db, symbol: string): { day: number; record: FoDayRecord | null } | null {
+  const day = lastOkDay(db, "fo_bhav");
+  if (day === null) return null;
+  const row = db.prepare("select * from fo_futures where day = ? and symbol = ?").get(day, symbol) as FoRow | undefined;
+  return { day, record: row ? toRecord(row) : null };
+}
+
+/** The F&O list on every stored trade day with from <= day <= to, oldest first. */
+export function foMembersBetween(db: Db, from: number, to: number): Array<{ day: number; symbols: string[] }> {
+  const rows = db
+    .prepare(
+      `select f.day, f.symbol from fo_futures f
+       join nse_days d on d.dataset = 'fo_bhav' and d.day = f.day and d.status = 'ok'
+       where f.day between ? and ? order by f.day, f.symbol`,
+    )
+    .all(from, to) as Array<{ day: number; symbol: string }>;
+  const out: Array<{ day: number; symbols: string[] }> = [];
+  for (const row of rows) {
+    const last = out[out.length - 1];
+    if (last?.day === row.day) last.symbols.push(row.symbol);
+    else out.push({ day: row.day, symbols: [row.symbol] });
+  }
+  return out;
+}
+
 /** The newest stored F&O trade day on or before `day`, with its underlyings. */
 export function foMembersOn(db: Db, day: number): { day: number; symbols: string[] } | null {
   const row = db.prepare("select max(day) as day from nse_days where dataset = 'fo_bhav' and status = 'ok' and day <= ?").get(day) as { day: number | null };
