@@ -16,9 +16,12 @@ symbols).
 |---|---|---|
 | `GET /v1/status` | any | the hub |
 | `GET /v1/candles?symbol&tf&from&to` | history | store; missing ranges from the broker |
+| `GET /v1/candles/batch?symbols&tf&from&to` | history | store; missing series queued for a background download |
 | `GET /v1/universe/{fno\|nifty50\|nifty100\|nifty200\|nifty500}` | history | snapshots; F&O list from the latest NSE F&O bhavcopy |
 | `GET /v1/fo/oi?symbol&from&to` | fo | NSE F&O bhavcopy |
-| `GET /v1/fo/members?date` | fo | NSE F&O bhavcopy |
+| `GET /v1/fo/oi/day[?date]` | fo | NSE F&O bhavcopy |
+| `GET /v1/fo/members?date` / `?from&to` | fo | NSE F&O bhavcopy |
+| `GET /v1/fo/contracts?symbol` | fo | NSE F&O bhavcopy |
 | `GET /v1/fo/ban` | fo | NSE `fo_secban.csv` |
 | `GET /v1/lots[?symbol]` | history | NSE `fo_mktlots.csv` (fallback: F&O bhavcopy lots) |
 | `GET /v1/results-calendar?from&to[&symbol]` | history | NSE event calendar |
@@ -30,14 +33,15 @@ symbols).
 Common error codes: `bad_request` (400), `unauthorized` (401), `forbidden` (403, scope),
 `not_found` / `no_data` / `unknown_symbol` (404), `rate_limited` / `too_many_streams` (429, per key),
 `too_many_symbols` (400),
-`broker_unavailable` / `fetch_pending` / `not_ready` (503).
+`broker_unavailable` / `fetch_pending` / `not_ready` (503; `not_ready` is 404 on `/v1/fo/oi/day` and
+`/v1/fo/contracts`, where it means no F&O bhavcopy is stored yet).
 
 ## GET /v1/candles
 
-`symbol` is a plain NSE ticker (`SBIN`, `BAJAJ-AUTO`, `M%26M` for M&M) or an index (`NIFTY`,
-`BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTYNXT50`, `NIFTYIT`, `INDIAVIX`). `tf` is `1d`
-(default), `1w`, `1h`, `15m` or `5m`. Defaults: `to` = now; `from` = 1 year (1d), 5 years (1w),
-90 days (1h), 30 days (15m), 7 days (5m) before `to`.
+`symbol` is a plain NSE ticker (`SBIN`, `BAJAJ-AUTO`, `M%26M` for M&M), an index (`NIFTY`,
+`BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTYNXT50`, `NIFTYIT`, `INDIAVIX`) or a futures contract
+(below). `tf` is `1d` (default), `1w`, `1h`, `15m`, `5m` or `1m`. Defaults: `to` = now; `from` =
+1 year (1d), 5 years (1w), 90 days (1h), 30 days (15m), 7 days (5m), 5 days (1m) before `to`.
 
 - Served from the store. Only ranges the store doesn't cover are fetched from the broker, at
   background priority; the request waits up to `HUB_FETCH_WAIT_MS` (default 20 s).
@@ -54,8 +58,25 @@ Common error codes: `bad_request` (400), `unauthorized` (401), `forbidden` (403,
   one a client is streaming); the 503 answer below gets it too.
 - Stored daily series move forward from NSE's cash bhavcopy each evening without broker calls.
   When a split or bonus is detected (NSE's `PREV_CLOSE`, or the broker's history changing), the
-  symbol's stored series are dropped and downloaded again, adjusted.
+  symbol's stored series are dropped and downloaded again, adjusted. (Stocks and indices only:
+  futures contracts are neither extended from the cash file nor reset.)
+- **`1m`** comes from broker 1-minute history (resolution `1`), stored like the other timeframes,
+  plus the hub's own 1-minute live bars after the newest stored minute (`liveThrough`). Only the
+  **last 30 days** are served (earlier `from` values are clamped) and kept (older minutes are
+  deleted after each download). Fyers accepts up to 100 days of a minute resolution per request
+  (the hub asks for ≤ 90), so a cold 30-day series is one broker call; how far back Fyers' 1-minute
+  history actually reaches hasn't been checked on a live account. While the session is open a `1m`
+  request refreshes the stored tail at most once a minute per symbol (as `5m` and `15m` do); to
+  follow a chart live, use `/v1/stream` (bars replay, then ticks) rather than polling candles.
 
+**Futures contracts.** A stock (or index) future is named as the broker names it without the
+exchange: underlying + 2-digit year + month + `FUT` — `SBIN26NOVFUT`, `M%26M26NOVFUT`,
+`BAJAJ-AUTO26DECFUT`, `NIFTY26NOVFUT`. Fyers' own form `NSE:SBIN26NOVFUT` is accepted too and
+answered as `SBIN26NOVFUT` (for stocks and indices only the plain ticker is accepted). They work
+everywhere a symbol does — `/v1/candles` (every `tf`), `/v1/quotes`, `/v1/stream`, pins. Daily bars
+have `dp: null` (delivery is a cash-market figure). `/v1/fo/contracts` lists a stock's current
+contracts. After expiry the broker may no longer serve a contract (`404 unknown_symbol`); what
+was stored stays.
 ```json
 GET /v1/candles?symbol=SBIN&tf=1d&from=2026-11-04&to=2026-11-05
 200
@@ -85,6 +106,49 @@ hang:
 `network`. A fetch still running after the wait gives `503 fetch_pending` (`Retry-After: 10`) with
 the stored candles; it continues in the background. A symbol the broker doesn't know gives `404
 unknown_symbol`.
+
+## GET /v1/candles/batch
+
+Daily (`tf=1d`, default) or weekly (`tf=1w`) candles for up to **300** symbols in one request — for
+screeners. `from`/`to` as for `/v1/candles` (dates or epoch ms); defaults: `to` = today, `from` = 400
+days (1d) or 5 years (1w) before it.
+
+- **Never waits for the broker.** Each symbol is answered from the store at once. A symbol whose
+  range isn't fully stored (`complete: false`) is queued for a background download at background
+  priority and listed in `queued`; ask again later (a few seconds per symbol, paced by the broker
+  budget) and it is served from the store. The queue is shared by every request and deduplicated —
+  asking again, or from several clients, never fetches a series twice — and lives in memory (a
+  restart forgets it; the next request queues again).
+- `unknown` lists what the hub won't fetch: strings that aren't valid tickers (as sent), and
+  symbols the broker said it doesn't know (remembered for a day). They have no `series` entry. A
+  malformed symbol never fails the whole request.
+- `series[symbol]` is `{ complete, coverage, candles }` as in `/v1/candles`: daily bars carry `dp`
+  (delivery %), and the newest bar is brought up to date from live prices when the hub has them.
+- In the evening, between the close and NSE's cash bhavcopy (16:00 → ~18:00 IST), a **stock**
+  missing only the day's session is *not* queued: the bhavcopy job adds that bar to every stored
+  stock for free, where queueing would cost one broker call per symbol. It shows `complete: false`
+  until the file arrives. (Indices and futures aren't in the cash file and are queued as usual;
+  with `HUB_JOBS=off` this exception is off.)
+- When the broker can't be used (not configured, another process owns it, today's budget spent)
+  nothing is queued and the answer — still `200` — adds `warning` and `reason` (as `/v1/quotes`).
+- `400 too_many_symbols` over 300 symbols; `400 bad_request` for an empty list, a `tf` other than
+  `1d`/`1w`, or bad dates.
+
+```json
+GET /v1/candles/batch?symbols=SBIN,INFY,NEWCO,bad$&tf=1d&from=2026-11-04&to=2026-11-05
+200
+{ "tf": "1d", "from": 1793750400000, "to": 1793836800000,
+  "series": {
+    "SBIN": { "complete": true, "coverage": { "from": 1762128000000, "to": 1793923200000 },
+      "candles": [ { "t": 1793750400000, "o": 1001, "h": 1012, "l": 998.5, "c": 1006.6, "v": 11873400, "dp": 52.3 },
+                   { "t": 1793836800000, "o": 1006, "h": 1010.5, "l": 983.2, "c": 1008.1, "v": 12873400, "dp": 54.1 } ] },
+    "INFY": { "complete": false, "coverage": null, "candles": [] },
+    "NEWCO": { "complete": false, "coverage": null, "candles": [] } },
+  "queued": ["INFY", "NEWCO"],
+  "unknown": ["bad$"] }
+```
+
+(Had the broker answered that `NEWCO` doesn't exist, the next request would list it in `unknown`.)
 
 ## GET /v1/universe/:name
 
@@ -117,13 +181,60 @@ GET /v1/fo/oi?symbol=SBIN&from=2026-11-01&to=2026-11-05
 Volumes are contracts; OI is shares. Tickers NSE renamed (LTIM → LTM, TATAMOTORS → TMPV,
 ICICIPRULI → ICICILIFE) are filed under the new name. Buildup is information, not a signal.
 
-## GET /v1/fo/members?date=YYYY-MM-DD
+## GET /v1/fo/oi/day[?date=YYYY-MM-DD]
 
-The F&O list on the newest stored trade day on or before `date` (default today) — for
-survivorship-free backtests. `404 no_data` when nothing that old is stored.
+Every stock's futures on one trade day — an OI column for a screener in one request. Without
+`date`, the newest stored day; with it, exactly that trade day (no fallback to an earlier one:
+`404 no_data` when it isn't stored — a holiday, or today before NSE's evening file). `404
+not_ready` when no F&O bhavcopy is stored at all. Each row is a `/v1/fo/oi` item plus `symbol`,
+sorted by symbol.
+
+```json
+GET /v1/fo/oi/day
+{ "date": "2026-11-05", "day": 1793836800000, "rows": [
+    { "symbol": "360ONE", "date": "2026-11-05", "day": 1793836800000, "nseSymbol": "360ONE", "expiries": 3, "lot": 500, … },
+    { "symbol": "SBIN", "date": "2026-11-05", "day": 1793836800000, "nseSymbol": "SBIN", "expiries": 3, "lot": 750, "underlying": 1006.56,
+      "near": { "expiry": "2026-11-23", … }, "next": { "expiry": "2026-12-29", … },
+      "oi": 108122250, "chgOi": -705000, "oiChangePct": -0.648, "pricePct": 2.533, "buildup": "short-covering", "basisPct": 0.153 }, … ] }
+```
+
+## GET /v1/fo/members
+
+`?date=YYYY-MM-DD`: the F&O list on the newest stored trade day on or before `date` (default today)
+— for survivorship-free backtests. `404 no_data` when nothing that old is stored.
 
 ```json
 { "date": "2026-11-06", "tradeDate": "2026-11-05", "count": 218, "symbols": ["360ONE", "ABB", …] }
+```
+
+`?from=YYYY-MM-DD&to=YYYY-MM-DD`: the list on **every stored trade day** in the range, oldest
+first — one request instead of one per day. At most 400 days per request (`400 bad_request`
+beyond; ask in pieces). `to` defaults to today and `from` to 30 days before `to`. Days with no
+stored file (holidays, days before the hub's first download) are simply absent; an empty range is
+`200` with `days: []`. `date` together with `from`/`to` is a `400`.
+
+```json
+GET /v1/fo/members?from=2026-11-04&to=2026-11-06
+{ "from": "2026-11-04", "to": "2026-11-06", "days": [
+    { "date": "2026-11-04", "day": 1793750400000, "symbols": ["360ONE", "ABB", …] },
+    { "date": "2026-11-05", "day": 1793836800000, "symbols": ["360ONE", "ABB", …] } ] }
+```
+
+## GET /v1/fo/contracts?symbol=SBIN
+
+A stock's futures contracts as hub tickers, for `/v1/candles`, `/v1/quotes` and `/v1/stream`.
+From the newest stored F&O bhavcopy (`asOf`), which carries the near and next month; a contract
+that has expired since that file is left out (so right after an expiry, before the evening's file,
+only one contract — then `near` — is listed). The ticker is the underlying as NSE wrote it in the
+file, plus the expiry's year and month: NSE's own instrument name (`SBIN25NOVFUT`), which is also
+Fyers'. `lot` is the near month's lot from the file (else the lot-size table). `404 not_ready`
+when no F&O bhavcopy is stored; `404 not_found` when the stock had no futures in it.
+
+```json
+GET /v1/fo/contracts?symbol=SBIN
+{ "symbol": "SBIN", "asOf": "2026-11-05", "lot": 750, "contracts": [
+    { "ticker": "SBIN26NOVFUT", "expiry": "2026-11-24", "kind": "near" },
+    { "ticker": "SBIN26DECFUT", "expiry": "2026-12-29", "kind": "next" } ] }
 ```
 
 ## GET /v1/fo/ban
@@ -170,7 +281,7 @@ cash bhavcopy closes and stored daily candles). `healthy` / `caution` / `risk-of
 ## Live prices
 
 One broker socket feeds every client. Symbols are hub tickers as for candles (`SBIN`, `M%26M`,
-`NIFTY`); lists are comma-separated, at most 100 per request. A live **quote** is a tick:
+`NIFTY`, futures such as `SBIN26NOVFUT`); lists are comma-separated, at most 100 per request. A live **quote** is a tick:
 
 ```json
 { "symbol": "SBIN", "ltp": 1008.1, "ch": 24.9, "chp": 2.53, "open": 985, "high": 1010.5, "low": 983.2,
@@ -412,7 +523,7 @@ npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tr
 
 (In Docker: `docker compose exec hub node dist/cli.js data status`.)
 
-- `--tf` is `1d`, `15m` or `5m`; `--years` defaults to the most the broker serves (5 for daily, 1
+- `--tf` is `1d`, `15m` or `5m` (`1m` is only fetched on demand, for its 30-day window); `--years` defaults to the most the broker serves (5 for daily, 1
   for intraday).
 - Only one process calls the broker: whoever holds `data/owner.lock`. If the server is running,
   the CLI **queues** the backfill and the server runs it; otherwise the CLI runs it itself
@@ -471,7 +582,7 @@ Brings a Tradex install's stored data into the hub, without broker or NSE calls.
 | Table | Contents |
 |---|---|
 | `api_keys` | key hashes, scopes, last use (H0) |
-| `series` | per (symbol, tf ∈ 1d/15m/5m): coverage `[covered_from, covered_to)` of final bars, `synced_at`, count, first/last bar |
+| `series` | per (symbol, tf ∈ 1d/15m/5m/1m): coverage `[covered_from, covered_to)` of final bars, `synced_at`, count, first/last bar |
 | `candles` | (symbol, tf, t) → o, h, l, c, v |
 | `nse_days` | per (dataset ∈ cash_bhav/fo_bhav, day): `ok` / `holiday` / `mismatch`, rows, checked time, note (`imported from Tradex` for imported days) |
 | `cash_bhav` | (symbol, day) → series (`EQ`/`BE`; `EQ/BE` on days imported from Tradex), prev close, OHLC, volume, delivery % |

@@ -8,7 +8,8 @@ Status (2026-11-09): **H0, H1, H2 and H4 done** — server and keys, history and
 prices (one socket, SSE stream, restart-proof storage and gap repair; design and the few details
 still to confirm on a live account in [h2-design.md](h2-design.md)), and operations: backups,
 health monitoring, the [Oracle VM guide](oracle.md) and the [Tradex data import](migrate-tradex.md).
-In progress: H3 (the Tradex `hub` data source).
+H5 (2026-11-10): the endpoints Tradex needs to drop its own Fyers and NSE fetching. In progress:
+H3 (the Tradex `hub` data source).
 
 ---
 
@@ -72,13 +73,16 @@ date at UTC midnight for daily bars, as Tradex does).
 
 | Endpoint | Returns | Notes |
 |---|---|---|
-| `GET /v1/candles?symbol&tf=1d\|1w\|1h\|15m\|5m&from&to` | OHLCV (+ delivery % on daily) | From the store; missing ranges are fetched from Fyers at background priority |
+| `GET /v1/candles?symbol&tf=1d\|1w\|1h\|15m\|5m\|1m&from&to` | OHLCV (+ delivery % on daily) | From the store; missing ranges are fetched from Fyers at background priority. Stocks, indices, futures (`SBIN26NOVFUT`) |
+| `GET /v1/candles/batch?symbols&tf=1d\|1w` | up to 300 symbols' daily/weekly bars | Never waits: missing series are queued for a background download |
 | `GET /v1/quotes?symbols=…` | last price, change, OHLC, volume | Cached a few seconds: many clients cost one broker call |
 | `GET /v1/stream?symbols=…` | SSE: `status`, `snapshot`, `bars` replay, `tick` events | All clients share one upstream socket; falls back to polling; resumes with `Last-Event-ID`, across hub restarts too |
 | `POST`/`DELETE /v1/live/pin` | the persistent live set | Kept subscribed (and recorded minute by minute) across restarts |
 | `GET /v1/universe/{fno\|nifty50\|…}` | symbols, names, sectors | |
 | `GET /v1/fo/oi?symbol&from&to` | near/next futures, combined OI and change, buildup class | From NSE F&O bhavcopy |
-| `GET /v1/fo/members?date` | F&O list on that date | Point-in-time, for survivorship-free backtests |
+| `GET /v1/fo/oi/day[?date]` | every stock's futures OI on one day | |
+| `GET /v1/fo/members?date` / `?from&to` | F&O list on that date / every day of a range | Point-in-time, for survivorship-free backtests |
+| `GET /v1/fo/contracts?symbol` | near/next futures as hub tickers | From the newest F&O bhavcopy |
 | `GET /v1/fo/ban`, `GET /v1/lots` | today's ban list, lot sizes | |
 | `GET /v1/results-calendar` | upcoming / recent results dates | |
 | `GET /v1/market/regime` | NIFTY vs 50/200-day, breadth | |
@@ -136,6 +140,7 @@ Open question to test early: whether NSE's archive site accepts requests from th
 | **H2** ✅ | Live: quotes cache, SSE stream from one Fyers socket with polling fallback, global budget and strike protection, TOTP login and daily refresh; restart-proof storage (last quotes, 1-minute bars, persistent subscriptions) and gap repair from broker 1-minute history | 2–3 days |
 | **H3** | `market-data-client` package; Tradex `hub` data source (Fyers optional in Tradex) | 2 days |
 | **H4** ✅ | Backups, freshness monitoring (status page + optional alert), Oracle VM guide, migration of existing Tradex `.cache/market.db` into the hub | 1–2 days |
+| **H5** ✅ | Endpoints for Tradex: batch candles, OI for a day, members over a range, futures contracts as symbols, 1-minute candles | 1 day |
 
 ### H4 as built
 
@@ -148,6 +153,23 @@ Open question to test early: whether NSE's archive site accepts requests from th
   transaction per series/day, refuses while a server owns the data directory.
 - **Alerts** are pull-based: `/v1/status?strict=1` answers 503 when unhealthy, so any uptime checker
   can alert; the hub sends nothing itself.
+
+### H5: endpoints for Tradex
+
+Everything Tradex still fetched from Fyers or NSE itself, so it can use the hub alone:
+
+- **`GET /v1/candles/batch`** (≤ 300 symbols, `1d`/`1w`) for the screener. It never blocks: what
+  isn't stored goes to an in-memory, deduplicated background queue (`src/history/queue.ts`, on
+  `HistoryService.ensure` at background priority) rather than the persistent backfill jobs, which
+  pause in market hours and dedupe only identical parameter sets. A stock missing only the day's
+  session in the evening isn't queued — NSE's cash bhavcopy brings it free an hour later.
+- **`GET /v1/fo/oi/day`** and **`GET /v1/fo/members?from&to`**: one request instead of one per
+  symbol or per day.
+- **Futures as symbols**: `SBIN26NOVFUT` (Fyers' `NSE:SBIN26NOVFUT`, NSE's instrument name) in
+  candles, quotes and the stream; `GET /v1/fo/contracts` maps the bhavcopy's expiries to tickers.
+  Futures are left out of the cash-bhavcopy extension and the split checks.
+- **`tf=1m`**: broker 1-minute history stored as a base timeframe with a 30-day window (pruned),
+  plus the live store's newer minutes. Not backfilled.
 
 Total ≈ 2 weeks. Tests: unit tests for parsers, budget and auth; an end-to-end test with a mock
 broker server (Tradex already supports overriding Fyers endpoints for this).

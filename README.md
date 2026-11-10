@@ -27,8 +27,9 @@ notebook, a bot) asks the hub for data with an API key instead of talking to the
 
 > **Status:** milestones **H0** (server, keys, Docker, tunnel), **H1** (history and reference data),
 > **H2** (live quotes, one shared broker socket, a Server-Sent Events stream that survives hub
-> restarts) and **H4** (backups, health monitoring, the Oracle Cloud guide, importing Tradex's
-> stored data) are done. In progress: a TypeScript client and the Tradex data source (H3). See the
+> restarts), **H4** (backups, health monitoring, the Oracle Cloud guide, importing Tradex's
+> stored data) and **H5** (the endpoints Tradex needs to stop fetching on its own: batch candles,
+> futures contracts, 1-minute candles, F&O by day and range) are done. In progress: a TypeScript client and the Tradex data source (H3). See the
 > [roadmap](#roadmap). Endpoints below are marked ✅ (works today) or 🚧 (planned).
 
 ---
@@ -306,10 +307,13 @@ Errors always look like this and never echo your headers or the hub's configurat
 |---|---|---|---|
 | `GET /healthz` | — | ✅ | Plain-text `ok` if the process is up. No key needed; says nothing else. |
 | `GET /v1/status` | any | ✅ | Version, uptime, the calling key, the broker connection and today's budget, data freshness, recent jobs, and a `live` section (feed mode, persistent symbols, streams, gap repair). |
-| `GET /v1/candles?symbol=SBIN&tf=1d&from=…&to=…` | history | ✅ | OHLCV bars. `tf`: `1d`, `1w`, `1h`, `15m`, `5m`. Daily bars include delivery %. Served from the store; missing ranges are fetched from the broker; the newest bar is brought up to the minute from live prices (`liveThrough`). |
+| `GET /v1/candles?symbol=SBIN&tf=1d&from=…&to=…` | history | ✅ | OHLCV bars. `tf`: `1d`, `1w`, `1h`, `15m`, `5m`, `1m` (the last 30 days). Daily bars include delivery %. Served from the store; missing ranges are fetched from the broker; the newest bar is brought up to the minute from live prices (`liveThrough`). Stocks, indices and futures contracts (`SBIN26NOVFUT`). |
+| `GET /v1/candles/batch?symbols=SBIN,INFY,…&tf=1d` | history | ✅ | Daily or weekly bars for up to 300 symbols at once, from the store without waiting; what isn't stored is queued for a background download (`queued`) and served on a later request. |
 | `GET /v1/universe/{fno\|nifty50\|nifty100\|nifty200\|nifty500}` | history | ✅ | Symbols with names and sectors. |
 | `GET /v1/fo/oi?symbol=SBIN&from=…&to=…` | fo | ✅ | Near/next-month futures, combined open interest and its change, buildup class. |
-| `GET /v1/fo/members?date=…` | fo | ✅ | The F&O list on a past date (for backtests without survivorship bias). |
+| `GET /v1/fo/oi/day[?date=…]` | fo | ✅ | Every stock's futures OI on one trade day (default: the newest stored). |
+| `GET /v1/fo/members?date=…` or `?from=…&to=…` | fo | ✅ | The F&O list on a past date, or on every trade day of a range (≤ 400 days) — for backtests without survivorship bias. |
+| `GET /v1/fo/contracts?symbol=SBIN` | fo | ✅ | A stock's near- and next-month futures as hub tickers (`SBIN26NOVFUT`), with expiries and the lot size. |
 | `GET /v1/fo/ban` | fo | ✅ | Today's F&O ban list. |
 | `GET /v1/lots` | history | ✅ | Futures lot sizes. |
 | `GET /v1/results-calendar` | history | ✅ | Upcoming and recent results dates. |
@@ -321,7 +325,9 @@ Errors always look like this and never echo your headers or the hub's configurat
 Full request/response details: **[docs/api.md](docs/api.md)**.
 
 Conventions (all endpoints): times are epoch milliseconds; a daily bar's time is the trading date at
-00:00 UTC; symbols are plain NSE tickers (`SBIN`, `NIFTY`, `BANKNIFTY`).
+00:00 UTC; symbols are plain NSE tickers (`SBIN`, `NIFTY`, `BANKNIFTY`) or stock-futures contracts
+named as the broker names them, underlying + year + month + `FUT` (`SBIN26NOVFUT`; Fyers' own
+`NSE:SBIN26NOVFUT` is accepted too) — for candles, quotes and the stream.
 
 ---
 
@@ -486,7 +492,7 @@ market-data-hub/
 │  ├─ health.ts          # healthy / problems / warnings for /v1/status and `data status`
 │  ├─ backup.ts          # online SQLite backups, rotation, the nightly schedule
 │  ├─ broker/            # Fyers: login, request budget, history + quotes, the data socket
-│  ├─ history/           # candle store, fetch planning, resampling
+│  ├─ history/           # candle store, fetch planning, resampling, background fetch queue
 │  ├─ nse/               # NSE daily files: parsers, downloads, store
 │  ├─ live/              # live prices: feed, store (quotes, 1-minute bars), gap repair,
 │  │                     #   candle merge, stream fan-out, and service.ts wiring them
@@ -588,6 +594,7 @@ F&O open interest and membership.
 | **H2** | Live: quotes cache, one shared broker socket with polling fallback, Server-Sent Events stream, restart-proof storage and gap repair | ✅ done (a few broker details still to confirm on a live account — see [docs/h2-design.md](docs/h2-design.md#not-yet-verified-against-a-live-account)) |
 | **H3** | TypeScript client package; a `hub` data source in Tradex | 🚧 |
 | **H4** | Backups (online, rotated, nightly), health in `/v1/status` for uptime checks, [Oracle Cloud guide](docs/oracle.md), [importing Tradex's stored data](docs/migrate-tradex.md) | ✅ done |
+| **H5** | Endpoints for Tradex to drop its own broker and NSE fetching: batch daily candles, one day's OI across stocks, F&O membership over a range, futures contracts as symbols, 1-minute candles | ✅ done |
 
 Design details: [docs/plan.md](docs/plan.md).
 
