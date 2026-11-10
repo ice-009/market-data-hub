@@ -1,5 +1,6 @@
 import type { Priority } from "../broker/budget.js";
 import { BrokerError } from "../broker/errors.js";
+import { isFuture } from "../broker/symbols.js";
 import type { Bar, HistoryResult, Resolution } from "../broker/fyers.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
@@ -17,7 +18,8 @@ import { BASE, dayOf, dayStartT, finalBefore, formingNow, windowStart, type Base
 //
 // When a fresh download changes the close of a bar that was already final, the
 // broker has adjusted history for a split or bonus: every stored series of the
-// symbol is dropped and the requested range is downloaded again.
+// symbol is dropped and the requested range is downloaded again (stocks and
+// indices only, not futures contracts).
 
 export interface HistoryBroker {
   history(symbol: string, resolution: Resolution, fromDay: number, toDay: number, priority: Priority): Promise<HistoryResult>;
@@ -159,7 +161,9 @@ export class HistoryService {
     if (fromDay > toDay) return;
 
     const result = await broker.history(symbol, spec.resolution, fromDay, toDay, priority);
-    if (range.part === "tail" && meta?.coverage) {
+    // Futures contracts are left alone: one lives a few months, NSE adjusts it in
+    // place on a corporate action, and dropping it would not touch the stock's series.
+    if (range.part === "tail" && meta?.coverage && !isFuture(symbol)) {
       const stored = readBars(this.deps.db, symbol, base, dayStartT(base, fromDay), meta.coverage.to);
       if (wasAdjusted(stored, result.bars, meta.coverage.to)) {
         this.deps.log.info("broker history was adjusted (split/bonus?); downloading again", { symbol, tf: base });

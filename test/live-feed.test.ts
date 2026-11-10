@@ -232,7 +232,8 @@ describe("Fyers data socket wrapper", () => {
     expect(fromFyersSymbol("NSE:BAJAJ-AUTO-EQ")).toBe("BAJAJ-AUTO");
     expect(fromFyersSymbol("NSE:M&M-EQ")).toBe("M&M");
     expect(fromFyersSymbol("NSE:NIFTYBANK-INDEX")).toBe("BANKNIFTY");
-    expect(fromFyersSymbol("NSE:SBIN26NOVFUT")).toBeNull();
+    expect(fromFyersSymbol("NSE:SBIN26NOVFUT")).toBe("SBIN26NOVFUT");
+    expect(fromFyersSymbol("NSE:SBIN26NOVCE")).toBeNull();
     // Index frames carry no volume or trade time: the feed time stands in.
     expect(toSocketTick({ symbol: "NSE:NIFTY50-INDEX", ltp: 25_100.5, exch_feed_time: 1_762_662_003, prev_close_price: 25_000 }, 9)).toMatchObject({ symbol: "NIFTY", volume: 0, ltt: 1_762_662_003_000, prevClose: 25_000, ts: 9 });
     expect(toSocketTick({ symbol: "NSE:SBIN-EQ" }, 1)).toBeNull();

@@ -29,7 +29,7 @@ const DEFAULT_SPAN_DAYS: Record<Tf, number> = { "1d": 365, "1w": 5 * 365, "1h": 
 export function candleRoutes(app: Hono<HubEnv>, hub: Hub) {
   app.get("/v1/candles", requireScope("history"), async (c) => {
     const symbol = normalizeSymbol(c.req.query("symbol") ?? "");
-    if (!symbol) return c.json(errorBody("symbol is required: a plain NSE ticker such as SBIN, M&M (send & as %26) or NIFTY.", "bad_request"), 400);
+    if (!symbol) return c.json(errorBody("symbol is required: a plain NSE ticker such as SBIN, M&M (send & as %26), NIFTY, or a futures contract such as SBIN26NOVFUT.", "bad_request"), 400);
     const tf = c.req.query("tf") ?? "1d";
     if (!isTf(tf)) return c.json(errorBody(`tf must be one of ${TIMEFRAMES.join(", ")}.`, "bad_request"), 400);
     let range: { from: number; to: number };

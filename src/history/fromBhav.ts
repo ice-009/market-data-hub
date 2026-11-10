@@ -1,3 +1,4 @@
+import { isFuture } from "../broker/symbols.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
 import type { CashBhavRow } from "../nse/parsers/cashBhav.js";
@@ -15,6 +16,7 @@ import { readBars, readSeries, listSeries, resetSymbol, writeBars } from "./stor
 // never across a gap. NSE's PREV_CLOSE is adjusted on ex-dates, so when it
 // doesn't match our stored close the stored history predates a split or bonus:
 // the symbol's series are dropped and the next request downloads them adjusted.
+// Futures contracts (SBIN26NOVFUT) are never extended or reset here.
 
 /** PREV_CLOSE differing from our close by more than this means a corporate action. */
 export const SPLIT_TOLERANCE = 0.015;
@@ -34,6 +36,8 @@ export function applyCashBhav(db: Db, day: number, rows: CashBhavRow[], log: Log
 
   const bySymbol = new Map(rows.map((row) => [row.symbol, row]));
   for (const meta of listSeries(db, "1d")) {
+    // A futures contract's daily bars come from the broker; the cash file has no row for it anyway.
+    if (isFuture(meta.symbol)) continue;
     const row = bySymbol.get(meta.symbol);
     if (!row || !meta.coverage || row.open <= 0) continue;
     if (meta.coverage.to >= day + DAY_MS || meta.coverage.to < prevDay + DAY_MS) continue;

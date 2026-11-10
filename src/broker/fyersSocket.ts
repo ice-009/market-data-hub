@@ -4,7 +4,7 @@ import type { Tick } from "../live/types.js";
 import type { Logger } from "../log.js";
 import { epochMs } from "./fyers.js";
 import type { FyersAuth } from "./fyersAuth.js";
-import { INDEX_SYMBOLS, toFyersSymbol } from "./symbols.js";
+import { fromFyersSymbol, toFyersSymbol } from "./symbols.js";
 
 // The upstream live-data socket: Fyers' HSM socket through the official
 // `fyers-api-v3` SDK (ported from Tradex, where it ran against a live account).
@@ -12,7 +12,7 @@ import { INDEX_SYMBOLS, toFyersSymbol } from "./symbols.js";
 // The SDK is untyped, obfuscated CommonJS, so it is touched only in this file,
 // behind the small `DataSocket` interface the feed (src/live/feed.ts) uses; tests
 // give the feed a fake socket instead. What the wrapper adds:
-//   - hub tickers in and out (SBIN ↔ NSE:SBIN-EQ), normalised ticks with
+//   - hub tickers in and out (SBIN ↔ NSE:SBIN-EQ, SBIN26NOVFUT ↔ NSE:SBIN26NOVFUT), normalised ticks with
 //     source "socket";
 //   - the subscription set is kept here and replayed on every connect;
 //   - a closed wrapper ignores late events from its SDK socket;
@@ -52,12 +52,8 @@ export interface DataSocket {
 /** Opens a new, not yet connected socket (fetches a token first). */
 export type DataSocketFactory = () => Promise<DataSocket>;
 
-/** Fyers symbol → hub ticker ("NSE:SBIN-EQ" → "SBIN", "NSE:NIFTY50-INDEX" → "NIFTY"); null for anything else. Pure. */
-export function fromFyersSymbol(fyersSymbol: string): string | null {
-  for (const [ticker, fyers] of Object.entries(INDEX_SYMBOLS)) if (fyers === fyersSymbol) return ticker;
-  const match = /^NSE:(.+)-EQ$/.exec(fyersSymbol);
-  return match ? match[1] : null;
-}
+// Fyers symbol → hub ticker lives with the forward mapping (./symbols.ts); re-exported for the socket's callers.
+export { fromFyersSymbol };
 
 interface RawTick {
   symbol?: unknown;
