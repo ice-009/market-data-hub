@@ -7,7 +7,7 @@ import type { Logger } from "../log.js";
 import { DAY_MS, MINUTE_MS, istDayKey, weekdayOnOrBefore } from "../time.js";
 import { covers, extendCoverage, missingRanges, wasAdjusted, type Missing, type Range } from "./plan.js";
 import { hourStart, resample, weekStart } from "./resample.js";
-import { deliveryPct, readBars, readSeries, resetSymbol, writeBars } from "./store.js";
+import { deliveryPct, pruneBefore, readBars, readSeries, resetSymbol, writeBars } from "./store.js";
 import { BASE, dayOf, dayStartT, finalBefore, formingNow, windowStart, type BaseTf, type Tf } from "./timeframes.js";
 
 // Candles for the API and for backfills. Everything is served from the store;
@@ -20,6 +20,9 @@ import { BASE, dayOf, dayStartT, finalBefore, formingNow, windowStart, type Base
 // broker has adjusted history for a split or bonus: every stored series of the
 // symbol is dropped and the requested range is downloaded again (stocks and
 // indices only, not futures contracts).
+//
+// 1-minute series keep only the broker's short window (BASE["1m"].prune): older
+// minutes are deleted after each download.
 
 export interface HistoryBroker {
   history(symbol: string, resolution: Resolution, fromDay: number, toDay: number, priority: Priority): Promise<HistoryResult>;
@@ -175,6 +178,7 @@ export class HistoryService {
     const claimed = { from: dayStartT(base, result.coveredFromDay), to: Math.min(dayStartT(base, toDay + DAY_MS), finalBefore(base, now)) };
     const current = readSeries(this.deps.db, symbol, base)?.coverage ?? null;
     writeBars(this.deps.db, symbol, base, result.bars, extendCoverage(current, claimed), now);
+    if (spec.prune) pruneBefore(this.deps.db, symbol, base, windowStart(base, now));
   }
 }
 

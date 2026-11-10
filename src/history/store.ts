@@ -6,7 +6,7 @@ import type { BaseTf } from "./timeframes.js";
 // Candle storage in the hub database (migration 1):
 //   series   (symbol, tf) → coverage [covered_from, covered_to), synced_at, count, first/last bar
 //   candles  (symbol, tf, t) → o h l c v
-// Only base timeframes are stored (1d, 15m, 5m); 1w and 1h are resampled on read.
+// Only base timeframes are stored (1d, 15m, 5m, 1m); 1w and 1h are resampled on read.
 // (Adapted from Tradex's candleDb, MIT.)
 
 export interface SeriesMeta {
@@ -66,6 +66,22 @@ export function writeBars(db: Db, symbol: string, tf: BaseTf, bars: Bar[], cover
        on conflict(symbol, tf) do update set covered_from = excluded.covered_from, covered_to = excluded.covered_to,
          synced_at = excluded.synced_at, count = excluded.count, first_t = excluded.first_t, last_t = excluded.last_t`,
     ).run(symbol, tf, coverage?.from ?? null, coverage?.to ?? null, syncedAt, summary.count, summary.first_t, summary.last_t);
+  })();
+}
+
+/**
+ * Delete a series' bars starting before `t` and move its coverage start up to
+ * `t` (none left when the coverage ended before it). For series kept only for a
+ * short window (1m).
+ */
+export function pruneBefore(db: Db, symbol: string, tf: BaseTf, t: number) {
+  const meta = readSeries(db, symbol, tf);
+  if (!meta || ((meta.firstT === null || meta.firstT >= t) && (meta.coverage === null || meta.coverage.from >= t))) return;
+  db.transaction(() => {
+    db.prepare("delete from candles where symbol = ? and tf = ? and t < ?").run(symbol, tf, t);
+    const coverage = meta.coverage && meta.coverage.to > t ? { from: Math.max(meta.coverage.from, t), to: meta.coverage.to } : null;
+    const summary = db.prepare("select count(*) as count, min(t) as first_t, max(t) as last_t from candles where symbol = ? and tf = ?").get(symbol, tf) as { count: number; first_t: number | null; last_t: number | null };
+    db.prepare("update series set covered_from = ?, covered_to = ?, count = ?, first_t = ?, last_t = ? where symbol = ? and tf = ?").run(coverage?.from ?? null, coverage?.to ?? null, summary.count, summary.first_t, summary.last_t, symbol, tf);
   })();
 }
 

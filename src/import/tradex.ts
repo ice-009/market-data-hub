@@ -8,7 +8,7 @@ import { finalBefore, type BaseTf } from "../history/timeframes.js";
 import { checkedDays, markDay, type DayStatus } from "../nse/store.js";
 import { acquireOwner, ownerPid } from "../owner.js";
 import { DAY_MS, isoDay, istDayKey } from "../time.js";
-import { bhavFileDay, checkBhavDay, cleanBhav, mapSeriesKey, planMerge, prepareSeries, sameBhav, type CleanBhavRow } from "./tradexMap.js";
+import { bhavFileDay, checkBhavDay, cleanBhav, mapSeriesKey, planMerge, prepareSeries, sameBhav, type CleanBhavRow, type ImportTf } from "./tradexMap.js";
 
 // `hub data import-tradex`: bring the data a Tradex install already downloaded
 // into the hub, so moving Tradex onto the hub costs no broker calls:
@@ -59,7 +59,7 @@ export interface ImportReport {
     /** Tradex series seen. */
     seen: number;
     /** Written (or, in a dry run, would be): per hub timeframe, range = coverage claimed. */
-    imported: Record<BaseTf, TfTotals>;
+    imported: Record<ImportTf, TfTotals>;
     /** Series the hub already had in full. */
     unchanged: number;
     /** Bars left out: still forming when Tradex stored them, or outside the covered range. */

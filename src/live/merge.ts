@@ -7,7 +7,7 @@ import type { MinuteBar, Quote } from "./types.js";
 // Folding live minutes into stored candles (pure), so /v1/candles is current
 // to the minute: the stored forming bar (5m, 15m, 1h, 1d or 1w) is brought up
 // to date and bars the store doesn't have yet (today's daily bar, the hours
-// since the last sync) are built from minutes.
+// since the last sync, the minutes since the last 1m download) are built from minutes.
 //
 //   - Minutes before the last stored candle's bucket change nothing (stored bars are final).
 //   - The last stored candle keeps its open (the broker saw the bucket from its
@@ -19,11 +19,13 @@ import type { MinuteBar, Quote } from "./types.js";
 //   - For 1d, an optional quote (same IST day) is the day's own open, high,
 //     low, close and cumulative volume — exact even when the hub missed minutes.
 //
-// Buckets match src/history/resample.ts: 5m/15m on the clock (IST and UTC agree
+// Buckets match src/history/resample.ts: 1m/5m/15m on the clock (IST and UTC agree
 // on those boundaries), hours from 09:15 IST, days by IST day key, weeks from Monday.
 
 export function bucketOf(tf: Tf, t: number): number {
   switch (tf) {
+    case "1m":
+      return Math.floor(t / MINUTE_MS) * MINUTE_MS;
     case "5m":
       return Math.floor(t / (5 * MINUTE_MS)) * 5 * MINUTE_MS;
     case "15m":

@@ -18,11 +18,14 @@ import { istDayKey } from "../time.js";
 // date); anything else is moved onto its IST date.
 
 /** Tradex (Fyers) resolution → hub base timeframe. Other resolutions aren't stored by the hub. */
-export const TRADEX_TF: Readonly<Record<string, BaseTf>> = { D: "1d", "15": "15m", "5": "5m" };
+/** Timeframes Tradex stores that the hub keeps too. */
+export type ImportTf = Extract<BaseTf, "1d" | "15m" | "5m">;
+
+export const TRADEX_TF: Readonly<Record<string, ImportTf>> = { D: "1d", "15": "15m", "5": "5m" };
 
 const INDEX_BY_FYERS: Readonly<Record<string, string>> = Object.fromEntries(Object.entries(INDEX_SYMBOLS).map(([hub, fyers]) => [fyers, hub]));
 
-export type KeyMapping = { ok: true; symbol: string; tf: BaseTf } | { ok: false; reason: string };
+export type KeyMapping = { ok: true; symbol: string; tf: ImportTf } | { ok: false; reason: string };
 
 /** "NSE:SBIN-EQ:D" → SBIN 1d; "NSE:NIFTY50-INDEX:15" → NIFTY 15m. */
 export function mapSeriesKey(key: string): KeyMapping {

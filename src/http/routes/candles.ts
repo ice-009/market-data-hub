@@ -24,7 +24,7 @@ import { ParamError, parseRange } from "../params.js";
 // up to which minute (null when no live minute was used).
 
 /** Default span when `from` is left out (days). */
-const DEFAULT_SPAN_DAYS: Record<Tf, number> = { "1d": 365, "1w": 5 * 365, "1h": 90, "15m": 30, "5m": 7 };
+const DEFAULT_SPAN_DAYS: Record<Tf, number> = { "1d": 365, "1w": 5 * 365, "1h": 90, "15m": 30, "5m": 7, "1m": 5 };
 
 export function candleRoutes(app: Hono<HubEnv>, hub: Hub) {
   app.get("/v1/candles", requireScope("history"), async (c) => {
