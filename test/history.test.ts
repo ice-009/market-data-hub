@@ -91,8 +91,9 @@ class FakeBroker implements HistoryBroker {
   factor = 1;
   fail: BrokerError | null = null;
   delayMs = 0;
+  priorities: Priority[] = [];
   async history(symbol: string, resolution: Resolution, fromDay: number, toDay: number, priority: Priority): Promise<HistoryResult> {
-    void priority;
+    this.priorities.push(priority);
     this.calls.push({ symbol, resolution, from: new Date(fromDay).toISOString().slice(0, 10), to: new Date(toDay).toISOString().slice(0, 10) });
     if (this.delayMs) await new Promise((resolve) => setTimeout(resolve, this.delayMs));
     if (this.fail) throw this.fail;
@@ -226,6 +227,38 @@ describe("history service", () => {
     await new Promise((resolve) => setTimeout(resolve, 250));
     expect(broker.calls).toHaveLength(1);
     expect((await history.candles("SBIN", "1d", d("2026-10-01"), d("2026-11-04"))).status).toBe("ok");
+  });
+});
+
+describe("history service latency", () => {
+  let t: TestHub;
+  afterEach(() => t?.cleanup());
+
+  it("fetches what a chart needs at user priority", async () => {
+    t = makeHub();
+    const broker = new FakeBroker();
+    const history = new HistoryService({ db: t.db, broker, log: quiet, fetchWaitMs: 5_000, clock: () => ist(2026, 11, 4, 20) });
+    await history.candles("SBIN", "1d", d("2026-10-01"), d("2026-11-04"));
+    expect(broker.priorities).toEqual(["user"]);
+  });
+
+  it("answers at once in the session when only the forming bar is stale, refreshing it in the background", async () => {
+    t = makeHub();
+    let now = ist(2026, 11, 4, 11); // Wednesday 11:00 IST, market open
+    const broker = new FakeBroker();
+    const history = new HistoryService({ db: t.db, broker, log: quiet, fetchWaitMs: 50, clock: () => now });
+    const first = await history.candles("SBIN", "15m", d("2026-11-03"), now);
+    expect(first.status).toBe("ok");
+    expect(broker.calls).toHaveLength(1);
+
+    now += 3 * MINUTE_MS; // the stored forming bar is now stale
+    broker.delayMs = 300; // slower than fetchWaitMs: a waiting request would answer "pending"
+    const again = await history.candles("SBIN", "15m", d("2026-11-03"), now);
+    expect(again.status).toBe("ok");
+    expect(again.candles.length).toBeGreaterThan(0);
+    await new Promise((resolve) => setTimeout(resolve, 400)); // let the background refresh finish
+    expect(broker.calls).toHaveLength(2); // the refresh still went out…
+    expect(broker.priorities).toEqual(["user", "refresh"]); // …in the background, at refresh priority
   });
 });
 
