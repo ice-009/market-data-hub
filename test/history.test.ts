@@ -10,7 +10,7 @@ import { readBars, readSeries, writeBars } from "../src/history/store.js";
 import { finalBefore, formingNow, windowStart } from "../src/history/timeframes.js";
 import { createLogger } from "../src/log.js";
 import type { CashBhavRow } from "../src/nse/parsers/cashBhav.js";
-import { markDay, writeCashDay } from "../src/nse/store.js";
+import { cashDayStatuses, markDay, writeCashDay } from "../src/nse/store.js";
 import { DAY_MS, IST_OFFSET_MS, MINUTE_MS, isWeekday, parseIsoDay } from "../src/time.js";
 import { ist, makeHub, type TestHub } from "./support/hub.js";
 
@@ -91,8 +91,9 @@ class FakeBroker implements HistoryBroker {
   factor = 1;
   fail: BrokerError | null = null;
   delayMs = 0;
+  priorities: Priority[] = [];
   async history(symbol: string, resolution: Resolution, fromDay: number, toDay: number, priority: Priority): Promise<HistoryResult> {
-    void priority;
+    this.priorities.push(priority);
     this.calls.push({ symbol, resolution, from: new Date(fromDay).toISOString().slice(0, 10), to: new Date(toDay).toISOString().slice(0, 10) });
     if (this.delayMs) await new Promise((resolve) => setTimeout(resolve, this.delayMs));
     if (this.fail) throw this.fail;
@@ -229,6 +230,57 @@ describe("history service", () => {
   });
 });
 
+describe("history service latency", () => {
+  let t: TestHub;
+  afterEach(() => t?.cleanup());
+
+  it("fetches what a chart needs at user priority", async () => {
+    t = makeHub();
+    const broker = new FakeBroker();
+    const history = new HistoryService({ db: t.db, broker, log: quiet, fetchWaitMs: 5_000, clock: () => ist(2026, 11, 4, 20) });
+    await history.candles("SBIN", "1d", d("2026-10-01"), d("2026-11-04"));
+    expect(broker.priorities).toEqual(["user"]);
+  });
+
+  it("answers at once in the session when only the forming bar is stale, refreshing it in the background", async () => {
+    t = makeHub();
+    let now = ist(2026, 11, 4, 11); // Wednesday 11:00 IST, market open
+    const broker = new FakeBroker();
+    const history = new HistoryService({ db: t.db, broker, log: quiet, fetchWaitMs: 50, clock: () => now });
+    const first = await history.candles("SBIN", "15m", d("2026-11-03"), now);
+    expect(first.status).toBe("ok");
+    expect(broker.calls).toHaveLength(1);
+
+    now += 3 * MINUTE_MS; // the stored forming bar is now stale
+    broker.delayMs = 300; // slower than fetchWaitMs: a waiting request would answer "pending"
+    const again = await history.candles("SBIN", "15m", d("2026-11-03"), now);
+    expect(again.status).toBe("ok");
+    expect(again.candles.length).toBeGreaterThan(0);
+    await new Promise((resolve) => setTimeout(resolve, 400)); // let the background refresh finish
+    expect(broker.calls).toHaveLength(2); // the refresh still went out…
+    expect(broker.priorities).toEqual(["user", "refresh"]); // …in the background, at refresh priority
+  });
+});
+
+describe("forming daily bar in the session", () => {
+  let t: TestHub;
+  afterEach(() => t?.cleanup());
+
+  it("serves stored daily bars without a broker refresh of today's forming bar", async () => {
+    t = makeHub();
+    let now = ist(2026, 11, 4, 20); // evening: fetch through today
+    const broker = new FakeBroker();
+    const history = new HistoryService({ db: t.db, broker, log: quiet, fetchWaitMs: 5_000, clock: () => now });
+    await history.candles("SBIN", "1d", d("2026-10-01"), d("2026-11-04"));
+    expect(broker.calls).toHaveLength(1);
+    now = ist(2026, 11, 5, 11); // next day, in the session: only today's (forming) bar is missing
+    const answer = await history.candles("SBIN", "1d", d("2026-10-01"), now);
+    expect(answer.status).toBe("ok");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(broker.calls).toHaveLength(1); // live quotes and the evening bhavcopy cover today
+  });
+});
+
 describe("daily candles from the NSE cash bhavcopy", () => {
   let t: TestHub;
   afterEach(() => t.cleanup());
@@ -262,6 +314,15 @@ describe("daily candles from the NSE cash bhavcopy", () => {
     const db = setup();
     expect(applyCashBhav(db, d("2026-11-06"), [row("SBIN", 101, 103)], quiet).extended).toBe(0);
     markDay(db, "cash_bhav", d("2026-11-05"), "holiday", 0, 0);
+    expect(applyCashBhav(db, d("2026-11-06"), [row("SBIN", 101, 103)], quiet).extended).toBe(1);
+  });
+
+  it("treats a cash 'mismatch' as a holiday when the F&O file confirms it (Diwali: NSE served the previous day's cash file)", () => {
+    const db = setup();
+    markDay(db, "cash_bhav", d("2026-11-05"), "mismatch", 0, 0, "file is for 2026-11-04");
+    expect(applyCashBhav(db, d("2026-11-06"), [row("SBIN", 101, 103)], quiet).extended).toBe(0); // F&O status unknown: don't guess
+    markDay(db, "fo_bhav", d("2026-11-05"), "holiday", 0, 0);
+    expect(cashDayStatuses(db).get(d("2026-11-05"))).toBe("holiday");
     expect(applyCashBhav(db, d("2026-11-06"), [row("SBIN", 101, 103)], quiet).extended).toBe(1);
   });
 });

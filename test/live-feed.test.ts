@@ -9,6 +9,8 @@ import { FyersClient, toQuoteTicks } from "../src/broker/fyers.js";
 import { FyersAuth } from "../src/broker/fyersAuth.js";
 import {
   createFyersSocketFactory,
+  guardSdkErrors,
+  isSdkError,
   describeSocketError,
   fromFyersSymbol,
   toSocketTick,
@@ -643,5 +645,46 @@ describe("live feed", () => {
     expect(vi.getTimerCount()).toBe(0);
     sockets[0].tick("SBIN");
     expect(ticks).toHaveLength(1);
+  });
+});
+
+// --- the SDK crash guard ------------------------------------------------------------
+
+describe("Fyers SDK crash guard", () => {
+  // The stack from the live crash on 2026-11-11 (paths shortened).
+  const sdkCrash = Object.assign(new TypeError("Cannot read properties of undefined (reading 'prepareData')"), {
+    stack: [
+      "TypeError: Cannot read properties of undefined (reading 'prepareData')",
+      "    at HSParser.parseData (/hub/node_modules/fyers-api-v3/HSM_Package/hslib.js:3:43714)",
+      "    at ws.onmessage (/hub/node_modules/fyers-api-v3/HSM_Package/hslib.js:3:32353)",
+      "    at callListener (/hub/node_modules/ws/lib/event-target.js:290:14)",
+    ].join("\n"),
+  });
+
+  it("recognises errors thrown inside the SDK, and only those", () => {
+    expect(isSdkError(sdkCrash)).toBe(true);
+    const ours = Object.assign(new Error("boom"), { stack: "Error: boom\n    at FyersLiveFeed.tick (/hub/dist/live/feed.js:10:3)\n    at /hub/node_modules/fyers-api-v3/x.js:1:1" });
+    expect(isSdkError(ours)).toBe(false);
+    expect(isSdkError("not an error")).toBe(false);
+    expect(isSdkError(new Error("no frames"))).toBe(false);
+  });
+
+  it("turns an SDK error into a closed socket the feed reconnects, without exiting", async () => {
+    const { sdk } = fakeSdk();
+    const dir = mkdtempSync(path.join(tmpdir(), "hub-guard-"));
+    const auth = { token: async () => "eyJ.fake.sig" } as unknown as FyersAuth;
+    const socket = await createFyersSocketFactory({ auth, clientId: "APP-100", logDir: path.join(dir, "sdk"), log: quietLog(), sdk })();
+    const closes: number[] = [];
+    socket.on("close", () => closes.push(1));
+
+    let handler: ((error: Error) => void) | undefined;
+    const fakeProcess = { on: (event: string, listener: (error: Error) => void) => ((handler = event === "uncaughtException" ? listener : handler), fakeProcess) };
+    guardSdkErrors(quietLog(), fakeProcess as never);
+    guardSdkErrors(quietLog(), fakeProcess as never); // installs once
+    handler!(sdkCrash);
+    expect(closes).toEqual([1]);
+    handler!(sdkCrash); // an already-dropped socket isn't reported twice
+    expect(closes).toEqual([1]);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

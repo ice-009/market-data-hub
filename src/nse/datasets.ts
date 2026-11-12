@@ -8,7 +8,7 @@ import { aggregateStockFutures, parseFoBhav } from "./parsers/foBhav.js";
 import { parseFnoBan } from "./parsers/ban.js";
 import { parseNseLots } from "./parsers/lots.js";
 import { parseCalendar } from "./parsers/results.js";
-import { checkedDays, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeFoDay, writeLots, writeResults, type DayDataset, type DayStatus } from "./store.js";
+import { cashDayStatuses, checkedDays, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeFoDay, writeLots, writeResults, type DayDataset, type DayStatus } from "./store.js";
 import { ZipError, isZip, unzipSingle } from "./unzip.js";
 
 // NSE's daily files, downloaded from its free public archive — no broker calls:
@@ -185,7 +185,8 @@ export async function syncDays(ctx: NseContext, dataset: DayDataset, days: numbe
 export function recentDays(ctx: NseContext, dataset: DayDataset, lookbackDays: number): number[] {
   const { day: today, minutes } = istParts(ctx.clock());
   const from = today - lookbackDays * DAY_MS;
-  return daysToCheck({ today, minutes, from, publishMin: PUBLISH_MIN[dataset], checked: checkedDays(ctx.db, dataset, from), recheck: ["mismatch"] });
+  const checked = dataset === "cash_bhav" ? cashDayStatuses(ctx.db, from) : checkedDays(ctx.db, dataset, from);
+  return daysToCheck({ today, minutes, from, publishMin: PUBLISH_MIN[dataset], checked, recheck: ["mismatch"] });
 }
 
 async function guarded(ctx: NseContext, name: "lots" | "fo_ban" | "results", run: () => Promise<Record<string, unknown>>): Promise<boolean> {

@@ -22,6 +22,20 @@ export function checkedDays(db: Db, dataset: DayDataset, from = Number.MIN_SAFE_
   return new Map(rows.map((row) => [row.day, row.status]));
 }
 
+/**
+ * Cash-bhavcopy day statuses with one correction: on an exchange holiday NSE can
+ * serve the previous session's cash file (recorded as `mismatch`) while the F&O
+ * file is simply missing (`holiday`). A cash mismatch on a day the F&O file
+ * confirms as a holiday is a holiday — otherwise the day is re-asked all evening
+ * and daily candles can't be extended across it (seen on Diwali, 10 Nov 2026).
+ */
+export function cashDayStatuses(db: Db, from = Number.MIN_SAFE_INTEGER): Map<number, DayStatus> {
+  const cash = checkedDays(db, "cash_bhav", from);
+  const fo = checkedDays(db, "fo_bhav", from);
+  for (const [day, status] of cash) if (status === "mismatch" && fo.get(day) === "holiday") cash.set(day, "holiday");
+  return cash;
+}
+
 export function markDay(db: Db, dataset: DayDataset, day: number, status: DayStatus, rows: number, checkedAt: number, note: string | null = null) {
   db.prepare(
     `insert into nse_days (dataset, day, status, rows, checked_at, note) values (?, ?, ?, ?, ?, ?)
