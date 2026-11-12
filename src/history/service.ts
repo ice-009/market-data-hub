@@ -76,7 +76,7 @@ export class HistoryService {
     // closed bar of the request is already stored, only the forming bar can be stale:
     // answer from the store now (the route folds in live minutes) and refresh that
     // bar in the background instead of making the chart wait on the broker.
-    const closedTo = Math.min(want.to, finalBefore(base, now));
+    const closedTo = Math.min(want.to, finalBefore(base, this.clock()));
     const closedStored = want.from >= closedTo || covers(readSeries(this.deps.db, symbol, base)?.coverage ?? null, { from: want.from, to: closedTo });
     let outcome: Awaited<ReturnType<typeof withTimeout>>;
     if (closedStored) {
