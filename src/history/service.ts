@@ -78,7 +78,9 @@ export class HistoryService {
     const closedStored = want.from >= closedTo || covers(readSeries(this.deps.db, symbol, base)?.coverage ?? null, { from: want.from, to: closedTo });
     let outcome: Awaited<ReturnType<typeof withTimeout>>;
     if (closedStored) {
-      this.sync(symbol, base, want, "refresh").catch(() => undefined);
+      // Today's daily bar needs no broker call: live quotes keep it current and the
+      // evening NSE bhavcopy finalises it. Intraday forming bars refresh in the background.
+      if (!BASE[base].daily) this.sync(symbol, base, want, "refresh").catch(() => undefined);
       outcome = "done";
     } else {
       outcome = await withTimeout(this.sync(symbol, base, want, "user"), this.deps.fetchWaitMs);

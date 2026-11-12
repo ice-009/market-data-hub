@@ -262,6 +262,25 @@ describe("history service latency", () => {
   });
 });
 
+describe("forming daily bar in the session", () => {
+  let t: TestHub;
+  afterEach(() => t?.cleanup());
+
+  it("serves stored daily bars without a broker refresh of today's forming bar", async () => {
+    t = makeHub();
+    let now = ist(2026, 11, 4, 20); // evening: fetch through today
+    const broker = new FakeBroker();
+    const history = new HistoryService({ db: t.db, broker, log: quiet, fetchWaitMs: 5_000, clock: () => now });
+    await history.candles("SBIN", "1d", d("2026-10-01"), d("2026-11-04"));
+    expect(broker.calls).toHaveLength(1);
+    now = ist(2026, 11, 5, 11); // next day, in the session: only today's (forming) bar is missing
+    const answer = await history.candles("SBIN", "1d", d("2026-10-01"), now);
+    expect(answer.status).toBe("ok");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(broker.calls).toHaveLength(1); // live quotes and the evening bhavcopy cover today
+  });
+});
+
 describe("daily candles from the NSE cash bhavcopy", () => {
   let t: TestHub;
   afterEach(() => t.cleanup());
