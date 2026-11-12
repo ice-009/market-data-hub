@@ -1,7 +1,7 @@
 import { BrokerError } from "../broker/errors.js";
 import type { Db } from "../db.js";
 import type { HistoryService } from "../history/service.js";
-import { BASE, finalBefore, type BaseTf } from "../history/timeframes.js";
+import { BACKFILL_TFS, BASE, finalBefore, type BaseTf } from "../history/timeframes.js";
 import type { Logger } from "../log.js";
 import { getUniverse } from "../reference/universe.js";
 import { DAY_MS, MINUTE_MS, SESSION_CLOSE_MIN, istDayStart, istParts, isMarketOpen } from "../time.js";
@@ -83,7 +83,7 @@ const toJob = (row: JobRow): Job => ({
 export const maxYears = (tf: BaseTf) => Math.max(1, Math.floor(BASE[tf].windowDays / 365) + (BASE[tf].daily ? 1 : 0));
 
 export function validateBackfill(params: BackfillParams): string | null {
-  if (!(params.tf in BASE)) return `--tf must be one of ${Object.keys(BASE).join(", ")}.`;
+  if (!BACKFILL_TFS.includes(params.tf)) return `--tf must be one of ${BACKFILL_TFS.join(", ")}.`;
   if (!Number.isFinite(params.years) || params.years <= 0) return "--years must be a positive number.";
   if (params.years > maxYears(params.tf)) return `The broker serves at most ${maxYears(params.tf)} year(s) of ${params.tf}.`;
   return null;

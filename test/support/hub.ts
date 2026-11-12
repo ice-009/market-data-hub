@@ -47,6 +47,7 @@ export function makeHub(options: MakeHubOptions = {}): TestHub {
     app,
     cleanup: () => {
       void hub.live.stop({ flush: false });
+      hub.historyQueue.stop();
       if (db.open) db.close();
       if (!options.dir) rmSync(dir, { recursive: true, force: true });
     },

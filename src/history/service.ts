@@ -1,12 +1,13 @@
 import type { Priority } from "../broker/budget.js";
 import { BrokerError } from "../broker/errors.js";
+import { isFuture } from "../broker/symbols.js";
 import type { Bar, HistoryResult, Resolution } from "../broker/fyers.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
 import { DAY_MS, MINUTE_MS, istDayKey, weekdayOnOrBefore } from "../time.js";
 import { covers, extendCoverage, missingRanges, wasAdjusted, type Missing, type Range } from "./plan.js";
 import { hourStart, resample, weekStart } from "./resample.js";
-import { deliveryPct, readBars, readSeries, resetSymbol, writeBars } from "./store.js";
+import { deliveryPct, pruneBefore, readBars, readSeries, resetSymbol, writeBars } from "./store.js";
 import { BASE, dayOf, dayStartT, finalBefore, formingNow, windowStart, type BaseTf, type Tf } from "./timeframes.js";
 
 // Candles for the API and for backfills. Everything is served from the store;
@@ -17,7 +18,11 @@ import { BASE, dayOf, dayStartT, finalBefore, formingNow, windowStart, type Base
 //
 // When a fresh download changes the close of a bar that was already final, the
 // broker has adjusted history for a split or bonus: every stored series of the
-// symbol is dropped and the requested range is downloaded again.
+// symbol is dropped and the requested range is downloaded again (stocks and
+// indices only, not futures contracts).
+//
+// 1-minute series keep only the broker's short window (BASE["1m"].prune): older
+// minutes are deleted after each download.
 
 export interface HistoryBroker {
   history(symbol: string, resolution: Resolution, fromDay: number, toDay: number, priority: Priority): Promise<HistoryResult>;
@@ -62,10 +67,7 @@ export class HistoryService {
 
   /** Bars of `tf` from the one containing `from` through the one starting at or before `to`. */
   async candles(symbol: string, tf: Tf, from: number, to: number): Promise<CandleAnswer> {
-    const now = this.clock();
-    const range = baseRange(tf, from, to);
-    const base = this.baseFor(symbol, tf, range, now);
-    const want = { from: Math.max(range.from, windowStart(base, now)), to: range.to };
+    const { base, want } = this.plan(symbol, tf, from, to);
 
     let status: CandleAnswer["status"] = "ok";
     let error: BrokerError | undefined;
@@ -74,7 +76,7 @@ export class HistoryService {
     // closed bar of the request is already stored, only the forming bar can be stale:
     // answer from the store now (the route folds in live minutes) and refresh that
     // bar in the background instead of making the chart wait on the broker.
-    const closedTo = Math.min(want.to, finalBefore(base, now));
+    const closedTo = Math.min(want.to, finalBefore(base, this.clock()));
     const closedStored = want.from >= closedTo || covers(readSeries(this.deps.db, symbol, base)?.coverage ?? null, { from: want.from, to: closedTo });
     let outcome: Awaited<ReturnType<typeof withTimeout>>;
     if (closedStored) {
@@ -91,9 +93,20 @@ export class HistoryService {
       status = outcome.kind === "bad_symbol" ? "unknown_symbol" : "unavailable";
     } else if (outcome instanceof Error) throw outcome;
 
+    const stored = this.stored(symbol, tf, from, to);
+    if (status === "unknown_symbol" && stored.candles.length) status = "unavailable";
+    return { status, ...stored, ...(error ? { error } : {}) };
+  }
+
+  /**
+   * What the store holds for a request, without any broker call (the batch
+   * endpoint answers from this and fetches the rest in the background). `want`
+   * is the base-series range a fetch would need, already clamped to the broker's window.
+   */
+  stored(symbol: string, tf: Tf, from: number, to: number): Omit<CandleAnswer, "status" | "error"> & { want: Range } {
+    const { range, base, want } = this.plan(symbol, tf, from, to);
     const meta = readSeries(this.deps.db, symbol, base);
     let bars: CandleRow[] = readBars(this.deps.db, symbol, base, range.from, range.to);
-    if (status === "unknown_symbol" && bars.length) status = "unavailable";
     if (tf === "1w") bars = resample(bars, weekStart);
     else if (tf === "1h") bars = resample(bars, hourStart);
     else if (tf === "1d") {
@@ -103,7 +116,14 @@ export class HistoryService {
     // A week (hour) is included when it contains `from`.
     bars = bars.filter((bar) => bar.t >= range.from && bar.t <= to);
     const complete = covers(meta?.coverage ?? null, { from: want.from, to: Math.min(want.to, finalBefore(base, this.clock())) });
-    return { status, base, candles: bars, complete, coverage: meta?.coverage ?? null, ...(error ? { error } : {}) };
+    return { base, candles: bars, complete, coverage: meta?.coverage ?? null, want };
+  }
+
+  private plan(symbol: string, tf: Tf, from: number, to: number) {
+    const now = this.clock();
+    const range = baseRange(tf, from, to);
+    const base = this.baseFor(symbol, tf, range, now);
+    return { range, base, want: { from: Math.max(range.from, windowStart(base, now)), to: range.to } };
   }
 
   /** Make sure `want` of a base series is stored (backfills). Throws BrokerError. */
@@ -174,7 +194,9 @@ export class HistoryService {
     if (fromDay > toDay) return;
 
     const result = await broker.history(symbol, spec.resolution, fromDay, toDay, priority);
-    if (range.part === "tail" && meta?.coverage) {
+    // Futures contracts are left alone: one lives a few months, NSE adjusts it in
+    // place on a corporate action, and dropping it would not touch the stock's series.
+    if (range.part === "tail" && meta?.coverage && !isFuture(symbol)) {
       const stored = readBars(this.deps.db, symbol, base, dayStartT(base, fromDay), meta.coverage.to);
       if (wasAdjusted(stored, result.bars, meta.coverage.to)) {
         this.deps.log.info("broker history was adjusted (split/bonus?); downloading again", { symbol, tf: base });
@@ -186,6 +208,7 @@ export class HistoryService {
     const claimed = { from: dayStartT(base, result.coveredFromDay), to: Math.min(dayStartT(base, toDay + DAY_MS), finalBefore(base, now)) };
     const current = readSeries(this.deps.db, symbol, base)?.coverage ?? null;
     writeBars(this.deps.db, symbol, base, result.bars, extendCoverage(current, claimed), now);
+    if (spec.prune) pruneBefore(this.deps.db, symbol, base, windowStart(base, now));
   }
 }
 

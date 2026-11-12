@@ -3,7 +3,7 @@ import { backupDb } from "./backup.js";
 import { createKey, listKeys, parseScopes, revokeKey } from "./auth/keys.js";
 import { loadConfig, secretValues } from "./config.js";
 import { openDb, type Db } from "./db.js";
-import { BASE, finalBefore, type BaseTf } from "./history/timeframes.js";
+import { BACKFILL_TFS, BASE, finalBefore, type BaseTf } from "./history/timeframes.js";
 import { hubHealth } from "./health.js";
 import { createHub } from "./hub.js";
 import { ImportError, formatImportReport, importTradexLocked } from "./import/tradex.js";
@@ -152,7 +152,7 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     const now = Date.now();
     const symbols = [...DEFAULT_INDICES, ...getUniverse(db, "fno", now).members.map((m) => m.symbol).filter((s) => !DEFAULT_INDICES.includes(s))];
     console.log(`\nCoverage of the F&O universe + indices (${symbols.length} symbols):`);
-    for (const tf of Object.keys(BASE) as BaseTf[]) {
+    for (const tf of BACKFILL_TFS) {
       const years = maxYears(tf);
       const want = { from: now - years * 365 * DAY_MS, to: finalBefore(tf, now) };
       const stored = symbols.filter((symbol) => hub.history.isStored(symbol, tf, want)).length;
