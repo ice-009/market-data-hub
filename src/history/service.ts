@@ -11,7 +11,7 @@ import { BASE, dayOf, dayStartT, finalBefore, formingNow, windowStart, type Base
 
 // Candles for the API and for backfills. Everything is served from the store;
 // only ranges the store doesn't cover are fetched from the broker (at the
-// caller's priority — background for API requests and backfills), and only
+// caller's priority — user for API requests, background for backfills), and only
 // once per series at a time: concurrent requests for one series queue behind
 // the fetch and then find the data stored.
 //
@@ -69,7 +69,20 @@ export class HistoryService {
 
     let status: CandleAnswer["status"] = "ok";
     let error: BrokerError | undefined;
-    const outcome = await withTimeout(this.sync(symbol, base, want, "background"), this.deps.fetchWaitMs);
+    // Someone is waiting on this answer, so a needed fetch goes at `user` priority —
+    // ahead of gap repair and backfills, which run at `background`. And when every
+    // closed bar of the request is already stored, only the forming bar can be stale:
+    // answer from the store now (the route folds in live minutes) and refresh that
+    // bar in the background instead of making the chart wait on the broker.
+    const closedTo = Math.min(want.to, finalBefore(base, now));
+    const closedStored = want.from >= closedTo || covers(readSeries(this.deps.db, symbol, base)?.coverage ?? null, { from: want.from, to: closedTo });
+    let outcome: Awaited<ReturnType<typeof withTimeout>>;
+    if (closedStored) {
+      this.sync(symbol, base, want, "refresh").catch(() => undefined);
+      outcome = "done";
+    } else {
+      outcome = await withTimeout(this.sync(symbol, base, want, "user"), this.deps.fetchWaitMs);
+    }
     if (outcome === "timeout") status = "pending";
     else if (outcome instanceof BrokerError) {
       error = outcome;
