@@ -27,7 +27,14 @@ import { INDEX_SYMBOLS, toFyersSymbol } from "./symbols.js";
 //     morning token change would reuse the old, expired one;
 //   - the constructor throws when the token isn't a Fyers JWT (no `hsm_key`);
 //   - `subscribe` looks symbols up over HTTPS (in batches of 500) before
-//     sending them, so the feed batches subscription changes.
+//     sending them, so the feed batches subscription changes;
+//   - its HSM parser can throw inside the SDK's own WebSocket handler (seen
+//     live: "Cannot read properties of undefined (reading 'prepareData')" in
+//     hslib.js right after a reconnect with 42 symbols). Nothing here can catch
+//     that, so it reaches the process as an uncaught exception and took the hub
+//     down. `guardSdkErrors` turns exactly those into a closed socket — the
+//     feed reconnects with backoff and repairs the gap — and leaves every other
+//     uncaught exception fatal, as before.
 
 export interface DataSocketEvents {
   /** The socket is open; the current subscriptions have been sent. */
@@ -159,6 +166,36 @@ function clearSdkCache(cls: SdkDataSocketClass) {
   }
 }
 
+/** Is this uncaught error from inside the Fyers SDK (not from hub code)? */
+export function isSdkError(error: unknown): boolean {
+  const stack = error instanceof Error ? (error.stack ?? "") : "";
+  const frames = stack.split("\n").slice(1).map((line) => line.trim());
+  // The throwing frame (the first) must be inside the SDK package.
+  return frames.length > 0 && /[\\/]node_modules[\\/]fyers-api-v3[\\/]/.test(frames[0]);
+}
+
+const openSockets = new Set<FyersDataSocket>();
+const guarded = new WeakSet<object>();
+
+/**
+ * Install (once per process) the handler that keeps a Fyers SDK bug from
+ * killing the hub. SDK errors close the open sockets so the feed reconnects;
+ * anything else is printed and exits with code 1, like Node's default.
+ */
+export function guardSdkErrors(log: Logger, target: Pick<NodeJS.Process, "on"> = process) {
+  if (guarded.has(target)) return;
+  guarded.add(target);
+  target.on("uncaughtException", (error: Error) => {
+    if (isSdkError(error)) {
+      log.error("broker SDK threw inside its socket handler; reconnecting", { error });
+      for (const socket of [...openSockets]) socket.failFromSdk();
+      return;
+    }
+    process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
+    process.exit(1);
+  });
+}
+
 class FyersDataSocket implements DataSocket {
   private readonly wanted = new Set<string>();
   private readonly listeners: { [E in keyof DataSocketEvents]: Array<DataSocketEvents[E]> } = { connect: [], message: [], error: [], close: [] };
@@ -172,6 +209,7 @@ class FyersDataSocket implements DataSocket {
     /** The access token: removed from error text before it leaves this wrapper. */
     private readonly token: string,
   ) {
+    openSockets.add(this);
     socket.on("connect", () => {
       if (this.closed) return;
       this.connected = true;
@@ -213,10 +251,19 @@ class FyersDataSocket implements DataSocket {
     if (this.connected && gone.length) this.send("unsubscribe", gone);
   }
 
+  /** The SDK threw inside this socket's handler: report it closed (the feed reconnects), then drop it. */
+  failFromSdk() {
+    if (this.closed) return;
+    this.connected = false;
+    this.emit("close");
+    this.close();
+  }
+
   close() {
     if (this.closed) return;
     this.closed = true;
     this.connected = false;
+    openSockets.delete(this);
     try {
       this.socket.close();
     } catch {
@@ -275,6 +322,8 @@ export function createFyersSocketFactory(options: FyersSocketOptions): DataSocke
     mkdirSync(options.logDir, { recursive: true, mode: 0o700 });
     chmodSync(options.logDir, 0o700);
     const cls = options.sdk ?? sdk();
+    // Only around the real SDK: tests pass a fake and keep their own process handlers.
+    if (!options.sdk) guardSdkErrors(options.log);
     clearSdkCache(cls);
     let socket: SdkSocket;
     try {
