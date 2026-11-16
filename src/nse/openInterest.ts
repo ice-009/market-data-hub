@@ -62,7 +62,8 @@ export function oiFact(record: FoDayRecord): OiFact {
   const { near } = record;
   return {
     day: record.day,
-    buildup: oiBuildup(near.close - near.prevClose, record.chgOi),
+    // Days from NSE's old F&O format have no previous close (0): no price change, so no buildup.
+    buildup: near.prevClose > 0 ? oiBuildup(near.close - near.prevClose, record.chgOi) : null,
     pricePct: near.prevClose > 0 ? (near.close / near.prevClose - 1) * 100 : 0,
     oiPct: combinedOiChangePct(record),
     oi: record.oi,

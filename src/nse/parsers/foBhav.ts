@@ -16,7 +16,7 @@
 // guessed at. The file's own trade date is returned so the caller can reject a
 // file served for the wrong day (seen on NSE's cash archive around holidays).
 
-import { parseIsoDay as isoDayKey } from "../../time.js";
+import { parseDmyDay, parseIsoDay as isoDayKey } from "../../time.js";
 
 /** Tickers NSE renamed (or replaced after a demerger) during the stored period: old → new. Price history lives under the new one. */
 export const FO_RENAMES: Readonly<Record<string, string>> = {
@@ -123,6 +123,48 @@ export function parseFoBhav(csv: string): FoParseResult {
   }
   const sorted = [...dates].sort((a, b) => a - b);
   return { tradeDate: sorted.length === 1 ? sorted[0] : (sorted.at(-1) ?? null), mixedDates: sorted.length > 1, contracts, badRows };
+}
+
+// The old format (foDDMONYYYYbhav.csv, zipped), NSE's archive from the first
+// F&O session (12 Jun 2000) through 5 Jul 2024:
+//   INSTRUMENT,SYMBOL,EXPIRY_DT,STRIKE_PR,OPTION_TYP,OPEN,HIGH,LOW,CLOSE,SETTLE_PR,CONTRACTS,VAL_INLAKH,OPEN_INT,CHG_IN_OI,TIMESTAMP,
+// Stock futures are INSTRUMENT = FUTSTK. The file has no previous close, lot or
+// underlying price: prevClose is 0 (unknown — oiFact then gives no buildup) and
+// lot and underlying are null.
+const LEGACY_REQUIRED = ["INSTRUMENT", "SYMBOL", "EXPIRY_DT", "CLOSE", "SETTLE_PR", "CONTRACTS", "OPEN_INT", "CHG_IN_OI", "TIMESTAMP"] as const;
+
+export function parseFoBhavLegacy(csv: string): FoParseResult {
+  const lines = csv.split(/\r?\n/);
+  const header = (lines[0] ?? "").replace(/^\uFEFF/, "").split(",").map((cell) => cell.trim().toUpperCase());
+  const col = new Map(header.map((name, index) => [name, index]));
+  if (!LEGACY_REQUIRED.every((name) => col.has(name))) return { tradeDate: null, mixedDates: false, contracts: [], badRows: 0 };
+  const at = (cells: string[], name: string) => cells[col.get(name) ?? -1];
+
+  const contracts: FoContract[] = [];
+  const dates = new Set<number>();
+  let badRows = 0;
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!line) continue;
+    const cells = line.split(",");
+    if (at(cells, "INSTRUMENT")?.trim().toUpperCase() !== "FUTSTK") continue;
+    const symbol = (at(cells, "SYMBOL") ?? "").trim().toUpperCase();
+    const day = parseDmyDay(at(cells, "TIMESTAMP") ?? "");
+    const expiry = parseDmyDay(at(cells, "EXPIRY_DT") ?? "");
+    const close = num(at(cells, "CLOSE"));
+    const settle = num(at(cells, "SETTLE_PR"));
+    const oi = num(at(cells, "OPEN_INT"));
+    const chgOi = num(at(cells, "CHG_IN_OI"));
+    const volume = num(at(cells, "CONTRACTS"));
+    if (!SYMBOL_RE.test(symbol) || day === null || expiry === null || close === null || settle === null || oi === null || chgOi === null || volume === null || oi < 0 || volume < 0) {
+      badRows += 1;
+      continue;
+    }
+    dates.add(day);
+    contracts.push({ symbol, expiry, close, settle, prevClose: 0, volume, oi, chgOi, underlying: null, lot: null });
+  }
+  const sorted = [...dates].sort((a, b) => a - b);
+  return { tradeDate: sorted.at(-1) ?? null, mixedDates: sorted.length > 1, contracts, badRows };
 }
 
 const leg = (contract: FoContract): FoLeg => ({
