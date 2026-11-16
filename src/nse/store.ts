@@ -49,6 +49,12 @@ export function lastOkDay(db: Db, dataset: DayDataset, before = Number.MAX_SAFE_
   return row.day;
 }
 
+/** Sessions stored ("ok") for a dataset, and the oldest one. */
+export function storedDays(db: Db, dataset: DayDataset): { sessions: number; first: number | null } {
+  const row = db.prepare("select count(*) as sessions, min(day) as first from nse_days where dataset = ? and status = 'ok'").get(dataset) as { sessions: number; first: number | null };
+  return row;
+}
+
 // ------------------------------------------------------------------ cash bhavcopy
 
 export function writeCashDay(db: Db, day: number, rows: CashBhavRow[], checkedAt: number) {

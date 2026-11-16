@@ -3,7 +3,7 @@ import type { Db } from "./db.js";
 import { candleStats } from "./history/store.js";
 import type { Hub } from "./hub.js";
 import { listJobs } from "./jobs/backfill.js";
-import { lastOkDay, latestBan, readRuns } from "./nse/store.js";
+import { lastOkDay, latestBan, readRuns, storedDays } from "./nse/store.js";
 import { isoDay } from "./time.js";
 
 // What /v1/status and `hub data status` report: data freshness per dataset,
@@ -17,12 +17,17 @@ export function dataFreshness(db: Db) {
     return { lastSuccessAt: r?.lastSuccessAt ?? null, lastAttemptAt: r?.lastAttemptAt ?? null, lastError: r?.lastError ?? null };
   };
   const day = (value: number | null) => (value === null ? null : isoDay(value));
+  /** How far back the stored files reach (`hub data nse-history` fills it in). */
+  const archive = (dataset: "cash_bhav" | "fo_bhav") => {
+    const stored = storedDays(db, dataset);
+    return { firstSession: day(stored.first), sessions: stored.sessions };
+  };
   const ban = latestBan(db);
   const lots = runs.get("lots")?.info;
   const results = runs.get("results")?.info;
   return {
-    cashBhav: { lastSession: day(lastOkDay(db, "cash_bhav")), ...run("cash_bhav") },
-    foBhav: { lastSession: day(lastOkDay(db, "fo_bhav")), ...run("fo_bhav") },
+    cashBhav: { lastSession: day(lastOkDay(db, "cash_bhav")), ...archive("cash_bhav"), ...run("cash_bhav") },
+    foBhav: { lastSession: day(lastOkDay(db, "fo_bhav")), ...archive("fo_bhav"), ...run("fo_bhav") },
     lots: { count: (lots?.count as number | undefined) ?? 0, source: (lots?.source as string | undefined) ?? null, ...run("lots") },
     foBan: { tradeDate: ban ? isoDay(ban.tradeDate) : null, ...run("fo_ban") },
     resultsCalendar: { events: (results?.count as number | undefined) ?? 0, ...run("results") },
