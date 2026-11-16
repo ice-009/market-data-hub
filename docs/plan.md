@@ -9,7 +9,7 @@ prices (one socket, SSE stream, restart-proof storage and gap repair; design and
 still to confirm on a live account in [h2-design.md](h2-design.md)), and operations: backups,
 health monitoring, the [Oracle VM guide](oracle.md) and the [Tradex data import](migrate-tradex.md).
 H5 (2026-11-10): the endpoints Tradex needs to drop its own Fyers and NSE fetching. In progress:
-H3 (the Tradex `hub` data source).
+H3 (the Tradex `hub` data source) and H6 (decades of daily history from NSE's archive).
 
 ---
 
@@ -141,6 +141,7 @@ Open question to test early: whether NSE's archive site accepts requests from th
 | **H3** | `market-data-client` package; Tradex `hub` data source (Fyers optional in Tradex) | 2 days |
 | **H4** ✅ | Backups, freshness monitoring (status page + optional alert), Oracle VM guide, migration of existing Tradex `.cache/market.db` into the hub | 1–2 days |
 | **H5** ✅ | Endpoints for Tradex: batch candles, OI for a day, members over a range, futures contracts as symbols, 1-minute candles | 1 day |
+| **H6** | 30 years of daily history from NSE's archive: download ✅, adjustment, serving | 3–4 days |
 
 ### H4 as built
 
@@ -170,6 +171,33 @@ Everything Tradex still fetched from Fyers or NSE itself, so it can use the hub 
   Futures are left out of the cash-bhavcopy extension and the split checks.
 - **`tf=1m`**: broker 1-minute history stored as a base timeframe with a 30-day window (pruned),
   plus the live store's newer minutes. Not backfilled.
+
+### H6: decades of daily history
+
+Fyers serves 5 years of daily candles on the Standard plan; NSE's public archive goes back to its
+first session. Checked against the live archive (16 Nov 2026):
+
+| File | From | To |
+|---|---|---|
+| Cash bhavcopy, old format `content/historical/EQUITIES/YYYY/MON/cmDDMONYYYYbhav.csv.zip` | 3 Nov 1994 | 5 Jul 2024 |
+| Cash bhavcopy `sec_bhavdata_full_DDMMYYYY.csv` (with delivery %) | 2020 | today |
+| Delivery `archives/equities/mto/MTO_DDMMYYYY.DAT` | 2002 | today |
+| F&O bhavcopy, old format `content/historical/DERIVATIVES/YYYY/MON/foDDMONYYYYbhav.csv.zip` | 12 Jun 2000 (index futures; stock futures from 9 Nov 2001) | 5 Jul 2024 |
+| F&O bhavcopy, UDiFF | 8 Jul 2024 | today |
+
+Weekend sessions exist (Muhurat on 17 Oct 2009, 3 Nov 2013, 30 Oct 2016, 27 Oct 2019, 14 Nov 2020, 12
+Nov 2023; Budget days 28 Feb 2015 and 1 Feb 2020; special sessions 20 Jan, 2 Mar, 18 May 2024).
+
+1. **Download** ✅ (`hub data nse-history`, `src/jobs/nseHistory.ts`): every session into
+   `cash_bhav` / `fo_futures` — old formats up to 5 Jul 2024, current ones after — resumable through
+   `nse_days`, pausing in market hours, ~24,000 requests (7–8 hours), an estimated 1–1.5 GB.
+2. **Adjustment:** split/bonus factors from the bhavcopy itself — NSE's `PREVCLOSE` on an ex-date
+   is the previous close adjusted, so `prev_close(d) / close(d−1)` is the day's factor (1 on normal
+   days) — checked against the broker's adjusted 5 years where they overlap; renamed tickers joined
+   with NSE's `symbolchange.csv` (and ISINs, in files from 2011 on). Index history (NIFTY,
+   sectors) needs another source: it isn't in these files.
+3. **Serving:** `/v1/candles?tf=1d` with `from` before the broker's window answers from the
+   adjusted NSE series; Tradex's backtests and evidence check use the full range.
 
 Total ≈ 2 weeks. Tests: unit tests for parsers, budget and auth; an end-to-end test with a mock
 broker server (Tradex already supports overriding Fyers endpoints for this).
