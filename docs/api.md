@@ -468,8 +468,8 @@ the last tick and heartbeat the previous run left, which is where restart recove
     "budget": { "plan": "standard", "usedToday": 4, "dayCap": 4750, "usedThisMinute": 4, "minuteCap": 40,
       "byPriority": { "user": 0, "refresh": 0, "background": 4 }, "strikes": 0, "slowed": false, "coolingDown": false, "stoppedForToday": false } },
   "data": { "dbBytes": 487424,
-    "cashBhav": { "lastSession": "2026-11-05", "lastSuccessAt": …, "lastAttemptAt": …, "lastError": null },
-    "foBhav": { "lastSession": "2026-11-05", … }, "lots": { "count": 224, "source": "nse_mktlots", … },
+    "cashBhav": { "lastSession": "2026-11-05", "firstSession": "1994-11-03", "sessions": …, "lastSuccessAt": …, "lastAttemptAt": …, "lastError": null },
+    "foBhav": { "lastSession": "2026-11-05", "firstSession": "2001-11-09", "sessions": …, … }, "lots": { "count": 224, "source": "nse_mktlots", … },
     "foBan": { "tradeDate": "2026-11-06", … }, "resultsCalendar": { "events": 462, … },
     "candles": [ { "tf": "1d", "series": 2, "candles": 310, "lastSession": "2026-11-06" } ] },
   "jobs": [],
@@ -504,7 +504,7 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
   All NSE requests share one client: at most one per 1.1 s, browser headers, back-off on 403/429.
   The trade date inside each file must match the day asked for; a file for another date is
   recorded as `mismatch` and asked for again in the evening.
-- **Queued backfills** from the CLI, one at a time.
+- **Queued jobs** from the CLI, one at a time: broker backfills and NSE history downloads.
 - **Nightly backup** when `HUB_BACKUP_DIR` is set: once a day (at least 22 hours apart), never
   between 08:45 and 16:00 IST on weekdays, keeping the newest `HUB_BACKUP_KEEP` (default 7).
 
@@ -515,6 +515,8 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
 ```bash
 npm run hub -- data backfill --tf 1d --years 5                  # F&O stocks + NIFTY/BANKNIFTY/FINNIFTY
 npm run hub -- data backfill --tf 15m --years 1 --symbols SBIN,INFY
+npm run hub -- data nse-history                                 # NSE's archive since 1994 (cash) and 2001 (F&O)
+npm run hub -- data nse-history --from 2015-01-01 --only cash
 npm run hub -- data status
 npm run hub -- data cancel <job id>
 npm run hub -- data backup [--to ./backups] [--keep 7]
@@ -536,6 +538,35 @@ npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tr
   only the server can see), then shows the owner process, broker login and today's budget, each NSE dataset's last
   session, candle counts, how much of the F&O universe is stored per timeframe, live prices (the
   persistent symbols, the last tick, queued or stopped gap repair) and recent jobs.
+
+### data nse-history
+
+Downloads NSE's archive files for every session in a range into the same tables the evening run
+fills: the cash bhavcopy (`cash_bhav`) back to NSE's first session on **3 Nov 1994**, with delivery %
+from **2002**, and the F&O bhavcopy (`fo_futures`, so `/v1/fo/members` and `/v1/fo/oi`) back to the
+first stock futures on **9 Nov 2001**. No broker calls.
+
+- `--from` defaults to 1994-11-03, `--to` to yesterday (IST); `--only cash` or `--only fo` for one
+  dataset. Days already checked (`nse_days`) are never asked for again, so a later run only fills
+  what's missing: run it once for the whole archive, then again whenever you like.
+- NSE changed formats on **8 Jul 2024**. Before that the hub reads the old files:
+  `cmDDMONYYYYbhav.csv.zip` + `MTO_DDMMYYYY.DAT` (delivery %) for cash, `foDDMONYYYYbhav.csv.zip`
+  for F&O. The old F&O file has no previous close, lot or underlying price: those days' records
+  have `prevClose` 0, `lot` and `underlying` null, and no OI buildup class.
+- **Raw prices.** Bhavcopy prices are as traded: a split or bonus shows as a gap. `prev_close` is
+  NSE's, adjusted on the ex-date, which is what an adjustment step can be built on. Delisted stocks
+  are included (nothing is filtered to today's list). Old tickers stay as NSE wrote them
+  (`INFOSYSTCH` before 2011, `TELCO` before 2004) — `/v1/candles` doesn't serve these rows yet.
+- Every weekend day is asked for in the cash market: NSE held Budget-day, Muhurat and special
+  sessions on weekends (e.g. 1 Feb 2020, 12 Nov 2023, 20 Jan 2024). F&O is asked for the weekend
+  days the cash market traded.
+- One request per 1.1 s, like every NSE request: the whole archive is about 24,000 requests,
+  **seven to eight hours**, and an estimated **1–1.5 GB** in `hub.db` (a backup copies all of it). Years go
+  newest first.
+- Same rules as backfills: queued for the server when one is running, run here otherwise (Ctrl-C
+  stops it); **pauses in market hours** and for 15 minutes after NSE refuses three days in a row;
+  resumes on its own. History runs aren't recorded as the evening run's attempts, so they never
+  delay it.
 
 ### data backup
 
@@ -592,7 +623,7 @@ Brings a Tradex install's stored data into the hub, without broker or NSE calls.
 | `results_events` | (symbol, date) → company, purpose |
 | `datasets` | per dataset: last attempt, last success, last error, info |
 | `kv` | small hub state: the broker budget (today's counts, strikes, cooldown), the live heartbeat (`live.heartbeat`: when the last run was known alive) and the gap-repair queue (`live.recovery`) |
-| `jobs` | backfill jobs: params, state, progress, resume time |
+| `jobs` | queued jobs (`backfill`, `nse_history`): params, state, progress, resume time |
 | `live_quotes` | symbol → the last tick (ltp, change, day OHLC, cumulative volume, trade and receive times, source) |
 | `live_bars_1m` | (symbol, t) → o, h, l, c, v, source `live` (from ticks) or `broker` (repaired; never replaced by a live write). Kept `HUB_LIVE_RETENTION_DAYS` |
 | `live_subscriptions` | the persistent set: symbol → origin `config` (`HUB_LIVE_SYMBOLS`) or `pin` (API), added time |

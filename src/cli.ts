@@ -7,12 +7,14 @@ import { BACKFILL_TFS, BASE, finalBefore, type BaseTf } from "./history/timefram
 import { hubHealth } from "./health.js";
 import { createHub } from "./hub.js";
 import { ImportError, formatImportReport, importTradexLocked } from "./import/tradex.js";
-import { DEFAULT_INDICES, cancelJob, enqueueBackfill, listJobs, maxYears, recoverJobs, runBackfill, validateBackfill, type Job } from "./jobs/backfill.js";
+import { DEFAULT_INDICES, cancelJob, enqueueBackfill, enqueueJob, listJobs, maxYears, recoverJobs, runBackfill, validateBackfill, type Job, type NseHistoryParams } from "./jobs/backfill.js";
+import { lastHistoryDay, runNseHistory, validateNseHistory } from "./jobs/nseHistory.js";
 import { createLogger } from "./log.js";
 import { acquireOwner, ownerPid } from "./owner.js";
 import { getUniverse } from "./reference/universe.js";
 import { brokerStatus, dataFreshness } from "./status.js";
-import { DAY_MS } from "./time.js";
+import { ARCHIVE_FROM } from "./nse/datasets.js";
+import { DAY_MS, isoDay, istParts } from "./time.js";
 
 // Admin CLI, run on the machine that hosts the hub (it opens the database
 // directly; there is no remote admin API).
@@ -20,19 +22,22 @@ import { DAY_MS } from "./time.js";
 //   npm run hub -- keys list
 //   npm run hub -- keys revoke key_1a2b3c4d5e6f
 //   npm run hub -- data backfill --tf 1d --years 5 [--symbols SBIN,INFY]
+//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo]
 //   npm run hub -- data status
 //   npm run hub -- data cancel <job id>
 //   npm run hub -- data backup [--to ./backups] [--keep 7]
 //   npm run hub -- data import-tradex --db ../tradex/.cache/market.db [--screener ../tradex/.cache/screener] [--dry-run]
 //
-// A backfill runs in this process when no hub server is running; otherwise it
-// is queued and the server (which owns the broker connection) runs it.
+// A backfill or NSE history download runs in this process when no hub server
+// is running; otherwise it is queued and the server (which owns the broker and
+// NSE connections) runs it.
 
 const USAGE = `Usage:
   hub keys create <name> --scopes history,live,fo[,admin]
   hub keys list
   hub keys revoke <id>
   hub data backfill --tf 1d|15m|5m [--years N] [--symbols SBIN,INFY,…]
+  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo]
   hub data status
   hub data cancel <job id>
   hub data backup [--to <dir>] [--keep N]
@@ -70,7 +75,11 @@ function keys(db: Db, action: string, rest: string[]): number {
   return 1;
 }
 
-const jobLine = (job: Job) => `#${job.id} ${job.params.tf} ${job.params.years}y ${job.params.symbols ? `${job.params.symbols.length} symbols` : "F&O + indices"}: ${job.state} ${job.done}/${job.total}${job.failed ? ` (${job.failed} failed)` : ""} — ${job.message}${job.resumeAfter && job.state === "paused" ? ` (resumes ${fmt(job.resumeAfter)})` : ""}`;
+const jobTitle = (job: Job) =>
+  job.kind === "nse_history"
+    ? `NSE history ${job.params.from} → ${job.params.to} (${job.params.datasets.map((dataset) => (dataset === "cash_bhav" ? "cash" : "F&O")).join(", ")})`
+    : `${job.params.tf} ${job.params.years}y ${job.params.symbols ? `${job.params.symbols.length} symbols` : "F&O + indices"}`;
+const jobLine = (job: Job) => `#${job.id} ${jobTitle(job)}: ${job.state} ${job.done}/${job.total}${job.failed ? ` (${job.failed} failed)` : ""} — ${job.message}${job.resumeAfter && job.state === "paused" ? ` (resumes ${fmt(job.resumeAfter)})` : ""}`;
 
 async function data(db: Db, action: string, rest: string[]): Promise<number> {
   const config = loadConfig();
@@ -126,6 +135,46 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     }
   }
 
+  if (action === "nse-history") {
+    const only = flag(rest, "--only");
+    const datasets: NseHistoryParams["datasets"] = only === undefined ? ["cash_bhav", "fo_bhav"] : only === "cash" ? ["cash_bhav"] : only === "fo" ? ["fo_bhav"] : [];
+    const params: NseHistoryParams = { from: flag(rest, "--from") ?? isoDay(ARCHIVE_FROM.cash_bhav), to: flag(rest, "--to") ?? isoDay(lastHistoryDay(Date.now())), datasets };
+    const invalid = validateNseHistory(params, istParts().day);
+    if (invalid) {
+      console.error(invalid);
+      return 1;
+    }
+    const release = acquireOwner(config.dataDir);
+    if (!release) {
+      const queued = enqueueJob(db, "nse_history", params);
+      console.log(`Queued NSE history #${queued.id}. The running hub (pid ${ownerPid(config.dataDir) ?? "?"}) owns the NSE connection and will run it (pausing in market hours); follow it with \`hub data status\`.`);
+      return 0;
+    }
+    recoverJobs(db);
+    const job = enqueueJob(db, "nse_history", params);
+    const hub = createHub({ config, db, log, owner: true });
+    console.log(`Running NSE history #${job.id} here (no hub server is running): about 1.1 s per file. Ctrl-C stops it; run the same command again to resume.`);
+    const stop = () => {
+      cancelJob(db, job.id);
+      console.log("\nStopping after the current file…");
+    };
+    process.once("SIGINT", stop);
+    let lastPrinted = 0;
+    try {
+      const final = await runNseHistory(hub.nse, job.id, (progress) => {
+        // A line every ~25 days is enough to follow a run of thousands.
+        if (progress.state !== "running" || progress.done - lastPrinted >= 25 || progress.done === 0) {
+          console.log(jobLine(progress));
+          lastPrinted = progress.done;
+        }
+      });
+      return final.state === "error" ? 1 : 0;
+    } finally {
+      process.off("SIGINT", stop);
+      release();
+    }
+  }
+
   if (action === "status") {
     const hub = createHub({ config, db, log, owner: false });
     const fresh = dataFreshness(db);
@@ -142,7 +191,9 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     if (broker.budget) console.log(`Budget today: ${broker.budget.usedToday} calls (user ${broker.budget.byPriority.user}, background ${broker.budget.byPriority.background}), strikes ${broker.budget.strikes}`);
     console.log("\nNSE datasets:");
     console.log(`  cash bhavcopy   last session ${fresh.cashBhav.lastSession ?? "—"}   checked ${fmt(fresh.cashBhav.lastAttemptAt)}${fresh.cashBhav.lastError ? `   error: ${fresh.cashBhav.lastError}` : ""}`);
+    console.log(`                  ${fresh.cashBhav.sessions} sessions stored, from ${fresh.cashBhav.firstSession ?? "—"}`);
     console.log(`  F&O bhavcopy    last session ${fresh.foBhav.lastSession ?? "—"}   checked ${fmt(fresh.foBhav.lastAttemptAt)}${fresh.foBhav.lastError ? `   error: ${fresh.foBhav.lastError}` : ""}`);
+    console.log(`                  ${fresh.foBhav.sessions} sessions stored, from ${fresh.foBhav.firstSession ?? "—"}`);
     console.log(`  lot sizes       ${fresh.lots.count} (${fresh.lots.source ?? "—"})   fetched ${fmt(fresh.lots.lastSuccessAt)}`);
     console.log(`  F&O ban         for ${fresh.foBan.tradeDate ?? "—"}   fetched ${fmt(fresh.foBan.lastSuccessAt)}`);
     console.log(`  results         ${fresh.resultsCalendar.events} events   fetched ${fmt(fresh.resultsCalendar.lastSuccessAt)}`);

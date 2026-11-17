@@ -31,10 +31,19 @@ export interface BackfillParams {
   symbols: string[] | null;
 }
 
-export interface Job {
+/** `hub data nse-history` (src/jobs/nseHistory.ts): NSE's archive files for a range of days. */
+export interface NseHistoryParams {
+  /** ISO days, inclusive. */
+  from: string;
+  to: string;
+  datasets: Array<"cash_bhav" | "fo_bhav">;
+}
+
+/** A row of the `jobs` table: a broker backfill or an NSE history download. */
+export type Job = JobFields & ({ kind: "backfill"; params: BackfillParams } | { kind: "nse_history"; params: NseHistoryParams });
+
+interface JobFields {
   id: number;
-  kind: "backfill";
-  params: BackfillParams;
   state: JobState;
   done: number;
   total: number;
@@ -49,7 +58,7 @@ export interface Job {
 
 interface JobRow {
   id: number;
-  kind: "backfill";
+  kind: Job["kind"];
   params: string;
   state: JobState;
   done: number;
@@ -63,21 +72,23 @@ interface JobRow {
   updated_at: number;
 }
 
-const toJob = (row: JobRow): Job => ({
-  id: row.id,
-  kind: row.kind,
-  params: JSON.parse(row.params) as BackfillParams,
-  state: row.state,
-  done: row.done,
-  total: row.total,
-  failed: row.failed,
-  message: row.message,
-  resumeAfter: row.resume_after,
-  createdAt: row.created_at,
-  startedAt: row.started_at,
-  finishedAt: row.finished_at,
-  updatedAt: row.updated_at,
-});
+// The row's kind decides its params' shape; the cast pairs them.
+const toJob = (row: JobRow): Job =>
+  ({
+    id: row.id,
+    kind: row.kind,
+    params: JSON.parse(row.params) as Job["params"],
+    state: row.state,
+    done: row.done,
+    total: row.total,
+    failed: row.failed,
+    message: row.message,
+    resumeAfter: row.resume_after,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    updatedAt: row.updated_at,
+  }) as Job;
 
 /** Largest `years` each timeframe can use (the broker's window). */
 export const maxYears = (tf: BaseTf) => Math.max(1, Math.floor(BASE[tf].windowDays / 365) + (BASE[tf].daily ? 1 : 0));
@@ -91,9 +102,14 @@ export function validateBackfill(params: BackfillParams): string | null {
 
 /** Queue a backfill, or return the open (queued/paused/running) job with the same parameters. */
 export function enqueueBackfill(db: Db, params: BackfillParams, now = Date.now()): Job {
-  const open = (db.prepare("select * from jobs where kind = 'backfill' and state in ('queued', 'paused', 'running') and params = ?").get(JSON.stringify(params)) as JobRow | undefined) ?? null;
+  return enqueueJob(db, "backfill", params, now);
+}
+
+/** Queue a job, or return the open (queued/paused/running) job of that kind with the same parameters. */
+export function enqueueJob(db: Db, kind: Job["kind"], params: Job["params"], now = Date.now()): Job {
+  const open = (db.prepare("select * from jobs where kind = ? and state in ('queued', 'paused', 'running') and params = ?").get(kind, JSON.stringify(params)) as JobRow | undefined) ?? null;
   if (open) return toJob(open);
-  const id = Number(db.prepare("insert into jobs (kind, params, state, message, created_at, updated_at) values ('backfill', ?, 'queued', 'Queued.', ?, ?)").run(JSON.stringify(params), now, now).lastInsertRowid);
+  const id = Number(db.prepare("insert into jobs (kind, params, state, message, created_at, updated_at) values (?, ?, 'queued', 'Queued.', ?, ?)").run(kind, JSON.stringify(params), now, now).lastInsertRowid);
   return getJob(db, id)!;
 }
 
@@ -121,7 +137,7 @@ export function cancelJob(db: Db, id: number, now = Date.now()): boolean {
   return db.prepare("update jobs set state = 'cancelled', message = 'Cancelled.', finished_at = ?, updated_at = ? where id = ? and state in ('queued', 'paused', 'running')").run(now, now, id).changes > 0;
 }
 
-function update(db: Db, id: number, fields: Partial<Pick<Job, "state" | "done" | "total" | "failed" | "message" | "resumeAfter" | "startedAt" | "finishedAt">>, now: number) {
+export function updateJob(db: Db, id: number, fields: Partial<Pick<Job, "state" | "done" | "total" | "failed" | "message" | "resumeAfter" | "startedAt" | "finishedAt">>, now: number) {
   const columns: Record<string, unknown> = { state: fields.state, done: fields.done, total: fields.total, failed: fields.failed, message: fields.message, resume_after: fields.resumeAfter, started_at: fields.startedAt, finished_at: fields.finishedAt };
   const set = Object.entries(columns).filter(([, value]) => value !== undefined);
   db.prepare(`update jobs set ${[...set.map(([key]) => `${key} = ?`), "updated_at = ?"].join(", ")} where id = ?`).run(...set.map(([, value]) => value), now, id);
@@ -150,7 +166,7 @@ export interface BackfillDeps {
 export async function runBackfill(deps: BackfillDeps, id: number, onProgress?: (job: Job) => void): Promise<Job> {
   const clock = deps.clock ?? Date.now;
   const job = getJob(deps.db, id);
-  if (!job) throw new Error(`No job ${id}.`);
+  if (!job || job.kind !== "backfill") throw new Error(`No backfill job ${id}.`);
   const { tf, years } = job.params;
   const now = clock();
   const symbols = job.params.symbols ?? [...DEFAULT_INDICES, ...getUniverse(deps.db, "fno", now).members.map((member) => member.symbol).filter((symbol) => !DEFAULT_INDICES.includes(symbol))];
@@ -158,7 +174,7 @@ export async function runBackfill(deps: BackfillDeps, id: number, onProgress?: (
   const todo = symbols.filter((symbol) => !deps.history.isStored(symbol, tf, want));
   let done = symbols.length - todo.length;
   let failed = 0;
-  update(deps.db, id, { state: "running", total: symbols.length, done, failed: 0, startedAt: job.startedAt ?? now, resumeAfter: null, message: todo.length ? `Fetching ${todo.length} series of ${tf} (${years}y) at background priority…` : "Everything is already stored." }, now);
+  updateJob(deps.db, id, { state: "running", total: symbols.length, done, failed: 0, startedAt: job.startedAt ?? now, resumeAfter: null, message: todo.length ? `Fetching ${todo.length} series of ${tf} (${years}y) at background priority…` : "Everything is already stored." }, now);
   onProgress?.(getJob(deps.db, id)!);
 
   let pause: { reason: Parameters<typeof resumeTime>[0]; message: string } | null = null;
@@ -191,7 +207,7 @@ export async function runBackfill(deps: BackfillDeps, id: number, onProgress?: (
         }
         if (pause || fatal) return;
       }
-      update(deps.db, id, { done, failed, message: `${done}/${symbols.length} stored${failed ? `, ${failed} failed` : ""}…` }, clock());
+      updateJob(deps.db, id, { done, failed, message: `${done}/${symbols.length} stored${failed ? `, ${failed} failed` : ""}…` }, clock());
       onProgress?.(getJob(deps.db, id)!);
     }
   };
@@ -202,9 +218,9 @@ export async function runBackfill(deps: BackfillDeps, id: number, onProgress?: (
   const finalPause = pause as { reason: Parameters<typeof resumeTime>[0]; message: string } | null;
   if (state === "cancelled") {
     // leave as cancelled
-  } else if (fatal) update(deps.db, id, { state: "error", done, failed, message: fatal, finishedAt: end }, end);
-  else if (finalPause) update(deps.db, id, { state: "paused", done, failed, message: finalPause.message, resumeAfter: resumeTime(finalPause.reason, end) }, end);
-  else update(deps.db, id, { state: "done", done, failed, finishedAt: end, message: failed ? `Done — ${failed} symbol(s) failed; run it again to retry them.` : "Done — everything is stored." }, end);
+  } else if (fatal) updateJob(deps.db, id, { state: "error", done, failed, message: fatal, finishedAt: end }, end);
+  else if (finalPause) updateJob(deps.db, id, { state: "paused", done, failed, message: finalPause.message, resumeAfter: resumeTime(finalPause.reason, end) }, end);
+  else updateJob(deps.db, id, { state: "done", done, failed, finishedAt: end, message: failed ? `Done — ${failed} symbol(s) failed; run it again to retry them.` : "Done — everything is stored." }, end);
   const final = getJob(deps.db, id)!;
   onProgress?.(final);
   deps.log.info("backfill finished a run", { id, state: final.state, done: final.done, total: final.total, failed: final.failed });

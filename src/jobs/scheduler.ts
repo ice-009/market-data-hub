@@ -5,6 +5,7 @@ import { recentDays, refreshBan, refreshLots, refreshResults, syncDays, type Nse
 import { latestBan, readRuns, type DatasetName, type DatasetRun } from "../nse/store.js";
 import { DAY_MS, MINUTE_MS, istDayStart, istParts, isWeekday } from "../time.js";
 import { nextRunnableJob, recoverJobs, runBackfill, type BackfillDeps } from "./backfill.js";
+import { runNseHistory } from "./nseHistory.js";
 
 // Background work inside the server process (the owner of NSE and broker
 // connections):
@@ -13,7 +14,8 @@ import { nextRunnableJob, recoverJobs, runBackfill, type BackfillDeps } from "./
 //     start that's the catch-up, in the evening it's normally just today's file
 //     once NSE has published it. Lots, the F&O ban list and the results
 //     calendar are refreshed once each evening (and on start when stale).
-//   - queued backfill jobs (from `hub data backfill`), one at a time.
+//   - queued jobs, one at a time: broker backfills (`hub data backfill`) and
+//     NSE history downloads (`hub data nse-history`).
 //   - a nightly database backup when HUB_BACKUP_DIR is set (src/backup.ts).
 // Every attempt is spaced at least RETRY_MS from the last one per dataset, so a
 // file NSE hasn't published yet costs one request every half hour.
@@ -151,9 +153,10 @@ export class Scheduler {
     if (!job) return;
     this.jobBusy = true;
     try {
-      await runBackfill(this.deps.backfill, job.id);
+      if (job.kind === "nse_history") await runNseHistory(this.deps.nse, job.id);
+      else await runBackfill(this.deps.backfill, job.id);
     } catch (error) {
-      this.deps.log.error("backfill job failed", { id: job.id, error });
+      this.deps.log.error("job failed", { id: job.id, kind: job.kind, error });
     } finally {
       this.jobBusy = false;
     }

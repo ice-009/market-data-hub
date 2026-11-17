@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { deflateRawSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { readSeries, writeBars } from "../src/history/store.js";
 import { banTarget, dueTasks } from "../src/jobs/scheduler.js";
@@ -16,6 +15,7 @@ import { type DatasetName, checkedDays, foMembersOn, latestBan, markDay, readFoS
 import { ZipError, unzipSingle } from "../src/nse/unzip.js";
 import { DAY_MS, isoDay, parseIsoDay } from "../src/time.js";
 import { ist, makeHub, type TestHub } from "./support/hub.js";
+import { fakeFetch, fakeTime, makeZip, type Route } from "./support/nse.js";
 
 // Fixtures (a few KB): real NSE UDiFF F&O rows trimmed to a few underlyings
 // (from Tradex) — fo-bhav-20251001.csv with tickers NSE later renamed, and
@@ -69,32 +69,6 @@ describe("parsers (pure)", () => {
   });
 });
 
-/** A one-file zip, built by hand, to test the reader's edges (from Tradex's tests). */
-function makeZip(name: string, data: Buffer, method: 0 | 8 = 8, files = 1): Buffer {
-  const body = method === 8 ? deflateRawSync(data) : data;
-  const nameBytes = Buffer.from(name);
-  const local = Buffer.alloc(30);
-  local.writeUInt32LE(0x04034b50, 0);
-  local.writeUInt16LE(method, 8);
-  local.writeUInt32LE(body.length, 18);
-  local.writeUInt32LE(data.length, 22);
-  local.writeUInt16LE(nameBytes.length, 26);
-  const central = Buffer.alloc(46);
-  central.writeUInt32LE(0x02014b50, 0);
-  central.writeUInt16LE(method, 10);
-  central.writeUInt32LE(body.length, 20);
-  central.writeUInt32LE(data.length, 24);
-  central.writeUInt16LE(nameBytes.length, 28);
-  central.writeUInt32LE(0, 42);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(files, 8);
-  end.writeUInt16LE(files, 10);
-  end.writeUInt32LE(central.length + nameBytes.length, 12);
-  end.writeUInt32LE(local.length + nameBytes.length + body.length, 16);
-  return Buffer.concat([local, nameBytes, body, central, nameBytes, end]);
-}
-
 describe("unzip", () => {
   it("reads NSE's single-file zip and refuses anything else", () => {
     expect(unzipSingle(fixture("fo-bhav-20251029.csv.zip")).name).toBe("BhavCopy_NSE_FO_0_0_0_20251029_F_0000.csv");
@@ -122,31 +96,6 @@ describe("which days to download (pure)", () => {
     expect(days(daysToCheck({ today: thu, minutes: 0, from: d("2026-11-03"), publishMin: 18 * 60, checked, recheck: ["mismatch"] }))).toEqual(["2026-11-04"]);
   });
 });
-
-/** A fake clock + sleep: sleeping advances time instantly and is recorded. */
-function fakeTime(start: number) {
-  const state = { now: start, sleeps: [] as number[] };
-  return {
-    state,
-    clock: () => state.now,
-    sleep: async (ms: number) => {
-      state.sleeps.push(ms);
-      state.now += ms;
-    },
-  };
-}
-
-type Route = Response | (() => Response);
-function fakeFetch(routes: Record<string, Route | Route[]>, log: Array<{ url: string; at: number; headers: Record<string, string> }>, clock: () => number): typeof fetch {
-  return (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(input);
-    log.push({ url, at: clock(), headers: (init?.headers ?? {}) as Record<string, string> });
-    let route = routes[url];
-    if (Array.isArray(route)) route = route.length > 1 ? route.shift()! : route[0];
-    if (!route) return new Response("not found", { status: 404 });
-    return typeof route === "function" ? route() : route.clone();
-  }) as typeof fetch;
-}
 
 describe("polite NSE client", () => {
   it("spaces requests ≥ 1.1 s apart and sends browser headers", async () => {

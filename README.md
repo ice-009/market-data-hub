@@ -452,6 +452,10 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 - **Coming from Tradex?** `npm run hub -- data import-tradex --db <Tradex .cache/market.db>
   --screener <.cache/screener> --dry-run` shows what Tradex's stored candles, delivery % and F&O
   history would bring; the whole move is in [docs/migrate-tradex.md](docs/migrate-tradex.md).
+- **Decades of history:** the broker serves 5 years of daily candles; NSE's archive goes back to
+  1994. `npm run hub -- data nse-history` downloads it (raw daily prices of every stock, delisted
+  ones included, delivery % since 2002, F&O since 2001) in about eight hours, pausing in market
+  hours — details in [docs/api.md](docs/api.md#data-nse-history).
 - **Updating:** `git pull && npm install && npm run build` (or `docker compose up -d --build`).
   Database migrations run automatically at start-up.
 - **Status at a glance:** `npm run hub -- data status` (or `GET /v1/status`) shows the health check, the broker
@@ -480,7 +484,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 market-data-hub/
 ├─ src/
 │  ├─ server.ts          # entry point: config → database → HTTP server, graceful shutdown
-│  ├─ cli.ts             # admin CLI (API keys, backfills, data status, backup, import-tradex)
+│  ├─ cli.ts             # admin CLI (API keys, backfills, NSE history, data status, backup, import-tradex)
 │  ├─ config.ts          # environment parsing; broker secrets kept apart for the scrubber
 │  ├─ log.ts             # JSON logger + secret scrubber (the only way the server logs)
 │  ├─ db.ts              # SQLite (WAL) + ordered migrations
@@ -496,7 +500,7 @@ market-data-hub/
 │  ├─ nse/               # NSE daily files: parsers, downloads, store
 │  ├─ live/              # live prices: feed, store (quotes, 1-minute bars), gap repair,
 │  │                     #   candle merge, stream fan-out, and service.ts wiring them
-│  ├─ jobs/              # scheduler (NSE files, backfills, nightly backup) and backfill jobs
+│  ├─ jobs/              # scheduler (NSE files, queued jobs, nightly backup), backfill and NSE history jobs
 │  ├─ import/            # `data import-tradex`: Tradex's stored data → the hub (mapping rules in tradexMap.ts)
 │  └─ http/
 │     ├─ app.ts          # Hono app: /healthz, auth middleware, requireScope, /v1/status, errors
@@ -595,6 +599,7 @@ F&O open interest and membership.
 | **H3** | TypeScript client package; a `hub` data source in Tradex | 🚧 |
 | **H4** | Backups (online, rotated, nightly), health in `/v1/status` for uptime checks, [Oracle Cloud guide](docs/oracle.md), [importing Tradex's stored data](docs/migrate-tradex.md) | ✅ done |
 | **H5** | Endpoints for Tradex to drop its own broker and NSE fetching: batch daily candles, one day's OI across stocks, F&O membership over a range, futures contracts as symbols, 1-minute candles | ✅ done |
+| **H6** | 30 years of daily history from NSE's archive: download (cash since 1994, F&O since 2001) ✅; split/bonus adjustment and renamed tickers; serving it through `/v1/candles` | 🚧 |
 
 Design details: [docs/plan.md](docs/plan.md).
 
