@@ -24,7 +24,7 @@ symbols).
 | `GET /v1/fo/contracts?symbol` | fo | NSE F&O bhavcopy |
 | `GET /v1/fo/ban` | fo | NSE `fo_secban.csv` |
 | `GET /v1/lots[?symbol]` | history | NSE `fo_mktlots.csv` (fallback: F&O bhavcopy lots) |
-| `GET /v1/results-calendar?from&to[&symbol]` | history | NSE event calendar |
+| `GET /v1/results-calendar?from&to[&symbol]` | history | board meetings from NSE's daily PR zip |
 | `GET /v1/market/regime[?universe]` | history | stored daily candles + cash bhavcopy |
 | `GET /v1/symbols/history?symbol[&date]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
 | `GET /v1/symbols/changes[?symbol][&from&to]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
@@ -257,13 +257,28 @@ GET /v1/lots               →  { "source": "nse_mktlots", "fetchedAt": …, "co
 
 ## GET /v1/results-calendar
 
-Financial-results dates from NSE's event calendar. Default range: 7 days ago to 60 days ahead.
+Board meetings about financial results. Default range: 7 days ago to 60 days ahead.
 
 ```json
-GET /v1/results-calendar?from=2026-11-06&to=2026-11-07
-{ "from": "2026-11-06", "to": "2026-11-07", "fetchedAt": 1793946085857, "events": [
-    { "symbol": "AASTHA", "date": "2026-11-07", "day": 1794009600000, "company": "Aastha Spintex Limited", "purpose": "Financial Results" }, … ] }
+GET /v1/results-calendar?from=2026-10-23&to=2026-10-23
+{ "from": "2026-10-23", "to": "2026-10-23", "asOf": "2026-10-22", "fetchedAt": 1792677000000, "events": [
+    { "symbol": "CRISIL", "date": "2026-10-23", "day": 1792713600000, "company": "Crisil Limited",
+      "purpose": "Financial Results/Dividend To consider and approve the financial results for the period ended September 30, 2026 and div" }, … ] }
 ```
+
+The dates come from NSE's archive, not its website: each session's PR zip
+(`archives/equities/bhavcopy/pr/PRDDMMYY.zip`) has a board-meetings file (`bmDDMMYYYY.txt`) listing
+the meetings companies announced that day, and every meeting whose purpose mentions results is an
+event. So the calendar is everything announced in the PR zips the hub has read — the last 60 days'
+by the evening run, back to 2010 with [`data nse-history`](#data-nse-history).
+
+- `asOf`: the newest session whose PR zip is stored (a meeting announced after it isn't in yet);
+  `fetchedAt`: the last time the hub read PR zips without an error. `503 not_ready` until the first.
+- `purpose` is NSE's text — the purposes ("Financial Results/Dividend") and then the company's own
+  description — cut at 120 characters. A meeting listed twice joins both texts with ` · `.
+- A meeting announced again for the same date replaces the earlier row. A meeting **moved** to
+  another date shows on both dates: the announcement of the new date doesn't say which meeting it
+  replaces.
 
 ## GET /v1/market/regime
 
@@ -505,8 +520,8 @@ code. A problem is raised when:
 
 | Check | Problem when |
 |---|---|
-| Cash / F&O bhavcopy | a trading day's file isn't stored after 20:00 IST that day (days NSE had no file for — `holiday`/`mismatch` — don't count), or nothing is stored at all. Today's file missing with no sign of a session today (no live minutes, no daily bar) is only a *warning*: it may be an exchange holiday, which the hub learns from NSE the next day |
-| Lot sizes, ban list, results calendar | never fetched, or last fetched over 4 days ago |
+| Cash / F&O bhavcopy, PR zip (results calendar) | a trading day's file isn't stored after 20:00 IST that day (days NSE had no file for — `holiday`/`mismatch` — don't count), or nothing is stored at all. Today's file missing with no sign of a session today (no live minutes, no daily bar) is only a *warning*: it may be an exchange holiday, which the hub learns from NSE the next day |
+| Lot sizes, ban list | never fetched, or last fetched over 4 days ago |
 | Broker | configured, and the login is failing (in its retry wait), or calls are stopped for today (budget spent / strikes). Cooling down after a rate-limit warning, or another process owning the connection, is a warning |
 | Live feed | during market hours (09:15–15:30 IST, weekdays) the feed isn't running or is `down` (no socket, no polling). Socket down but polling is a warning |
 | Backups | `HUB_BACKUP_DIR` is set and it holds no backup, or the newest is over 2 days old |
@@ -536,7 +551,8 @@ the last tick and heartbeat the previous run left, which is where restart recove
   "data": { "dbBytes": 487424,
     "cashBhav": { "lastSession": "2026-11-05", "firstSession": "1994-11-03", "sessions": …, "lastSuccessAt": …, "lastAttemptAt": …, "lastError": null },
     "foBhav": { "lastSession": "2026-11-05", "firstSession": "2001-11-09", "sessions": …, … }, "lots": { "count": 224, "source": "nse_mktlots", … },
-    "foBan": { "tradeDate": "2026-11-06", … }, "resultsCalendar": { "events": 462, … },
+    "foBan": { "tradeDate": "2026-11-06", … },
+    "resultsCalendar": { "upcoming": 41, "lastSession": "2026-11-05", "firstSession": "2026-09-08", "sessions": 42, "lastSuccessAt": …, "lastAttemptAt": …, "lastError": null },
     "symbolChanges": { "count": 1071, "isins": { "pairs": 1484, "days": 2 }, "lastSuccessAt": …, … },
     "candles": [ { "tf": "1d", "series": 2, "candles": 310, "lastSession": "2026-11-06" } ] },
   "jobs": [],
@@ -566,11 +582,17 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
 
 - **NSE files**, in the evening IST: cash bhavcopy (after 17:30) and F&O bhavcopy (after 18:00)
   for any of the last 10 trading days not stored yet — on start that is the catch-up — then lots,
-  the ban list (from 18:00 the next session's), the results calendar and NSE's ticker renames
-  (`symbolchange.csv`) once each evening (and on start when never fetched or over two days old). Each dataset is retried at most every 30 minutes.
+  the ban list (from 18:00 the next session's) and NSE's ticker renames (`symbolchange.csv`) once
+  each evening (and on start when never fetched or over two days old), then the PR zip (after 17:30)
+  for any of the last **60** days not stored yet: its board meetings are the results calendar, and
+  meetings are announced weeks ahead (a new hub reads ~40 zips once, about a minute). Each dataset
+  is retried at most every 30 minutes.
   All NSE requests share one client: at most one per 1.1 s, browser headers, back-off on 403/429.
-  The trade date inside each file must match the day asked for; a file for another date is
-  recorded as `mismatch` and asked for again in the evening.
+  Everything comes from NSE's archive host (`nsearchives.nseindia.com`); nothing from
+  `www.nseindia.com`, whose JSON API hangs behind bot protection.
+  The trade date inside each file (for the PR zip, in its board-meetings file's name) must match the
+  day asked for; a file for another date is recorded as `mismatch` and asked for again in the
+  evening (the PR zip: within the last 10 days).
 - **Queued jobs** from the CLI, one at a time: broker backfills and NSE history downloads.
 - **Nightly backup** when `HUB_BACKUP_DIR` is set: once a day (at least 22 hours apart), never
   between 08:45 and 16:00 IST on weekdays, keeping the newest `HUB_BACKUP_KEEP` (default 7).
@@ -582,7 +604,7 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
 ```bash
 npm run hub -- data backfill --tf 1d --years 5                  # F&O stocks + NIFTY/BANKNIFTY/FINNIFTY
 npm run hub -- data backfill --tf 15m --years 1 --symbols SBIN,INFY
-npm run hub -- data nse-history                                 # NSE's archive since 1994 (cash) and 2001 (F&O)
+npm run hub -- data nse-history                                 # NSE's archive since 1994 (cash), 2001 (F&O), 2010 (PR zip)
 npm run hub -- data nse-history --from 2015-01-01 --only cash
 npm run hub -- data status
 npm run hub -- data symbols                                     # every F&O stock's history across its renames
@@ -612,11 +634,12 @@ npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tr
 
 Downloads NSE's archive files for every session in a range into the same tables the evening run
 fills: the cash bhavcopy (`cash_bhav`) back to NSE's first session on **3 Nov 1994**, with delivery %
-from **2002**, and the F&O bhavcopy (`fo_futures`, so `/v1/fo/members` and `/v1/fo/oi`) back to the
-first stock futures on **9 Nov 2001**. No broker calls.
+from **2002**, the F&O bhavcopy (`fo_futures`, so `/v1/fo/members` and `/v1/fo/oi`) back to the
+first stock futures on **9 Nov 2001**, and the PR zip's board meetings (`results_events`, so past
+results dates in `/v1/results-calendar`) back to **2010** (2008 and 2009 answer 404). No broker calls.
 
-- `--from` defaults to 1994-11-03, `--to` to yesterday (IST); `--only cash` or `--only fo` for one
-  dataset. Days already checked (`nse_days`) are never asked for again, so a later run only fills
+- `--from` defaults to 1994-11-03, `--to` to yesterday (IST); `--only cash`, `--only fo` or
+  `--only pr` for one dataset. Days already checked (`nse_days`) are never asked for again, so a later run only fills
   what's missing: run it once for the whole archive, then again whenever you like.
 - NSE changed formats on **8 Jul 2024**. Before that the hub reads the old files:
   `cmDDMONYYYYbhav.csv.zip` + `MTO_DDMMYYYY.DAT` (delivery %) for cash, `foDDMONYYYYbhav.csv.zip`
@@ -629,14 +652,14 @@ first stock futures on **9 Nov 2001**. No broker calls.
   ticker. `/v1/candles` doesn't serve these rows yet.
 - **ISINs.** Old-format cash days from 2011 carry each security's ISIN, recorded as the day is stored
   (`isin_symbols`, for renames). Stored days whose ISINs weren't read — downloaded before the hub kept
-  them — have just their cash file read again, once, when `--only fo` isn't given: about 3,400
+  them — have just their cash file read again, once, whenever the cash market is included: about 3,400
   requests (an hour) for 2011 to 5 Jul 2024. Prices and delivery % already stored are left alone.
 - Every weekend day is asked for in the cash market: NSE held Budget-day, Muhurat and special
-  sessions on weekends (e.g. 1 Feb 2020, 12 Nov 2023, 20 Jan 2024). F&O is asked for the weekend
-  days the cash market traded.
-- One request per 1.1 s, like every NSE request: the whole archive is about 24,000 requests,
-  **seven to eight hours**, and an estimated **1–1.5 GB** in `hub.db` (a backup copies all of it). Years go
-  newest first.
+  sessions on weekends (e.g. 1 Feb 2020, 12 Nov 2023, 20 Jan 2024). F&O and the PR zip are asked
+  for the weekend days the cash market traded.
+- One request per 1.1 s, like every NSE request: the whole archive is about 28,000 requests,
+  **eight to ten hours** (PR zips are 0.3–0.7 MB each; only their results rows are kept), and an
+  estimated **1–1.5 GB** in `hub.db` (a backup copies all of it). Years go newest first.
 - Same rules as backfills: queued for the server when one is running, run here otherwise (Ctrl-C
   stops it); **pauses in market hours** and for 15 minutes after NSE refuses three days in a row;
   resumes on its own. History runs aren't recorded as the evening run's attempts, so they never
@@ -699,12 +722,12 @@ Brings a Tradex install's stored data into the hub, without broker or NSE calls.
 | `api_keys` | key hashes, scopes, last use (H0) |
 | `series` | per (symbol, tf ∈ 1d/15m/5m/1m): coverage `[covered_from, covered_to)` of final bars, `synced_at`, count, first/last bar |
 | `candles` | (symbol, tf, t) → o, h, l, c, v |
-| `nse_days` | per (dataset ∈ cash_bhav/fo_bhav, day): `ok` / `holiday` / `mismatch`, rows, checked time, note (`imported from Tradex` for imported days) |
+| `nse_days` | per (dataset ∈ cash_bhav/fo_bhav/pr, day): `ok` / `holiday` / `mismatch`, rows (for `pr`: results events), checked time, note (`imported from Tradex` for imported days) |
 | `cash_bhav` | (symbol, day) → series (`EQ`/`BE`; `EQ/BE` on days imported from Tradex), prev close, OHLC, volume, delivery % |
 | `fo_futures` | (day, symbol) → near/next month close, settle, prev close, volume, OI, ΔOI; combined OI and ΔOI; lot; underlying |
 | `lot_sizes` | symbol → lot |
 | `fo_ban` | trade date → symbols |
-| `results_events` | (symbol, date) → company, purpose |
+| `results_events` | (symbol, meeting date) → company, purpose; from the PR zips' board meetings |
 | `symbol_changes` | NSE's `symbolchange.csv`: (old symbol, effective date) → new symbol, company |
 | `isin_symbols` | (ISIN, symbol) → first and last stored day it traded under that ticker (old-format cash files, 2011–2024) |
 | `isin_days` | old-format cash days whose ISINs were read, with how many |

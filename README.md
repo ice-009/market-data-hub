@@ -456,7 +456,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
   history would bring; the whole move is in [docs/migrate-tradex.md](docs/migrate-tradex.md).
 - **Decades of history:** the broker serves 5 years of daily candles; NSE's archive goes back to
   1994. `npm run hub -- data nse-history` downloads it (raw daily prices of every stock, delisted
-  ones included, delivery % since 2002, F&O since 2001) in about eight hours, pausing in market
+  ones included, delivery % since 2002, F&O since 2001, results dates since 2010) in about nine hours, pausing in market
   hours — details in [docs/api.md](docs/api.md#data-nse-history). Renamed tickers (TELCO →
   TATAMOTORS → TMPV) are joined from NSE's `symbolchange.csv` and the files' ISINs:
   `GET /v1/symbols/history`, and `npm run hub -- data symbols` checks every F&O stock's stored history

@@ -149,7 +149,7 @@ describe("ticker renames in the hub", () => {
     t = makeHub();
     const time = fakeTime(now);
     const calls: Array<{ url: string; at: number; headers: Record<string, string> }> = [];
-    const ctx: NseContext = { db: t.db, log: quiet, clock: time.clock, urls: { archiveUrl: archive, wwwUrl: "https://www.nse.test" }, nse: new NseClient({ log: quiet, clock: time.clock, sleep: time.sleep, fetch: fakeFetch(routes, calls, time.clock) }) };
+    const ctx: NseContext = { db: t.db, log: quiet, clock: time.clock, urls: { archiveUrl: archive }, nse: new NseClient({ log: quiet, clock: time.clock, sleep: time.sleep, fetch: fakeFetch(routes, calls, time.clock) }) };
     return { ctx, calls };
   };
 
