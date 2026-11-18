@@ -1,4 +1,5 @@
 import { backupDb, backupDue, listBackups } from "../backup.js";
+import { DiskSpaceError } from "../disk.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
 import { recentDays, refreshBan, refreshLots, syncDays, type NseContext } from "../nse/datasets.js";
@@ -27,6 +28,8 @@ export const RECENT_DAYS = 10;
 export const RESULTS_LOOKBACK_DAYS = 60;
 export const RETRY_MS = 30 * MINUTE_MS;
 export const TICK_MS = MINUTE_MS;
+/** After a nightly backup fails (or is refused for lack of disk), wait this long before trying again. */
+export const BACKUP_RETRY_MS = 60 * MINUTE_MS;
 /** The evening window for once-a-day refreshes (minutes after IST midnight). */
 export const EVENING_FROM_MIN = 18 * 60 + 30;
 export const EVENING_TO_MIN = 23 * 60 + 30;
@@ -82,8 +85,8 @@ export interface SchedulerDeps {
   nse: NseContext;
   backfill: BackfillDeps;
   log: Logger;
-  /** Nightly backups; absent when HUB_BACKUP_DIR isn't set. */
-  backup?: { db: Db; dir: string; keep: number };
+  /** Nightly backups; absent when HUB_BACKUP_DIR isn't set. `minFreeBytes`: HUB_DISK_MIN_GB. */
+  backup?: { db: Db; dir: string; keep: number; minFreeBytes: number; free?: (dir: string) => number | null };
 }
 
 export class Scheduler {
@@ -91,6 +94,7 @@ export class Scheduler {
   private nseBusy = false;
   private jobBusy = false;
   private backupBusy = false;
+  private backupRetryAt = 0;
   private stopping = false;
 
   constructor(private readonly deps: SchedulerDeps) {}
@@ -116,13 +120,16 @@ export class Scheduler {
     const backup = this.deps.backup;
     if (!backup || this.backupBusy || this.stopping) return;
     const now = this.deps.nse.clock();
-    if (!backupDue(now, listBackups(backup.dir)[0]?.at ?? null)) return;
+    if (now < this.backupRetryAt || !backupDue(now, listBackups(backup.dir)[0]?.at ?? null)) return;
     this.backupBusy = true;
     try {
-      const result = await backupDb(backup.db, backup.dir, backup.keep, now);
-      this.deps.log.info("database backed up", { file: result.file, bytes: result.bytes, removed: result.removed.length });
+      const result = await backupDb(backup.db, backup.dir, backup.keep, now, { minFreeBytes: backup.minFreeBytes, free: backup.free });
+      this.deps.log.info("database backed up", { file: result.file, bytes: result.bytes, dbBytes: result.dbBytes, removed: result.removed.length });
     } catch (error) {
-      this.deps.log.error("database backup failed", { error });
+      this.backupRetryAt = now + BACKUP_RETRY_MS;
+      // Low disk is reported by /v1/status too; say it once an hour, not every minute.
+      if (error instanceof DiskSpaceError) this.deps.log.warn("nightly backup skipped: low disk space", { reason: error.message, freeBytes: error.free, needBytes: error.need });
+      else this.deps.log.error("database backup failed", { error });
     } finally {
       this.backupBusy = false;
     }

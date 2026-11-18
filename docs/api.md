@@ -459,8 +459,14 @@ code. A problem is raised when:
 | Broker | configured, and the login is failing (in its retry wait), or calls are stopped for today (budget spent / strikes). Cooling down after a rate-limit warning, or another process owning the connection, is a warning |
 | Live feed | during market hours (09:15–15:30 IST, weekdays) the feed isn't running or is `down` (no socket, no polling). Socket down but polling is a warning |
 | Backups | `HUB_BACKUP_DIR` is set and it holds no backup, or the newest is over 2 days old |
+| Disk | free space where the database (or, on another disk, the backups) lives is under `HUB_DISK_MIN_GB` (default 2 GB) — NSE history and backups have stopped by then, and SQLite writes are next. Under `HUB_DISK_WARN_GB` (default 5 GB) is a warning |
 
 `HUB_JOBS=off` adds a warning (NSE files then go stale by design).
+
+`disk`: `volumes` (one entry per disk: `holds` is `the database`, `backups` or `the database and
+backups`, `freeBytes` null when it can't be read), the thresholds `warnBelowBytes` and
+`minFreeBytes`, and `backups` (`count`, total `bytes`, `newestBytes`; null without
+`HUB_BACKUP_DIR`). No paths. Expected sizes: [Disk space](#disk-space).
 
 ```bash
 # An uptime checker (Uptime Kuma, Healthchecks, a cron + curl) with a key of its own:
@@ -488,6 +494,8 @@ the last tick and heartbeat the previous run left, which is where restart recove
     "foBan": { "tradeDate": "2026-11-06", … },
     "resultsCalendar": { "upcoming": 41, "lastSession": "2026-11-05", "firstSession": "2026-09-08", "sessions": 42, "lastSuccessAt": …, "lastAttemptAt": …, "lastError": null },
     "candles": [ { "tf": "1d", "series": 2, "candles": 310, "lastSession": "2026-11-06" } ] },
+  "disk": { "volumes": [ { "holds": "the database and backups", "freeBytes": 41870000000 } ], "warnBelowBytes": 5000000000, "minFreeBytes": 2000000000,
+    "backups": { "count": 7, "bytes": 2650000000, "newestBytes": 380000000 } },
   "jobs": [],
   "live": { "enabled": true, "running": true,
     "feed": { "mode": "socket", "socket": "connected", "socketSymbols": 3, "polledSymbols": 0, "capacity": 100, "lastTickAt": 1794200401230, "reconnects": 0, "pollingStopped": null },
@@ -527,7 +535,9 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
   evening (the PR zip: within the last 10 days).
 - **Queued jobs** from the CLI, one at a time: broker backfills and NSE history downloads.
 - **Nightly backup** when `HUB_BACKUP_DIR` is set: once a day (at least 22 hours apart), never
-  between 08:45 and 16:00 IST on weekdays, keeping the newest `HUB_BACKUP_KEEP` (default 7).
+  between 08:45 and 16:00 IST on weekdays, keeping the newest `HUB_BACKUP_KEEP` (default 7). Without
+  the disk space for it ([data backup](#data-backup)) it is skipped with one warning in the log and
+  tried again an hour later.
 
 `HUB_JOBS=off` disables all three.
 
@@ -583,23 +593,44 @@ results dates in `/v1/results-calendar`) back to **2010** (2008 and 2009 answer 
   sessions on weekends (e.g. 1 Feb 2020, 12 Nov 2023, 20 Jan 2024). F&O and the PR zip are asked
   for the weekend days the cash market traded.
 - One request per 1.1 s, like every NSE request: the whole archive is about 28,000 requests,
-  **eight to ten hours** (PR zips are 0.3–0.7 MB each; only their results rows are kept), and an
-  estimated **1–1.5 GB** in `hub.db` (a backup copies all of it). Years go newest first.
+  **eight to ten hours** (PR zips are 0.3–0.7 MB each; only their results rows are kept), and about
+  **1.5 GB** in `hub.db` (~0.5 GB per gzipped backup; [Disk space](#disk-space)). Years go newest
+  first.
 - Same rules as backfills: queued for the server when one is running, run here otherwise (Ctrl-C
   stops it); **pauses in market hours** and for 15 minutes after NSE refuses three days in a row;
   resumes on its own. History runs aren't recorded as the evening run's attempts, so they never
   delay it.
+- **Disk:** the CLI refuses to start (or queue) it while free space on the database's disk is under
+  `HUB_DISK_MIN_GB` (default 2 GB), and a running job checks before every file and **pauses** below
+  it with a message saying so; the server retries every 30 minutes, so it carries on once space is
+  freed. Leave room for what it adds ([Disk space](#disk-space)).
 
 ### data backup
 
-A consistent snapshot through SQLite's online backup API — **safe while the server runs**. Written
-as `hub-YYYYMMDD-HHMMSS.db` (UTC) under a temporary name, switched to a single self-contained file
-(no `-wal`/`-shm`), checked with `quick_check`, then renamed into place; older ones beyond `--keep`
-(default `HUB_BACKUP_KEEP`, 7) are deleted. `--to` defaults to `HUB_BACKUP_DIR`, else `./backups`.
+A consistent snapshot through SQLite's online backup API — **safe while the server runs**. The copy
+is written under a temporary name, switched to a single self-contained file (no `-wal`/`-shm`),
+checked with `quick_check`, **gzipped** to `hub-YYYYMMDD-HHMMSS.db.gz` (UTC), read back (gzip's
+checksum, and the size must match), and only then renamed into place; the uncompressed copy is
+deleted. Older ones beyond `--keep` (default `HUB_BACKUP_KEEP`, 7) are deleted — uncompressed
+`hub-*.db` backups from before compression count and rotate out the same way. `--to` defaults to
+`HUB_BACKUP_DIR`, else `./backups`.
 
-**Restore:** stop the hub; copy the backup over `hub.db` in `HUB_DATA_DIR`; delete `hub.db-wal` and
-`hub.db-shm` next to it; start the hub. (The broker token file isn't in the backup; the hub logs
-in again.) Keep a copy off the machine too — see [oracle.md](oracle.md#backups).
+Only compressed backups are kept: an uncompressed newest copy would save one `gunzip` at restore
+time (a couple of seconds per GB) at the cost of the whole database's size again on disk.
+
+- **Disk:** while it runs a backup needs room for the uncompressed copy next to the gzip. It
+  doesn't start unless about **1.5 × the database** plus `HUB_DISK_MIN_GB` is free on the backup
+  disk, and it stops and removes its files if free space falls under `HUB_DISK_MIN_GB` while it
+  writes (checked every 64 MB). Leftovers of a backup that died (`*.partial`, over 6 hours old) are
+  removed by the next one.
+- Time: about 40 s for a 1.5 GB database on a laptop (copy, check, gzip, read-back); the nightly
+  one runs outside market hours and never blocks requests.
+
+**Restore:** stop the hub; unzip the backup over `hub.db` in `HUB_DATA_DIR`
+(`gunzip -c backups/hub-20261109-183000.db.gz > data/hub.db`); delete `hub.db-wal` and `hub.db-shm`
+next to it; start the hub. An older uncompressed `hub-*.db` is copied over as it is. (The broker
+token file isn't in the backup; the hub logs in again.) Keep a copy off the machine too — see
+[oracle.md](oracle.md#backups).
 
 ### data import-tradex
 
@@ -629,6 +660,42 @@ Brings a Tradex install's stored data into the hub, without broker or NSE calls.
   count doesn't match its record is skipped.
 - Each series and day is its own transaction; anything already in the hub is left alone, so a
   second run changes nothing and an interrupted run can simply be run again.
+
+## Disk space
+
+Measured on a synthetic database shaped like the real thing (`hub.db` page sizes from SQLite's
+`dbstat`, backups made with the hub's own `backupDb`): random-walk prices on NSE's 0.05 tick, so
+they compress *less* than real prices — treat the backup sizes as an upper bound.
+
+| What | Rows | In `hub.db` | One backup (gzipped) |
+|---|---|---|---|
+| Empty hub, keys, reference files, a few weeks of evening runs | — | a few MB | under 1 MB |
+| NSE history, cash bhavcopy (`cash_bhav` + its day index), 3 Nov 1994 → Nov 2026 | 12.1 M (7,809 sessions, ~800 → ~2,300 a day) | 1.35 GB | |
+| NSE history, F&O futures (`fo_futures` + index), 9 Nov 2001 → Nov 2026 | 0.78 M (~40 → ~215 underlyings a day) | 0.14 GB | |
+| **NSE history, both** (`hub data nse-history`) | | **1.49 GB** | **0.52 GB** (2.9×) |
+| Broker candles for the F&O universe + indices (230 series: 1d × 5 y, 15m × 1 y, 5m × 1 y) | 6.3 M | 0.44 GB | 0.12 GB (3.7×) |
+| Live 1-minute bars (`HUB_LIVE_RETENTION_DAYS` 30: ~21 sessions × 375 minutes per symbol) | ~7,900 per symbol | ~0.7 MB per symbol kept live (estimate, not measured) | |
+| Each further year of evening runs (cash ~2,300 + F&O ~215 rows a session) | ~0.6 M | ~75 MB | ~25 MB |
+
+**A full history run plus a week of backups**, with broker candles too (~1.9 GB database, ~0.64 GB
+per backup):
+
+| | Space |
+|---|---|
+| `hub.db` (plus a WAL of up to a few MB) | 1.9 GB |
+| 7 nightly backups (`HUB_BACKUP_KEEP=7`) | 4.5 GB |
+| While a backup runs: the uncompressed copy + the new gzip (before the oldest rotates out) | +2.6 GB |
+| **Peak** | **≈ 9 GB**, plus `HUB_DISK_MIN_GB` (2 GB) kept free → **plan for 11–12 GB** |
+
+Before compression the same week needed ~17 GB (eight full copies at the peak). NSE history alone
+(no broker candles): ~1.5 GB database, ~0.52 GB per backup, ~7 GB at the peak.
+
+How the hub protects the disk: `/v1/status` **warns** under `HUB_DISK_WARN_GB` (5 GB) and reports a
+**problem** under `HUB_DISK_MIN_GB` (2 GB) free, for the database's disk and the backups' (if
+separate); `hub data nse-history` won't start below the floor and a running one pauses there;
+a backup won't start without ~1.5 × the database plus the floor free, and stops (removing its files)
+if it drops under the floor. `HUB_DISK_MIN_GB=0` turns the floor off. `hub data status` prints the
+free space and what the backups take.
 
 ## Schema (SQLite, `data/hub.db`)
 
