@@ -1,9 +1,9 @@
 import type { Logger } from "../log.js";
 import { sleep as realSleep } from "../time.js";
 
-// The one way the hub talks to NSE's public sites (archives, the website's JSON
-// API). NSE has no API agreement for this, so the hub behaves like one careful
-// browser:
+// The one way the hub talks to NSE's public archive (nsearchives.nseindia.com;
+// nothing comes from the website's JSON API, which hangs behind bot protection).
+// NSE has no API agreement for this, so the hub behaves like one careful browser:
 //   - at most one request every MIN_GAP_MS across all jobs (they share this client);
 //   - browser-like headers, as Tradex uses;
 //   - a 403/429/5xx, timeout or network error is retried after 5 s and 20 s
@@ -38,7 +38,6 @@ export class NseError extends Error {
 export interface NseResponse {
   status: number;
   body: Buffer;
-  setCookies: string[];
 }
 
 export interface NseClientOptions {
@@ -110,6 +109,6 @@ export class NseClient {
       throw new NseError(`NSE answered ${response.status}`, response.status, response.status === 403 || response.status === 429 || response.status >= 500);
     }
     const body = Buffer.from(await response.arrayBuffer());
-    return { status: response.status, body, setCookies: response.headers.getSetCookie?.() ?? [] };
+    return { status: response.status, body };
   }
 }
