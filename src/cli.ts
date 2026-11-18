@@ -1,5 +1,6 @@
 import path from "node:path";
 import { backupDb } from "./backup.js";
+import { gb, shortOfSpace } from "./disk.js";
 import { createKey, listKeys, parseScopes, revokeKey } from "./auth/keys.js";
 import { loadConfig, secretValues } from "./config.js";
 import { openDb, type Db } from "./db.js";
@@ -12,7 +13,7 @@ import { lastHistoryDay, runNseHistory, validateNseHistory } from "./jobs/nseHis
 import { createLogger } from "./log.js";
 import { acquireOwner, ownerPid } from "./owner.js";
 import { getUniverse } from "./reference/universe.js";
-import { brokerStatus, dataFreshness } from "./status.js";
+import { brokerStatus, dataFreshness, diskStatus } from "./status.js";
 import { ARCHIVE_FROM } from "./nse/datasets.js";
 import { DAY_MS, isoDay, istParts } from "./time.js";
 
@@ -144,6 +145,12 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
       console.error(invalid);
       return 1;
     }
+    // The whole archive adds about 1–1.5 GB to hub.db (docs/api.md#disk-space); it pauses at the floor anyway.
+    const short = shortOfSpace({ dir: config.dataDir, minFreeBytes: config.diskMinBytes });
+    if (short) {
+      console.error(`Not starting NSE history: ${short.message}. Free some space and run it again.`);
+      return 1;
+    }
     const release = acquireOwner(config.dataDir);
     if (!release) {
       const queued = enqueueJob(db, "nse_history", params);
@@ -187,6 +194,9 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     for (const warning of health.warnings) console.log(`  ! ${warning}`);
     console.log("");
     console.log(`Owner process: ${pid ? `pid ${pid}` : "none (no hub server running)"}`);
+    const disk = diskStatus(config);
+    for (const volume of disk.volumes) console.log(`Disk: ${volume.freeBytes === null ? "free space unknown" : `${gb(volume.freeBytes)} free`} for ${volume.holds} (warning under ${gb(disk.warnBelowBytes)}; NSE history and backups stop under ${gb(disk.minFreeBytes)})`);
+    if (disk.backups) console.log(`Backups: ${disk.backups.count}, ${gb(disk.backups.bytes)} in all${disk.backups.newestBytes === null ? "" : `, newest ${gb(disk.backups.newestBytes)}`}`);
     console.log(`Broker: ${broker.configured ? "configured" : "not configured"}, ${broker.connected ? "token valid" : "no valid token"}, last login ${fmt(broker.lastLoginAt)}${broker.lastLoginError ? `, last error: ${broker.lastLoginError}` : ""}`);
     if (broker.budget) console.log(`Budget today: ${broker.budget.usedToday} calls (user ${broker.budget.byPriority.user}, background ${broker.budget.byPriority.background}), strikes ${broker.budget.strikes}`);
     console.log("\nNSE datasets:");
@@ -229,9 +239,9 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
       console.error("--keep must be a whole number of at least 1.");
       return 1;
     }
-    const result = await backupDb(db, dir, keep);
-    console.log(`Backed up to ${result.file} (${(result.bytes / 1e6).toFixed(1)} MB, checked).${result.removed.length ? ` Removed ${result.removed.length} older backup(s); keeping ${keep}.` : ""}`);
-    console.log("Restore: stop the hub, copy the file over hub.db in HUB_DATA_DIR, delete hub.db-wal and hub.db-shm, start the hub.");
+    const result = await backupDb(db, dir, keep, Date.now(), { minFreeBytes: config.diskMinBytes });
+    console.log(`Backed up to ${result.file} (${(result.bytes / 1e6).toFixed(1)} MB gzipped from ${(result.dbBytes / 1e6).toFixed(1)} MB, checked).${result.removed.length ? ` Removed ${result.removed.length} older backup(s); keeping ${keep}.` : ""}`);
+    console.log(`Restore: stop the hub, \`gunzip -c ${result.file} > ${path.join(config.dataDir, "hub.db")}\`, delete hub.db-wal and hub.db-shm next to it, start the hub.`);
     return 0;
   }
 

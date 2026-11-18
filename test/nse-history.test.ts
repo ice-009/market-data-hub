@@ -236,6 +236,30 @@ describe("NSE history", () => {
     expect(checkedDays(ctx.db, "cash_bhav").size).toBe(0);
   });
 
+  it("doesn't start, and pauses, while free disk is under the floor; resumes once there's room", async () => {
+    const { ctx, calls } = context(routesFor(), ist(2026, 11, 16, 20));
+    let free = 1.5e9;
+    ctx.disk = { dir: t.dir, minFreeBytes: 2e9, free: () => free };
+    const job = enqueueJob(ctx.db, "nse_history", RANGE);
+    const refused = await runNseHistory(ctx, job.id);
+    expect(refused.state).toBe("paused");
+    expect(refused.message).toBe("Paused: only 1.5 GB free on the disk, under the 2.0 GB kept free (HUB_DISK_MIN_GB). Free some space; the hub server retries every 30 minutes (or run the command again).");
+    expect(refused.resumeAfter).toBe(ctx.clock() + 30 * 60_000);
+    expect(calls).toHaveLength(0);
+
+    // Room again: it runs, until the disk fills up after two cash days.
+    free = 50e9;
+    const paused = await runNseHistory(ctx, job.id, (progress) => {
+      if (progress.done === 2) free = 1.9e9;
+    });
+    expect(paused.state).toBe("paused");
+    expect(paused.message).toMatch(/^Paused after 2 sessions stored, 0 days without a file: only 1.9 GB free on the disk/);
+    expect(statuses(ctx, "cash_bhav")).toEqual(["2024-07-04 ok", "2024-07-05 ok"]);
+    free = 50e9;
+    expect((await runNseHistory(ctx, job.id)).state).toBe("done");
+    expect(statuses(ctx, "cash_bhav")).toHaveLength(6);
+  });
+
   it("stops after the current day when cancelled", async () => {
     const { ctx } = context(routesFor(), ist(2026, 11, 16, 20));
     const job = enqueueJob(ctx.db, "nse_history", RANGE);

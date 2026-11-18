@@ -1,4 +1,5 @@
 import type { Db } from "../db.js";
+import type { DiskFloor } from "../disk.js";
 import { applyCashBhav } from "../history/fromBhav.js";
 import type { Logger } from "../log.js";
 import { DAY_MS, isoDay, istParts } from "../time.js";
@@ -31,6 +32,8 @@ export interface NseContext {
   log: Logger;
   urls: { archiveUrl: string; wwwUrl: string };
   clock: () => number;
+  /** The free space NSE history downloads leave on the database's disk (HUB_DISK_MIN_GB); absent = no check. */
+  disk?: DiskFloor;
 }
 
 /** Don't ask for today's file before this (minutes after IST midnight). */

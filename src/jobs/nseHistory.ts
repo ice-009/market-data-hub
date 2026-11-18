@@ -1,4 +1,5 @@
 import type { Db } from "../db.js";
+import { shortOfSpace } from "../disk.js";
 import { ARCHIVE_FROM, daysToCheck, syncDays, type DayOutcome, type NseContext } from "../nse/datasets.js";
 import { checkedDays, type DayDataset } from "../nse/store.js";
 import { DAY_MS, isMarketOpen, isWeekday, isoDay, istParts, parseIsoDay } from "../time.js";
@@ -14,8 +15,10 @@ import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "
 // Like backfills, these jobs live in the `jobs` table and:
 //   - are resumable: every day asked for is recorded in nse_days, so a paused
 //     or interrupted job only asks NSE for days it hasn't seen;
-//   - pause in market hours, and for a quarter of an hour after NSE refuses
-//     several days in a row; the server resumes them afterwards.
+//   - pause in market hours, for a quarter of an hour after NSE refuses
+//     several days in a row, and while free disk is under HUB_DISK_MIN_GB
+//     (checked before every file; they don't start below it); the server
+//     resumes them afterwards.
 // Years go newest first (each year oldest first), so recent history lands
 // first. In the cash market every weekend day is asked for too — NSE has held
 // Budget-day and Muhurat sessions on weekends, and a missing session would make
@@ -64,6 +67,16 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
   const datasets = job.params.datasets;
   const now = ctx.clock();
 
+  const lowDisk = (reason: string, after?: string) => `Paused${after ? ` after ${after}` : ""}: ${reason}. Free some space; the hub server retries every 30 minutes (or run the command again).`;
+  const short = ctx.disk ? shortOfSpace(ctx.disk) : null;
+  if (short) {
+    updateJob(ctx.db, id, { state: "paused", resumeAfter: resumeTime("disk", now), message: lowDisk(short.message) }, now);
+    const paused = getJob(ctx.db, id)!;
+    onProgress?.(paused);
+    ctx.log.warn("NSE history job not started: low disk space", { id, freeBytes: short.free, needBytes: short.need });
+    return paused;
+  }
+
   // F&O weekend sessions are found as the cash market's years are fetched, so they aren't in the starting count.
   const total = datasets.reduce((sum, dataset) => sum + historyDays(ctx.db, dataset, from, to).length, 0);
   let done = 0;
@@ -72,10 +85,18 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
   updateJob(ctx.db, id, { state: "running", total, done: 0, failed: 0, startedAt: job.startedAt ?? now, resumeAfter: null, message: total ? `Asking NSE for ${total} days…` : "Everything is already stored." }, now);
   onProgress?.(getJob(ctx.db, id)!);
 
-  let halt: "market" | "cancelled" | null = null;
+  let halt: "market" | "cancelled" | "disk" | null = null;
+  let diskReason = "";
   const shouldStop = () => {
     if (getJob(ctx.db, id)?.state === "cancelled") halt = "cancelled";
     else if (isMarketOpen(ctx.clock())) halt = "market";
+    else {
+      const low = ctx.disk ? shortOfSpace(ctx.disk) : null;
+      if (low) {
+        halt = "disk";
+        diskReason = low.message;
+      }
+    }
     return halt !== null;
   };
   let refused: string | null = null;
@@ -103,10 +124,11 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
   const end = ctx.clock();
   const summary = tally(counts);
   // `halt` is assigned inside shouldStop, which TypeScript's narrowing can't see.
-  const stoppedFor = halt as "market" | "cancelled" | null;
+  const stoppedFor = halt as "market" | "cancelled" | "disk" | null;
   if (stoppedFor === "cancelled") {
     // leave as cancelled
-  } else if (stoppedFor === "market") updateJob(ctx.db, id, { state: "paused", done, failed, message: `Paused for market hours (09:15–15:30 IST) after ${summary}; resumes after the close.`, resumeAfter: resumeTime("market", end) }, end);
+  } else if (stoppedFor === "disk") updateJob(ctx.db, id, { state: "paused", done, failed, message: lowDisk(diskReason, summary), resumeAfter: resumeTime("disk", end) }, end);
+  else if (stoppedFor === "market") updateJob(ctx.db, id, { state: "paused", done, failed, message: `Paused for market hours (09:15–15:30 IST) after ${summary}; resumes after the close.`, resumeAfter: resumeTime("market", end) }, end);
   else if (refused) updateJob(ctx.db, id, { state: "paused", done, failed, message: `Paused: ${refused}`, resumeAfter: resumeTime("failures", end) }, end);
   else updateJob(ctx.db, id, { state: "done", done, failed, finishedAt: end, message: failed ? `Done — ${summary}; ${failed} day(s) failed: run it again to retry them.` : `Done — ${summary}.` }, end);
   const final = getJob(ctx.db, id)!;

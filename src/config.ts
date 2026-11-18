@@ -35,6 +35,13 @@ export interface Config {
   backupDir: string | null;
   /** Backups kept (newest first) by the nightly backup and `hub data backup`. */
   backupKeep: number;
+  /** Free disk under this is a warning in /v1/status (HUB_DISK_WARN_GB). */
+  diskWarnBytes: number;
+  /**
+   * Free disk under this is a problem in /v1/status, and NSE history downloads
+   * and backups won't start or go on below it (HUB_DISK_MIN_GB). 0 = no floor.
+   */
+  diskMinBytes: number;
   fyers: FyersConfig;
   /** NSE hosts (overridable for testing against a local server). */
   nse: { archiveUrl: string; wwwUrl: string };
@@ -60,6 +67,15 @@ function int(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number
   const value = Number(raw);
   if (!Number.isInteger(value) || value < min || value > max) throw new ConfigError(`${name} must be a whole number from ${min} to ${max} (got "${raw}").`);
   return value;
+}
+
+/** A size in GB (decimals allowed), as bytes. */
+function gigabytes(env: NodeJS.ProcessEnv, name: string, fallback: number, max: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return fallback * 1e9;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value > max) throw new ConfigError(`${name} must be a number of GB from 0 to ${max} (got "${raw}").`);
+  return Math.round(value * 1e9);
 }
 
 function onOff(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
@@ -103,6 +119,10 @@ function fyersConfig(env: NodeJS.ProcessEnv): FyersConfig {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const logLevel = (env.HUB_LOG_LEVEL ?? "info") as Config["logLevel"];
   if (!LOG_LEVELS.includes(logLevel)) throw new ConfigError(`HUB_LOG_LEVEL must be one of ${LOG_LEVELS.join(", ")}.`);
+  const diskMinBytes = gigabytes(env, "HUB_DISK_MIN_GB", 2, 1_000_000);
+  // Unset, the warning level follows a raised floor up.
+  const diskWarnBytes = Math.max(gigabytes(env, "HUB_DISK_WARN_GB", 5, 1_000_000), env.HUB_DISK_WARN_GB?.trim() ? 0 : diskMinBytes);
+  if (diskWarnBytes < diskMinBytes) throw new ConfigError("HUB_DISK_WARN_GB must be at least HUB_DISK_MIN_GB.");
   return {
     // Loopback by default: the only way in from outside is the Cloudflare Tunnel.
     host: env.HUB_HOST || "127.0.0.1",
@@ -117,6 +137,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     liveRetentionDays: int(env, "HUB_LIVE_RETENTION_DAYS", 30, 1, 3650),
     backupDir: env.HUB_BACKUP_DIR ? path.resolve(env.HUB_BACKUP_DIR) : null,
     backupKeep: int(env, "HUB_BACKUP_KEEP", 7, 1, 365),
+    diskWarnBytes,
+    diskMinBytes,
     fyers: fyersConfig(env),
     nse: {
       archiveUrl: (env.NSE_ARCHIVE_URL || "https://nsearchives.nseindia.com").replace(/\/+$/, ""),

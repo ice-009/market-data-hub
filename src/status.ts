@@ -1,5 +1,8 @@
+import { listBackups } from "./backup.js";
 import { savedBudget } from "./broker/gate.js";
+import type { Config } from "./config.js";
 import type { Db } from "./db.js";
+import { hubVolumes } from "./disk.js";
 import { candleStats } from "./history/store.js";
 import type { Hub } from "./hub.js";
 import { listJobs } from "./jobs/backfill.js";
@@ -32,6 +35,20 @@ export function dataFreshness(db: Db) {
     foBan: { tradeDate: ban ? isoDay(ban.tradeDate) : null, ...run("fo_ban") },
     resultsCalendar: { events: (results?.count as number | undefined) ?? 0, ...run("results") },
     candles: candleStats(db).map((row) => ({ tf: row.tf, series: row.series, candles: row.candles, lastSession: row.lastT === null ? null : row.tf === "1d" ? isoDay(row.lastT) : new Date(row.lastT).toISOString() })),
+  };
+}
+
+/**
+ * Free disk and what backups take: `volumes` (one per disk — the database's, and
+ * the backups' when on another disk), the thresholds, and the backups' count and bytes.
+ */
+export function diskStatus(config: Pick<Config, "dataDir" | "backupDir" | "diskWarnBytes" | "diskMinBytes">) {
+  const backups = config.backupDir ? listBackups(config.backupDir) : null;
+  return {
+    volumes: hubVolumes(config.dataDir, config.backupDir),
+    warnBelowBytes: config.diskWarnBytes,
+    minFreeBytes: config.diskMinBytes,
+    backups: backups && { count: backups.length, bytes: backups.reduce((sum, backup) => sum + backup.bytes, 0), newestBytes: backups[0]?.bytes ?? null },
   };
 }
 

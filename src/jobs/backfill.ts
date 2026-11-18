@@ -144,11 +144,12 @@ export function updateJob(db: Db, id: number, fields: Partial<Pick<Job, "state" 
 }
 
 /** When a paused job may continue: after today's close in market hours; after the IST day rolls over when the budget is spent. */
-export function resumeTime(reason: "market" | "budget" | "rate_limited" | "auth" | "failures", now: number): number {
+export function resumeTime(reason: "market" | "budget" | "rate_limited" | "auth" | "failures" | "disk", now: number): number {
   const { day } = istParts(now);
   if (reason === "market") return istDayStart(day) + (SESSION_CLOSE_MIN + 5) * MINUTE_MS;
   if (reason === "budget") return istDayStart(day + DAY_MS) + 5 * MINUTE_MS;
   if (reason === "rate_limited") return now + 2 * MINUTE_MS;
+  if (reason === "disk") return now + 30 * MINUTE_MS;
   return now + 15 * MINUTE_MS;
 }
 

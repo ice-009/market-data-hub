@@ -1,5 +1,6 @@
 import { listBackups } from "./backup.js";
 import type { Db } from "./db.js";
+import { gb, hubVolumes, type Volume } from "./disk.js";
 import type { Hub } from "./hub.js";
 import type { FeedStatus } from "./live/types.js";
 import { WEEKEND_SESSIONS } from "./nse/datasets.js";
@@ -9,7 +10,7 @@ import { DAY_MS, isMarketOpen, isoDay, istDayStart, istParts, isWeekday } from "
 // Is the hub healthy? `healthy`, `problems` and `warnings` at the top of
 // /v1/status (and `hub data status`), for a person and for an uptime checker
 // (`/v1/status?strict=1` answers 503 when unhealthy). A problem means data is
-// going stale or a feed is down; a warning is worth knowing but not an alert.
+// going stale, a feed is down or the disk is nearly full; a warning is worth knowing but not an alert.
 // The messages name datasets and dates only — never configuration or secrets.
 
 /** After this (minutes after IST midnight) a trading day's NSE files should be stored. */
@@ -53,6 +54,8 @@ export interface HealthInput {
   live: { enabled: boolean; running: boolean; feed: Pick<FeedStatus, "mode" | "socket"> };
   /** Null when HUB_BACKUP_DIR isn't set. */
   backup: { lastAt: number | null } | null;
+  /** Free space where the database and backups live; `warnBytes` HUB_DISK_WARN_GB, `minBytes` HUB_DISK_MIN_GB. */
+  disk: { volumes: Volume[]; warnBytes: number; minBytes: number };
 }
 
 export interface Health {
@@ -116,6 +119,13 @@ export function assessHealth(input: HealthInput): Health {
     else if (now - input.backup.lastAt > BACKUP_STALE_MS) problems.push(`Backups: the newest is ${age(now - input.backup.lastAt)} old.`);
   }
 
+  // Under the floor, NSE history and backups have already stopped, and SQLite writes are next.
+  for (const volume of input.disk.volumes) {
+    if (volume.freeBytes === null) continue;
+    if (volume.freeBytes < input.disk.minBytes) problems.push(`Disk: only ${gb(volume.freeBytes)} free for ${volume.holds} (under ${gb(input.disk.minBytes)}): NSE history downloads and backups won't run, and database writes may soon fail.`);
+    else if (volume.freeBytes < input.disk.warnBytes) warnings.push(`Disk: ${gb(volume.freeBytes)} free for ${volume.holds} (under ${gb(input.disk.warnBytes)}).`);
+  }
+
   return { healthy: problems.length === 0, problems, warnings };
 }
 
@@ -156,5 +166,6 @@ export function hubHealth(hub: Pick<Hub, "db" | "config" | "owner" | "auth" | "g
     },
     live: feed ? { enabled: live.enabled, running: live.running, feed } : { enabled: false, running: false, feed: { mode: "idle", socket: "disabled" } },
     backup: hub.config.backupDir ? { lastAt: listBackups(hub.config.backupDir)[0]?.at ?? null } : null,
+    disk: { volumes: hubVolumes(hub.config.dataDir, hub.config.backupDir), warnBytes: hub.config.diskWarnBytes, minBytes: hub.config.diskMinBytes },
   });
 }
