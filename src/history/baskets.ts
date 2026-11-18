@@ -2,7 +2,7 @@ import type { Bar } from "../broker/fyers.js";
 import { readKv, writeKv, type Db } from "../db.js";
 import { BASKETS, type BasketInfo } from "../reference/indices.js";
 import { getUniverse } from "../reference/universe.js";
-import { cashDayStatuses, lastOkDay } from "../nse/store.js";
+import { dayStatuses, lastOkDay } from "../nse/store.js";
 import { DAY_MS } from "../time.js";
 import { runStart } from "./fromIndices.js";
 import { readBars, readSeries, resetSymbol, writeBars } from "./store.js";
@@ -112,7 +112,7 @@ export function refreshBaskets(db: Db, now: number): BasketResult {
   const result: BasketResult = { rebuilt: [], extended: [] };
   const newest = lastOkDay(db, "cash_bhav");
   if (newest === null) return result;
-  const statuses = cashDayStatuses(db);
+  const statuses = dayStatuses(db, "cash_bhav");
   const floor = Math.min(...statuses.keys());
   const from = runStart(newest, statuses, () => true, floor);
   const sessions = [...statuses].filter(([day, status]) => status === "ok" && day >= from && day <= newest).map(([day]) => day).sort((a, b) => a - b);

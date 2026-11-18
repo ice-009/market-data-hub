@@ -9,7 +9,7 @@ import { oiFact } from "../src/nse/openInterest.js";
 import { parseCmBhav } from "../src/nse/parsers/cmBhav.js";
 import { aggregateStockFutures, parseFoBhavLegacy } from "../src/nse/parsers/foBhav.js";
 import { parseMto } from "../src/nse/parsers/mto.js";
-import { checkedDays, markDay, readFoSymbol, readRuns } from "../src/nse/store.js";
+import { checkedDays, markDay, readFoSymbol, readRuns, type DayDataset } from "../src/nse/store.js";
 import { isoDay, parseIsoDay } from "../src/time.js";
 import { ist, makeHub, type TestHub } from "./support/hub.js";
 import { fakeFetch, fakeTime, makeZip, type Route } from "./support/nse.js";
@@ -105,7 +105,7 @@ describe("NSE history", () => {
     t = makeHub();
     const time = fakeTime(now);
     const calls: Array<{ url: string; at: number; headers: Record<string, string> }> = [];
-    const ctx: NseContext = { db: t.db, log: quiet, clock: time.clock, urls: { archiveUrl: archive, wwwUrl: "https://www.nse.test" }, nse: new NseClient({ log: quiet, clock: time.clock, sleep: time.sleep, fetch: fakeFetch(routes, calls, time.clock) }) };
+    const ctx: NseContext = { db: t.db, log: quiet, clock: time.clock, urls: { archiveUrl: archive }, nse: new NseClient({ log: quiet, clock: time.clock, sleep: time.sleep, fetch: fakeFetch(routes, calls, time.clock) }) };
     return { ctx, calls, time };
   };
   const statuses = (ctx: NseContext, dataset: "cash_bhav" | "fo_bhav") => [...checkedDays(ctx.db, dataset)].sort(([a], [b]) => a - b).map(([day, status]) => `${isoDay(day)} ${status}`);
@@ -151,7 +151,7 @@ describe("NSE history", () => {
 
   it("lists every weekend day for the cash market, and only the weekends it traded for F&O", () => {
     const { ctx } = context({}, ist(2026, 11, 16, 20));
-    const days = (dataset: "cash_bhav" | "fo_bhav", from: string, to: string) => historyDays(ctx.db, dataset, d(from), d(to)).map(isoDay);
+    const days = (dataset: DayDataset, from: string, to: string) => historyDays(ctx.db, dataset, d(from), d(to)).map(isoDay);
     expect(days("cash_bhav", "2024-01-18", "2024-01-22")).toEqual(["2024-01-18", "2024-01-19", "2024-01-20", "2024-01-21", "2024-01-22"]);
     expect(days("fo_bhav", "2024-01-18", "2024-01-22")).toEqual(["2024-01-18", "2024-01-19", "2024-01-22"]);
     // Sat 20 Jan 2024: NSE's special session. Once the cash market shows it, F&O asks for it too.
@@ -160,8 +160,10 @@ describe("NSE history", () => {
     markDay(ctx.db, "fo_bhav", d("2024-01-18"), "ok", 1, 0);
     expect(days("cash_bhav", "2024-01-18", "2024-01-22")).toEqual(["2024-01-18", "2024-01-19", "2024-01-22"]);
     expect(days("fo_bhav", "2024-01-18", "2024-01-22")).toEqual(["2024-01-19", "2024-01-20", "2024-01-22"]);
-    // Nothing before the archive starts: no F&O before the first stock futures.
+    expect(days("pr", "2024-01-18", "2024-01-22")).toEqual(["2024-01-18", "2024-01-19", "2024-01-20", "2024-01-22"]);
+    // Nothing before the archive starts: no F&O before the first stock futures, no PR zip before 2010.
     expect(days("fo_bhav", "2001-11-05", "2001-11-09")).toEqual(["2001-11-09"]);
+    expect(days("pr", "2009-12-30", "2010-01-04")).toEqual(["2010-01-01", "2010-01-04"]);
     expect(historyDays(ctx.db, "cash_bhav", d("1994-10-01"), ARCHIVE_FROM.cash_bhav).map(isoDay)).toEqual(["1994-11-03"]);
   });
 
@@ -172,7 +174,7 @@ describe("NSE history", () => {
     expect(validateNseHistory(params({ to: "2026-11-16" }), today)).toMatch(/before today/);
     expect(validateNseHistory(params({ from: "2026-11-15", to: "2026-11-14" }), today)).toMatch(/on or before/);
     expect(validateNseHistory(params({ from: "1994-13-01" }), today)).toMatch(/dates like/);
-    expect(validateNseHistory(params({ datasets: [] }), today)).toMatch(/cash, fo or indices/);
+    expect(validateNseHistory(params({ datasets: [] }), today)).toMatch(/cash, fo, pr or indices/);
   });
 
   // Thu 4 Jul – Tue 9 Jul 2024: old formats through Fri 5 Jul, the current ones from Mon 8 Jul.

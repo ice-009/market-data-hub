@@ -6,7 +6,7 @@ import type { IndexCloseRow } from "./parsers/indexClose.js";
 import type { ResultsEvent } from "./parsers/results.js";
 
 // Storage for NSE's daily files (migrations 2 and 5). Day-by-day datasets (cash
-// and F&O bhavcopy, the index file) record every weekday checked in `nse_days`:
+// and F&O bhavcopy, the PR zip, the index file) record every weekday checked in `nse_days`:
 //   ok        file read and stored
 //   holiday   NSE has no file for that day
 //   mismatch  NSE served a file for another date (treated as no data, re-checked
@@ -15,9 +15,10 @@ import type { ResultsEvent } from "./parsers/results.js";
 // F&O membership is "has a fo_futures row that day". (F&O tables ported from
 // Tradex's foBhavStore, MIT.)
 
-export type DayDataset = "cash_bhav" | "fo_bhav" | "index_close";
+/** `pr` is the daily PR zip (its board meetings fill the results calendar); `index_close` NSE's index file. */
+export type DayDataset = "cash_bhav" | "fo_bhav" | "pr" | "index_close";
 export type DayStatus = "ok" | "holiday" | "mismatch";
-export type DatasetName = DayDataset | "lots" | "fo_ban" | "results";
+export type DatasetName = DayDataset | "lots" | "fo_ban";
 
 export function checkedDays(db: Db, dataset: DayDataset, from = Number.MIN_SAFE_INTEGER): Map<number, DayStatus> {
   const rows = db.prepare("select day, status from nse_days where dataset = ? and day >= ?").all(dataset, from) as Array<{ day: number; status: DayStatus }>;
@@ -25,17 +26,18 @@ export function checkedDays(db: Db, dataset: DayDataset, from = Number.MIN_SAFE_
 }
 
 /**
- * Cash-bhavcopy day statuses with one correction: on an exchange holiday NSE can
- * serve the previous session's cash file (recorded as `mismatch`) while the F&O
- * file is simply missing (`holiday`). A cash mismatch on a day the F&O file
+ * Day statuses with one correction: on an exchange holiday NSE can serve the
+ * previous session's cash file (recorded as `mismatch`) while the F&O file is
+ * simply missing (`holiday`). A cash (or PR zip) mismatch on a day the F&O file
  * confirms as a holiday is a holiday — otherwise the day is re-asked all evening
  * and daily candles can't be extended across it (seen on Diwali, 10 Nov 2026).
  */
-export function cashDayStatuses(db: Db, from = Number.MIN_SAFE_INTEGER): Map<number, DayStatus> {
-  const cash = checkedDays(db, "cash_bhav", from);
+export function dayStatuses(db: Db, dataset: DayDataset, from = Number.MIN_SAFE_INTEGER): Map<number, DayStatus> {
+  const days = checkedDays(db, dataset, from);
+  if (dataset === "fo_bhav") return days;
   const fo = checkedDays(db, "fo_bhav", from);
-  for (const [day, status] of cash) if (status === "mismatch" && fo.get(day) === "holiday") cash.set(day, "holiday");
-  return cash;
+  for (const [day, status] of days) if (status === "mismatch" && fo.get(day) === "holiday") days.set(day, "holiday");
+  return days;
 }
 
 export function markDay(db: Db, dataset: DayDataset, day: number, status: DayStatus, rows: number, checkedAt: number, note: string | null = null) {
@@ -286,15 +288,29 @@ export function latestBan(db: Db): { tradeDate: number; symbols: string[]; fetch
   return row ? { tradeDate: row.trade_date, symbols: JSON.parse(row.symbols) as string[], fetchedAt: row.fetched_at } : null;
 }
 
-/** Replace the events in the window the download covered (from its earliest date on). */
+/**
+ * Add or update results events. Each PR zip lists only the meetings announced
+ * that day, so nothing is deleted: a meeting announced again (a new purpose, say)
+ * replaces its earlier row.
+ */
 export function writeResults(db: Db, events: ResultsEvent[]) {
-  if (!events.length) return;
-  const from = Math.min(...events.map((event) => event.date));
   const insert = db.prepare("insert or replace into results_events (symbol, date, company, purpose) values (?, ?, ?, ?)");
   db.transaction(() => {
-    db.prepare("delete from results_events where date >= ?").run(from);
     for (const event of events) insert.run(event.symbol, event.date, event.company, event.purpose);
   })();
+}
+
+/** Store one PR zip's results events and mark its day "ok". */
+export function writePrDay(db: Db, day: number, events: ResultsEvent[], checkedAt: number) {
+  db.transaction(() => {
+    writeResults(db, events);
+    markDay(db, "pr", day, "ok", events.length, checkedAt);
+  })();
+}
+
+/** Results events dated on or after `from`. */
+export function countResults(db: Db, from: number): number {
+  return (db.prepare("select count(*) as n from results_events where date >= ?").get(from) as { n: number }).n;
 }
 
 export function readResults(db: Db, from: number, to: number, symbol?: string): ResultsEvent[] {

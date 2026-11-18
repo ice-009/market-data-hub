@@ -3,8 +3,8 @@ import type { Db } from "./db.js";
 import { candleStats } from "./history/store.js";
 import type { Hub } from "./hub.js";
 import { listJobs } from "./jobs/backfill.js";
-import { lastOkDay, latestBan, readRuns, storedDays, unmappedIndexNames, type DayDataset } from "./nse/store.js";
-import { isoDay } from "./time.js";
+import { countResults, lastOkDay, latestBan, readRuns, storedDays, unmappedIndexNames, type DayDataset } from "./nse/store.js";
+import { isoDay, istParts } from "./time.js";
 
 // What /v1/status and `hub data status` report: data freshness per dataset,
 // the broker connection and today's budget. Never anything secret: no tokens,
@@ -24,14 +24,14 @@ export function dataFreshness(db: Db) {
   };
   const ban = latestBan(db);
   const lots = runs.get("lots")?.info;
-  const results = runs.get("results")?.info;
   return {
     cashBhav: { lastSession: day(lastOkDay(db, "cash_bhav")), ...archive("cash_bhav"), ...run("cash_bhav") },
     foBhav: { lastSession: day(lastOkDay(db, "fo_bhav")), ...archive("fo_bhav"), ...run("fo_bhav") },
     indexFile: { lastSession: day(lastOkDay(db, "index_close")), ...archive("index_close"), unmappedNames: unmappedIndexNames(db).length, ...run("index_close") },
     lots: { count: (lots?.count as number | undefined) ?? 0, source: (lots?.source as string | undefined) ?? null, ...run("lots") },
     foBan: { tradeDate: ban ? isoDay(ban.tradeDate) : null, ...run("fo_ban") },
-    resultsCalendar: { events: (results?.count as number | undefined) ?? 0, ...run("results") },
+    // From the PR zip's board meetings: `upcoming` counts events dated today or later.
+    resultsCalendar: { upcoming: countResults(db, istParts().day), lastSession: day(lastOkDay(db, "pr")), ...archive("pr"), ...run("pr") },
     candles: candleStats(db).map((row) => ({ tf: row.tf, series: row.series, candles: row.candles, lastSession: row.lastT === null ? null : row.tf === "1d" ? isoDay(row.lastT) : new Date(row.lastT).toISOString() })),
   };
 }

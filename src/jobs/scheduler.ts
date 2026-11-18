@@ -3,7 +3,7 @@ import type { Db } from "../db.js";
 import { refreshBaskets } from "../history/baskets.js";
 import { syncIndexSeries } from "../history/fromIndices.js";
 import type { Logger } from "../log.js";
-import { recentDays, refreshBan, refreshLots, refreshResults, syncDays, type NseContext } from "../nse/datasets.js";
+import { recentDays, refreshBan, refreshLots, syncDays, type NseContext } from "../nse/datasets.js";
 import { latestBan, readRuns, type DatasetName, type DatasetRun } from "../nse/store.js";
 import { DAY_MS, MINUTE_MS, istDayStart, istParts, isWeekday } from "../time.js";
 import { nextRunnableJob, recoverJobs, runBackfill, type BackfillDeps } from "./backfill.js";
@@ -16,8 +16,10 @@ import { runNseHistory } from "./nseHistory.js";
 //     stored yet — on start that's the catch-up, in the evening it's normally
 //     just today's files once NSE has published them. New cash days extend the
 //     synthetic baskets (src/history/baskets.ts); index days extend the index
-//     candles. Lots, the F&O ban list and the results
-//     calendar are refreshed once each evening (and on start when stale).
+//     candles. The PR zip, whose board meetings make the
+//     results calendar, likewise for the last RESULTS_LOOKBACK_DAYS (meetings
+//     are announced up to weeks ahead, one day's announcements per file). Lots
+//     and the F&O ban list are refreshed once each evening (and on start when stale).
 //   - queued jobs, one at a time: broker backfills (`hub data backfill`) and
 //     NSE history downloads (`hub data nse-history`).
 //   - a nightly database backup when HUB_BACKUP_DIR is set (src/backup.ts).
@@ -25,6 +27,8 @@ import { runNseHistory } from "./nseHistory.js";
 // file NSE hasn't published yet costs one request every half hour.
 
 export const RECENT_DAYS = 10;
+/** PR zips read back this far, so the results calendar holds every meeting announced for the weeks ahead. */
+export const RESULTS_LOOKBACK_DAYS = 60;
 export const RETRY_MS = 30 * MINUTE_MS;
 export const TICK_MS = MINUTE_MS;
 /** The evening window for once-a-day refreshes (minutes after IST midnight). */
@@ -39,7 +43,7 @@ export interface ScheduleInput {
   now: number;
   runs: ReadonlyMap<DatasetName, Pick<DatasetRun, "lastAttemptAt" | "lastSuccessAt">>;
   /** Days each day-dataset still lacks among the recent ones. */
-  missing: { cash_bhav: number; fo_bhav: number; index_close?: number };
+  missing: Record<"cash_bhav" | "fo_bhav" | "pr", number> & { index_close?: number };
   /** Trade date of the newest stored ban list. */
   banTradeDate: number | null;
 }
@@ -75,7 +79,7 @@ export function dueTasks(input: ScheduleInput): Task[] {
   if ((input.missing.index_close ?? 0) > 0 && rested("index_close")) due.push("index_close");
   if (daily("lots") && rested("lots")) due.push("lots");
   if ((input.banTradeDate === null || input.banTradeDate < banTarget(now)) && minutes >= 7 * 60 && minutes < EVENING_TO_MIN && rested("fo_ban")) due.push("fo_ban");
-  if (daily("results") && rested("results")) due.push("results");
+  if (input.missing.pr > 0 && rested("pr")) due.push("pr");
   return due;
 }
 
@@ -143,8 +147,9 @@ export class Scheduler {
       }
       const cash = recentDays(ctx, "cash_bhav", RECENT_DAYS);
       const fo = recentDays(ctx, "fo_bhav", RECENT_DAYS);
+      const pr = recentDays(ctx, "pr", RESULTS_LOOKBACK_DAYS, RECENT_DAYS);
       const indices = recentDays(ctx, "index_close", RECENT_DAYS);
-      const tasks = dueTasks({ now: ctx.clock(), runs: readRuns(ctx.db), missing: { cash_bhav: cash.length, fo_bhav: fo.length, index_close: indices.length }, banTradeDate: latestBan(ctx.db)?.tradeDate ?? null });
+      const tasks = dueTasks({ now: ctx.clock(), runs: readRuns(ctx.db), missing: { cash_bhav: cash.length, fo_bhav: fo.length, pr: pr.length, index_close: indices.length }, banTradeDate: latestBan(ctx.db)?.tradeDate ?? null });
       for (const task of tasks) {
         if (this.stopping) break;
         if (task === "cash_bhav") {
@@ -154,7 +159,7 @@ export class Scheduler {
         else if (task === "index_close") await syncDays(ctx, "index_close", indices, () => this.stopping);
         else if (task === "lots") await refreshLots(ctx);
         else if (task === "fo_ban") await refreshBan(ctx);
-        else await refreshResults(ctx);
+        else await syncDays(ctx, "pr", pr, () => this.stopping);
       }
     } catch (error) {
       this.deps.log.error("scheduled NSE refresh failed", { error });

@@ -11,9 +11,9 @@ import { parseIndexClose } from "./parsers/indexClose.js";
 import { mtoKey, parseMto } from "./parsers/mto.js";
 import { parseFnoBan } from "./parsers/ban.js";
 import { parseNseLots } from "./parsers/lots.js";
-import { parseCalendar } from "./parsers/results.js";
-import { cashDayStatuses, checkedDays, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeFoDay, writeIndexDay, writeLots, writeResults, type DayDataset, type DayStatus } from "./store.js";
-import { ZipError, isZip, unzipSingle } from "./unzip.js";
+import { boardMeetingsFileDay, parseBoardMeetings, resultsEvents } from "./parsers/results.js";
+import { dayStatuses, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeFoDay, writeIndexDay, writeLots, writePrDay, type DayDataset, type DayStatus } from "./store.js";
+import { ZipError, isZip, unzipFile, unzipSingle } from "./unzip.js";
 
 // NSE's daily files, downloaded from its free public archive — no broker calls:
 //   cash_bhav  sec_bhavdata_full_DDMMYYYY.csv: close, volume, delivery % per stock
@@ -22,23 +22,27 @@ import { ZipError, isZip, unzipSingle } from "./unzip.js";
 //              (from Feb/Mar 2012); extends index candles (src/history/fromIndices.ts)
 //   lots       fo_mktlots.csv (fallback: the lot column of the latest F&O bhavcopy)
 //   fo_ban     fo_secban.csv
-//   results    the website's event-calendar JSON (needs the home page's cookies first)
+//   pr         PRDDMMYY.zip, the daily "PR" bundle (since 2010): its board-meetings file
+//              bmDDMMYYYY.txt fills the results calendar
+// Nothing comes from www.nseindia.com: its JSON API (the event calendar the
+// results used to come from) hangs behind bot protection since Nov 2026.
 // Days up to 5 Jul 2024 come from the archive's older formats (src/jobs/nseHistory.ts
 // downloads them back to 1994): the cash bhavcopy cmDDMONYYYYbhav.csv.zip plus
 // the delivery file MTO_DDMMYYYY.DAT, and the F&O bhavcopy foDDMONYYYYbhav.csv.zip.
 // NSE's archive has been seen to serve another day's file for a holiday URL, so
-// the trade date written inside a file must equal the date asked for.
+// the trade date written inside a file (for the PR zip, in its board-meetings
+// file's name) must equal the date asked for.
 
 export interface NseContext {
   db: Db;
   nse: NseClient;
   log: Logger;
-  urls: { archiveUrl: string; wwwUrl: string };
+  urls: { archiveUrl: string };
   clock: () => number;
 }
 
 /** Don't ask for today's file before this (minutes after IST midnight). */
-export const PUBLISH_MIN: Record<DayDataset, number> = { cash_bhav: 17 * 60 + 30, fo_bhav: 18 * 60, index_close: 18 * 60 };
+export const PUBLISH_MIN: Record<DayDataset, number> = { cash_bhav: 17 * 60 + 30, fo_bhav: 18 * 60, pr: 17 * 60 + 30, index_close: 18 * 60 };
 
 /** Weekend days NSE held a full session on. Add new ones here (e.g. a Budget day on a weekend). */
 export const WEEKEND_SESSIONS: readonly number[] = [Date.UTC(2026, 1, 1)]; // Sun 1 Feb 2026, Union Budget
@@ -48,11 +52,12 @@ export const LEGACY_LAST_DAY = Date.UTC(2024, 6, 5);
 
 /**
  * The first session worth asking NSE's archive for: the cash market's first (3
- * Nov 1994) and the first with stock futures (9 Nov 2001; F&O files from 12 Jun
- * 2000 have index futures only, and only stock futures are stored). NSE's
- * index file starts in the second half of Feb 2012 (15 Feb: none; 1 Mar: there).
+ * Nov 1994), the first with stock futures (9 Nov 2001; F&O files from 12 Jun
+ * 2000 have index futures only, and only stock futures are stored), the PR
+ * zip's first year (2010; 2008 and 2009 answer 404) and NSE's index file's
+ * start in the second half of Feb 2012 (15 Feb: none; 1 Mar: there).
  */
-export const ARCHIVE_FROM: Record<DayDataset, number> = { cash_bhav: Date.UTC(1994, 10, 3), fo_bhav: Date.UTC(2001, 10, 9), index_close: Date.UTC(2012, 1, 16) };
+export const ARCHIVE_FROM: Record<DayDataset, number> = { cash_bhav: Date.UTC(1994, 10, 3), fo_bhav: Date.UTC(2001, 10, 9), pr: Date.UTC(2010, 0, 1), index_close: Date.UTC(2012, 1, 16) };
 
 /** Delivery positions (MTO files) start in 2002 (none in 2001 when checked); earlier days have no delivery %. */
 export const MTO_FROM = Date.UTC(2002, 0, 1);
@@ -81,6 +86,7 @@ export function daysToCheck(params: { today: number; minutes: number; from: numb
 }
 
 const ddmmyyyy = (day: number) => isoDay(day).split("-").reverse().join("");
+const ddmmyy = (day: number) => ddmmyyyy(day).slice(0, 4) + ddmmyyyy(day).slice(6);
 const yyyymmdd = (day: number) => isoDay(day).replaceAll("-", "");
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 /** The old archive's path for a day: "2010/JAN" and "04JAN2010". */
@@ -109,6 +115,8 @@ export const indexCloseUrl = (archiveUrl: string, day: number) => `${archiveUrl}
 
 export const mtoUrl = (archiveUrl: string, day: number) => `${archiveUrl}/archives/equities/mto/MTO_${ddmmyyyy(day)}.DAT`;
 
+export const prUrl = (archiveUrl: string, day: number) => `${archiveUrl}/archives/equities/bhavcopy/pr/PR${ddmmyy(day)}.zip`;
+
 export type DayOutcome = DayStatus | "not_yet";
 
 /** What a downloaded day file contains, before it's stored. Exported for tests. */
@@ -122,15 +130,17 @@ function checkDate(fileDate: number | null, mixed: boolean, day: number): string
   return null;
 }
 
-function unzipped(body: Buffer): string {
+function fromZip<T>(body: Buffer, read: () => T): T {
   if (!isZip(body)) throw new NseError("NSE sent something that isn't a zip file", null, true);
   try {
-    return unzipSingle(body).data.toString("utf8");
+    return read();
   } catch (error) {
     // A broken zip is usually a cut-off download: worth another try.
     throw new NseError(`bad zip: ${(error as ZipError).message}`, null, true);
   }
 }
+
+const unzipped = (body: Buffer): string => fromZip(body, () => unzipSingle(body).data.toString("utf8"));
 
 export interface ImportOptions {
   /** Extend stored daily candles from a cash day (the evening run). History downloads don't: the days are older than any series' end. */
@@ -212,12 +222,32 @@ export function readIndexFile(ctx: NseContext, day: number, body: Buffer, option
   };
 }
 
-const dayUrl = (archiveUrl: string, dataset: DayDataset, day: number) =>
-  dataset === "cash_bhav" ? cashBhavUrl(archiveUrl, day) : dataset === "fo_bhav" ? foBhavUrl(archiveUrl, day) : indexCloseUrl(archiveUrl, day);
+/**
+ * Read the results calendar's share of a PR zip for `day`: the financial-results
+ * meetings in its board-meetings file. The date in that file's name must be `day`.
+ */
+export function readPrFile(ctx: NseContext, day: number, body: Buffer): DayParse {
+  const file = fromZip(body, () => unzipFile(body, (name) => boardMeetingsFileDay(name) !== null));
+  if (!file) throw new NseError("no board-meetings file in the PR zip (format change?)", null, false);
+  const wrong = checkDate(boardMeetingsFileDay(file.name.split("/").pop()!), false, day);
+  if (wrong) return { kind: "mismatch", note: wrong };
+  const parsed = parseBoardMeetings(file.data.toString("utf8"));
+  const events = resultsEvents(parsed.meetings);
+  return {
+    kind: "ok",
+    badRows: parsed.badRows,
+    store: () => {
+      writePrDay(ctx.db, day, events, ctx.clock());
+      return events.length;
+    },
+  };
+}
+
+const DAY_URL: Record<DayDataset, (archiveUrl: string, day: number) => string> = { cash_bhav: cashBhavUrl, fo_bhav: foBhavUrl, pr: prUrl, index_close: indexCloseUrl };
 
 /** Download, check and store one day. Throws NseError when NSE won't serve it. */
 export async function importDay(ctx: NseContext, dataset: DayDataset, day: number, options: ImportOptions = {}): Promise<DayOutcome> {
-  const url = dayUrl(ctx.urls.archiveUrl, dataset, day);
+  const url = DAY_URL[dataset](ctx.urls.archiveUrl, day);
   const response = await ctx.nse.get(url);
   const today = istParts(ctx.clock()).day;
   if (response.status === 404) {
@@ -228,6 +258,7 @@ export async function importDay(ctx: NseContext, dataset: DayDataset, day: numbe
   }
   let parsed: DayParse;
   if (dataset === "fo_bhav") parsed = readFoFile(ctx, day, response.body);
+  else if (dataset === "pr") parsed = readPrFile(ctx, day, response.body);
   else if (dataset === "index_close") parsed = readIndexFile(ctx, day, response.body, options);
   else {
     parsed = readCashFile(ctx, day, response.body, options);
@@ -301,15 +332,20 @@ export async function syncDays(ctx: NseContext, dataset: DayDataset, days: numbe
   return result;
 }
 
-/** The recent days a dataset is missing (the evening run and the catch-up on start). */
-export function recentDays(ctx: NseContext, dataset: DayDataset, lookbackDays: number): number[] {
+/**
+ * The recent days a dataset is missing (the evening run and the catch-up on
+ * start): days never asked for in the last `lookbackDays`, plus `mismatch` days
+ * in the last `recheckDays`.
+ */
+export function recentDays(ctx: NseContext, dataset: DayDataset, lookbackDays: number, recheckDays = lookbackDays): number[] {
   const { day: today, minutes } = istParts(ctx.clock());
   const from = today - lookbackDays * DAY_MS;
-  const checked = dataset === "cash_bhav" ? cashDayStatuses(ctx.db, from) : checkedDays(ctx.db, dataset, from);
-  return daysToCheck({ today, minutes, from, publishMin: PUBLISH_MIN[dataset], checked, recheck: ["mismatch"] });
+  const checked = dayStatuses(ctx.db, dataset, from);
+  const recheckFrom = today - recheckDays * DAY_MS;
+  return daysToCheck({ today, minutes, from, publishMin: PUBLISH_MIN[dataset], checked, recheck: ["mismatch"] }).filter((day) => day >= recheckFrom || !checked.has(day));
 }
 
-async function guarded(ctx: NseContext, name: "lots" | "fo_ban" | "results", run: () => Promise<Record<string, unknown>>): Promise<boolean> {
+async function guarded(ctx: NseContext, name: "lots" | "fo_ban", run: () => Promise<Record<string, unknown>>): Promise<boolean> {
   try {
     const info = await run();
     recordRun(ctx.db, name, { at: ctx.clock(), ok: true, info });
@@ -351,28 +387,5 @@ export function refreshBan(ctx: NseContext): Promise<boolean> {
     if (list.tradeDate === null) throw new Error("ban list has no trade date (format change?)");
     writeBan(ctx.db, list.tradeDate, list.symbols, ctx.clock());
     return { tradeDate: isoDay(list.tradeDate), count: list.symbols.length };
-  });
-}
-
-/** NSE serves its JSON API only to a browser-like session: load the home page for cookies first. */
-export function refreshResults(ctx: NseContext): Promise<boolean> {
-  return guarded(ctx, "results", async () => {
-    const home = await ctx.nse.get(`${ctx.urls.wwwUrl}/`, { Accept: "text/html" });
-    const cookie = home.setCookies.map((value) => value.split(";")[0]).filter(Boolean).join("; ");
-    const response = await ctx.nse.get(`${ctx.urls.wwwUrl}/api/event-calendar`, {
-      Accept: "application/json, text/plain, */*",
-      Referer: `${ctx.urls.wwwUrl}/companies-listing/corporate-filings-event-calendar`,
-      ...(cookie ? { Cookie: cookie } : {}),
-    });
-    if (response.status !== 200) throw new Error(`NSE event calendar ${response.status}`);
-    let json: unknown;
-    try {
-      json = JSON.parse(response.body.toString("utf8"));
-    } catch {
-      throw new Error("NSE event calendar isn't JSON");
-    }
-    const events = parseCalendar(json);
-    writeResults(ctx.db, events);
-    return { count: events.length };
   });
 }

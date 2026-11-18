@@ -455,7 +455,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
   history would bring; the whole move is in [docs/migrate-tradex.md](docs/migrate-tradex.md).
 - **Decades of history:** the broker serves 5 years of daily candles; NSE's archive goes back to
   1994. `npm run hub -- data nse-history` downloads it (raw daily prices of every stock, delisted
-  ones included, delivery % since 2002, F&O since 2001, every NSE index since 2012) in about eight and a half hours, pausing in market
+  ones included, delivery % since 2002, F&O since 2001, results dates since 2010, every NSE index since 2012) in about ten hours, pausing in market
   hours — details in [docs/api.md](docs/api.md#data-nse-history).
 - **Updating:** `git pull && npm install && npm run build` (or `docker compose up -d --build`).
   Database migrations run automatically at start-up.

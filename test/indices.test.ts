@@ -89,7 +89,7 @@ describe("index candles from the index file", () => {
     t = makeHub();
     const time = fakeTime(now);
     const calls: Array<{ url: string; at: number; headers: Record<string, string> }> = [];
-    const ctx: NseContext = { db: t.db, log: quiet, clock: time.clock, urls: { archiveUrl: archive, wwwUrl: "https://www.nse.test" }, nse: new NseClient({ log: quiet, clock: time.clock, sleep: time.sleep, fetch: fakeFetch(routes, calls, time.clock) }) };
+    const ctx: NseContext = { db: t.db, log: quiet, clock: time.clock, urls: { archiveUrl: archive }, nse: new NseClient({ log: quiet, clock: time.clock, sleep: time.sleep, fetch: fakeFetch(routes, calls, time.clock) }) };
     return { ctx, calls };
   };
 
@@ -152,8 +152,8 @@ describe("index candles from the index file", () => {
 
   it("asks for the index file in the evening run", () => {
     const now = ist(2026, 11, 17, 19);
-    expect(dueTasks({ now, runs: new Map(), missing: { cash_bhav: 0, fo_bhav: 0, index_close: 1 }, banTradeDate: d("2026-11-18") })).toContain("index_close");
-    expect(dueTasks({ now, runs: new Map(), missing: { cash_bhav: 0, fo_bhav: 0 }, banTradeDate: d("2026-11-18") })).not.toContain("index_close");
+    expect(dueTasks({ now, runs: new Map(), missing: { cash_bhav: 0, fo_bhav: 0, pr: 0, index_close: 1 }, banTradeDate: d("2026-11-18") })).toContain("index_close");
+    expect(dueTasks({ now, runs: new Map(), missing: { cash_bhav: 0, fo_bhav: 0, pr: 0 }, banTradeDate: d("2026-11-18") })).not.toContain("index_close");
   });
 });
 

@@ -8,10 +8,11 @@ import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "
 
 // NSE history (`hub data nse-history`): NSE's archive files for every session
 // in a range — the cash bhavcopy back to the first session (3 Nov 1994), with
-// delivery % from 2002, and the F&O bhavcopy back to the first stock futures
-// (9 Nov 2001) — into the tables the evening run fills (cash_bhav,
-// fo_futures). That's the raw record of every stock NSE listed, delisted ones
-// included: prices as traded, not adjusted for splits or bonuses. No broker calls.
+// delivery % from 2002, the F&O bhavcopy back to the first stock futures
+// (9 Nov 2001) and the PR zip's board meetings (results dates) back to 2010 —
+// into the tables the evening run fills (cash_bhav, fo_futures,
+// results_events). That's the raw record of every stock NSE listed, delisted
+// ones included: prices as traded, not adjusted for splits or bonuses. No broker calls.
 //
 // Like backfills, these jobs live in the `jobs` table and:
 //   - are resumable: every day asked for is recorded in nse_days, so a paused
@@ -21,14 +22,14 @@ import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "
 // Years go newest first (each year oldest first), so recent history lands
 // first. In the cash market every weekend day is asked for too — NSE has held
 // Budget-day and Muhurat sessions on weekends, and a missing session would make
-// the next day's PREVCLOSE look like a corporate action. F&O is then asked for
-// the weekend days the cash market traded, and so is NSE's index file (every
-// index's OHLC, from Feb 2012), which becomes index candles back to 2012. When
-// a run stops, the index candles and the synthetic baskets
+// the next day's PREVCLOSE look like a corporate action. F&O, the PR zip and
+// NSE's index file (every index's OHLC, from Feb 2012, which becomes index
+// candles back to 2012) are then asked for the weekend days the cash market
+// traded. When a run stops, the index candles and the synthetic baskets
 // (src/history/baskets.ts) are rebuilt from what is stored. The whole archive
-// is ~28,000 requests at NSE's pace of one per 1.1 s: about eight and a half hours.
+// is ~32,000 requests at NSE's pace of one per 1.1 s: nine to ten hours.
 
-export const HISTORY_DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "index_close"];
+export const HISTORY_DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close"];
 
 /** A message for invalid parameters, or null. `today` is the IST day key (the evening run owns it). */
 export function validateNseHistory(params: NseHistoryParams, today: number): string | null {
@@ -37,7 +38,7 @@ export function validateNseHistory(params: NseHistoryParams, today: number): str
   if (from === null || to === null) return "--from and --to must be dates like 1994-11-03.";
   if (from > to) return "--from must be on or before --to.";
   if (to >= today) return "--to must be before today (the evening run fetches today's files).";
-  if (!params.datasets.length || params.datasets.some((dataset) => !HISTORY_DATASETS.includes(dataset))) return "--only must be cash, fo or indices.";
+  if (!params.datasets.length || params.datasets.some((dataset) => !HISTORY_DATASETS.includes(dataset))) return "--only must be cash, fo, pr or indices.";
   return null;
 }
 
@@ -52,7 +53,7 @@ export function historyDays(db: Db, dataset: DayDataset, from: number, to: numbe
   return [...new Set([...daysToCheck(ask), ...weekendSessions])].sort((a, b) => a - b);
 }
 
-const LABEL: Record<DayDataset, string> = { cash_bhav: "cash", fo_bhav: "F&O", index_close: "indices" };
+export const HISTORY_LABEL: Record<DayDataset, string> = { cash_bhav: "cash", fo_bhav: "F&O", pr: "PR", index_close: "indices" };
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const tally = (counts: Record<"ok" | "holiday" | "mismatch", number>) =>
   `${plural(counts.ok, "session", "sessions")} stored, ${plural(counts.holiday, "day", "days")} without a file${counts.mismatch ? `, ${plural(counts.mismatch, "file", "files")} for another date` : ""}`;
@@ -93,7 +94,7 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
         done += 1;
         if (outcome === "failed") failed += 1;
         else if (outcome !== "not_yet") counts[outcome] += 1;
-        updateJob(ctx.db, id, { done, failed, message: `${LABEL[dataset]} ${isoDay(day)}: ${tally(counts)}${failed ? `, ${failed} failed` : ""}…` }, ctx.clock());
+        updateJob(ctx.db, id, { done, failed, message: `${HISTORY_LABEL[dataset]} ${isoDay(day)}: ${tally(counts)}${failed ? `, ${failed} failed` : ""}…` }, ctx.clock());
         onProgress?.(getJob(ctx.db, id)!);
       };
       const result = await syncDays(ctx, dataset, days, shouldStop, onDay, { record: false, extend: false });

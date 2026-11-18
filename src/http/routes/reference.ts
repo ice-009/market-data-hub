@@ -21,7 +21,7 @@ import { ParamError, parseRange, parseTime } from "../params.js";
 //   GET /v1/fo/contracts?symbol            fo       a stock's near/next futures contracts (hub tickers)
 //   GET /v1/fo/ban                         fo       the F&O ban list
 //   GET /v1/lots[?symbol]                  history  stock-futures lot sizes
-//   GET /v1/results-calendar?from&to       history  results dates from NSE's event calendar
+//   GET /v1/results-calendar?from&to       history  results dates from the PR zip's board meetings
 //   GET /v1/market/regime[?universe]       history  NIFTY trend + breadth
 //   GET /v1/indices                        history  indices and synthetic baskets with daily history, sector map
 // Dates in responses are IST trade dates, as YYYY-MM-DD and as day keys (ms).
@@ -166,11 +166,11 @@ export function referenceRoutes(app: Hono<HubEnv>, hub: Hub) {
     } catch (error) {
       return c.json(bad(error), 400);
     }
-    const run = readRuns(hub.db).get("results");
-    if (!run?.lastSuccessAt) return c.json(notReady("The results calendar"), 503);
+    const asOf = lastOkDay(hub.db, "pr");
+    if (asOf === null) return c.json(notReady("The results calendar"), 503);
     const symbol = c.req.query("symbol") ? (normalizeSymbol(c.req.query("symbol")!) ?? "") : undefined;
     const events = readResults(hub.db, range.from, range.to, symbol).map((event) => ({ ...event, date: isoDay(event.date), day: event.date }));
-    return c.json({ from: isoDay(range.from), to: isoDay(range.to), fetchedAt: run.lastSuccessAt, events });
+    return c.json({ from: isoDay(range.from), to: isoDay(range.to), asOf: isoDay(asOf), fetchedAt: readRuns(hub.db).get("pr")?.lastSuccessAt ?? null, events });
   });
 
   app.get("/v1/market/regime", requireScope("history"), async (c) => {
