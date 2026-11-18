@@ -90,7 +90,7 @@ To keep what the Mac hub stored, copy a backup over instead of downloading it al
 # on the Mac
 npm run hub -- data backup --to ./backups
 # stop the Mac hub, then:
-scp backups/hub-*.db.gz ubuntu@<public-ip>:market-data-hub/data/hub.db.gz
+scp "$(ls -t backups/hub-*.db.gz | head -1)" ubuntu@<public-ip>:market-data-hub/data/hub.db.gz   # the newest
 
 # on the VM
 docker compose stop hub

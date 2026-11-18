@@ -175,8 +175,8 @@ const healthy = (now: number): HealthInput => ({
   now,
   sessionToday: true,
   jobsEnabled: true,
-  nse: { cash_bhav: { lastOk: d("2026-11-06"), checked: new Map() }, fo_bhav: { lastOk: d("2026-11-06"), checked: new Map() } },
-  refreshed: { lots: now - DAY_MS, fo_ban: now - DAY_MS, results: now - DAY_MS },
+  nse: { cash_bhav: { lastOk: d("2026-11-06"), checked: new Map() }, fo_bhav: { lastOk: d("2026-11-06"), checked: new Map() }, pr: { lastOk: d("2026-11-06"), checked: new Map() } },
+  refreshed: { lots: now - DAY_MS, fo_ban: now - DAY_MS },
   broker: { configured: true, owner: true, loginFailing: null, stoppedForToday: false, coolingDown: false },
   live: { enabled: true, running: true, feed: { mode: "socket", socket: "connected" } },
   backup: null,
@@ -200,7 +200,7 @@ describe("health", () => {
     const late = ist(2026, 11, 9, 20, 30);
     const today = assessHealth(healthy(late));
     expect(today.healthy).toBe(false);
-    expect(today.problems).toEqual([expect.stringMatching(/^Cash bhavcopy is stale: last session stored 2026-11-06, missing 2026-11-09/), expect.stringMatching(/^F&O bhavcopy is stale/)]);
+    expect(today.problems).toEqual([expect.stringMatching(/^Cash bhavcopy is stale: last session stored 2026-11-06, missing 2026-11-09/), expect.stringMatching(/^F&O bhavcopy is stale/), expect.stringMatching(/^PR zip \(results calendar\) is stale/)]);
     const holiday = assessHealth({ ...healthy(late), sessionToday: false });
     expect(holiday.healthy).toBe(true);
     expect(holiday.warnings[0]).toMatch(/holiday/);
@@ -223,7 +223,7 @@ describe("health", () => {
     const now = ist(2026, 11, 9, 11, 0);
     const result = assessHealth({
       ...healthy(now),
-      refreshed: { lots: null, fo_ban: now - 5 * DAY_MS, results: now - DAY_MS },
+      refreshed: { lots: null, fo_ban: now - 5 * DAY_MS },
       broker: { configured: true, owner: true, loginFailing: "TOTP rejected", stoppedForToday: true, coolingDown: false },
       backup: { lastAt: now - 3 * DAY_MS },
       jobsEnabled: false,
@@ -304,6 +304,7 @@ describe("health", () => {
       const empty = (await (await get()).json()) as { healthy: boolean; problems: string[] };
       expect(empty.healthy).toBe(false);
       expect(empty.problems).toContain("Cash bhavcopy: nothing stored yet.");
+      expect(empty.problems).toContain("PR zip (results calendar): nothing stored yet.");
       const strict = await get("?strict=1");
       expect(strict.status).toBe(503);
       expect(await strict.json()).toMatchObject({ code: "unhealthy", healthy: false });
@@ -314,8 +315,9 @@ describe("health", () => {
       for (let day = today - 10 * DAY_MS; day <= today; day += DAY_MS) {
         markDay(h.db, "cash_bhav", day, "ok", 1, now);
         writeFoDay(h.db, day, [], now);
+        markDay(h.db, "pr", day, "ok", 0, now);
       }
-      for (const name of ["lots", "fo_ban", "results"] as const) recordRun(h.db, name, { at: now, ok: true });
+      for (const name of ["lots", "fo_ban"] as const) recordRun(h.db, name, { at: now, ok: true });
       const fine = await get("?strict=1");
       const body = (await fine.json()) as { healthy: boolean; problems: string[] };
       // The live feed has no broker here (disabled), so nothing else can be wrong.

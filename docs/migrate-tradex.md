@@ -115,8 +115,9 @@ npm run hub -- data status
 ```
 
 `data status` should show the imported candles and the bhavcopy sessions. Its first line is the
-health check: right after an import, "never fetched" for lots, the ban list and the results
-calendar is expected — the server fetches them within minutes (they are NSE files, no broker calls).
+health check: right after an import, "never fetched" for lots and the ban list, and "nothing stored
+yet" for the PR zip (results calendar), is expected — the server fetches them within minutes (they
+are NSE files, no broker calls).
 
 In Tradex's `.env`:
 

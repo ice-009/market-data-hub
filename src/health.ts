@@ -15,7 +15,7 @@ import { DAY_MS, isMarketOpen, isoDay, istDayStart, istParts, isWeekday } from "
 
 /** After this (minutes after IST midnight) a trading day's NSE files should be stored. */
 export const NSE_DUE_MIN = 20 * 60;
-/** Lots, the ban list and the results calendar are refreshed daily; older than this is stale. */
+/** Lots and the ban list are refreshed daily; older than this is stale. */
 export const DAILY_STALE_MS = 4 * DAY_MS;
 /** With HUB_BACKUP_DIR set, the newest backup should be younger than this. */
 export const BACKUP_STALE_MS = 2 * DAY_MS;
@@ -49,7 +49,7 @@ export interface HealthInput {
   jobsEnabled: boolean;
   nse: Record<DayDataset, NseDayState>;
   /** Last successful refresh of the daily reference files. */
-  refreshed: { lots: number | null; fo_ban: number | null; results: number | null };
+  refreshed: { lots: number | null; fo_ban: number | null };
   broker: { configured: boolean; owner: boolean; loginFailing: string | null; stoppedForToday: boolean; coolingDown: boolean };
   live: { enabled: boolean; running: boolean; feed: Pick<FeedStatus, "mode" | "socket"> };
   /** Null when HUB_BACKUP_DIR isn't set. */
@@ -64,8 +64,8 @@ export interface Health {
   warnings: string[];
 }
 
-const LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy" };
-const REFRESHED_LABEL = { lots: "Lot sizes", fo_ban: "F&O ban list", results: "Results calendar" } as const;
+const LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip (results calendar)" };
+const REFRESHED_LABEL = { lots: "Lot sizes", fo_ban: "F&O ban list" } as const;
 const age = (ms: number) => (ms >= 2 * DAY_MS ? `${Math.floor(ms / DAY_MS)} days` : `${Math.max(1, Math.round(ms / 3_600_000))} hours`);
 
 /** Problems and warnings from the hub's state. Pure. */
@@ -75,7 +75,7 @@ export function assessHealth(input: HealthInput): Health {
   const warnings: string[] = [];
   const today = istParts(now).day;
 
-  for (const dataset of ["cash_bhav", "fo_bhav"] as const) {
+  for (const dataset of ["cash_bhav", "fo_bhav", "pr"] as const) {
     const state = input.nse[dataset];
     if (state.lastOk === null) {
       problems.push(`${LABEL[dataset]}: nothing stored yet.`);
@@ -91,7 +91,7 @@ export function assessHealth(input: HealthInput): Health {
     else problems.push(message);
   }
 
-  for (const name of ["lots", "fo_ban", "results"] as const) {
+  for (const name of ["lots", "fo_ban"] as const) {
     const at = input.refreshed[name];
     if (at === null) problems.push(`${REFRESHED_LABEL[name]}: never fetched.`);
     else if (now - at > DAILY_STALE_MS) problems.push(`${REFRESHED_LABEL[name]}: last fetched ${age(now - at)} ago.`);
@@ -143,7 +143,7 @@ function sessionToday(db: Db, now: number): boolean {
 export function hubHealth(hub: Pick<Hub, "db" | "config" | "owner" | "auth" | "gate" | "live">, feed: Pick<FeedStatus, "mode" | "socket"> | null, now = Date.now()): Health {
   const { db } = hub;
   const runs = readRuns(db);
-  const success = (name: "lots" | "fo_ban" | "results") => runs.get(name)?.lastSuccessAt ?? null;
+  const success = (name: "lots" | "fo_ban") => runs.get(name)?.lastSuccessAt ?? null;
   const nse = (dataset: DayDataset): NseDayState => {
     const lastOk = lastOkDay(db, dataset);
     return { lastOk, checked: lastOk === null ? new Map() : checkedDays(db, dataset, lastOk) };
@@ -155,8 +155,8 @@ export function hubHealth(hub: Pick<Hub, "db" | "config" | "owner" | "auth" | "g
     now,
     sessionToday: sessionToday(db, now),
     jobsEnabled: hub.config.jobsEnabled,
-    nse: { cash_bhav: nse("cash_bhav"), fo_bhav: nse("fo_bhav") },
-    refreshed: { lots: success("lots"), fo_ban: success("fo_ban"), results: success("results") },
+    nse: { cash_bhav: nse("cash_bhav"), fo_bhav: nse("fo_bhav"), pr: nse("pr") },
+    refreshed: { lots: success("lots"), fo_ban: success("fo_ban") },
     broker: {
       configured: auth?.configured ?? false,
       owner: hub.owner,

@@ -3,6 +3,7 @@ import type { Db } from "../db.js";
 import type { HistoryService } from "../history/service.js";
 import { BACKFILL_TFS, BASE, finalBefore, type BaseTf } from "../history/timeframes.js";
 import type { Logger } from "../log.js";
+import type { DayDataset } from "../nse/store.js";
 import { getUniverse } from "../reference/universe.js";
 import { DAY_MS, MINUTE_MS, SESSION_CLOSE_MIN, istDayStart, istParts, isMarketOpen } from "../time.js";
 
@@ -36,7 +37,7 @@ export interface NseHistoryParams {
   /** ISO days, inclusive. */
   from: string;
   to: string;
-  datasets: Array<"cash_bhav" | "fo_bhav">;
+  datasets: DayDataset[];
 }
 
 /** A row of the `jobs` table: a broker backfill or an NSE history download. */
