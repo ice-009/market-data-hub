@@ -4,23 +4,26 @@ import { readSeries, writeBars } from "../src/history/store.js";
 import { banTarget, dueTasks } from "../src/jobs/scheduler.js";
 import { createLogger } from "../src/log.js";
 import { NseClient, NseError } from "../src/nse/client.js";
-import { cashBhavUrl, daysToCheck, foBhavUrl, importDay, refreshBan, refreshLots, refreshResults, syncDays, type NseContext } from "../src/nse/datasets.js";
+import { cashBhavUrl, daysToCheck, foBhavUrl, importDay, prUrl, recentDays, refreshBan, refreshLots, syncDays, type NseContext } from "../src/nse/datasets.js";
 import { combinedOiChangePct, oiBuildup, oiFact } from "../src/nse/openInterest.js";
 import { parseFnoBan } from "../src/nse/parsers/ban.js";
 import { parseCashBhav } from "../src/nse/parsers/cashBhav.js";
 import { aggregateStockFutures, parseFoBhav } from "../src/nse/parsers/foBhav.js";
 import { parseNseLots } from "../src/nse/parsers/lots.js";
-import { parseCalendar } from "../src/nse/parsers/results.js";
-import { type DatasetName, checkedDays, foMembersOn, latestBan, markDay, readFoSymbol, readLots, readResults, readRuns, writeFoDay } from "../src/nse/store.js";
-import { ZipError, unzipSingle } from "../src/nse/unzip.js";
+import { boardMeetingsFileDay, parseBoardMeetings, resultsEvents } from "../src/nse/parsers/results.js";
+import { type DatasetName, checkedDays, foMembersOn, latestBan, markDay, readFoSymbol, readLots, readResults, readRuns, writeFoDay, writeResults } from "../src/nse/store.js";
+import { ZipError, unzipFile, unzipSingle } from "../src/nse/unzip.js";
 import { DAY_MS, isoDay, parseIsoDay } from "../src/time.js";
 import { ist, makeHub, type TestHub } from "./support/hub.js";
 import { fakeFetch, fakeTime, makeZip, type Route } from "./support/nse.js";
 
 // Fixtures (a few KB): real NSE UDiFF F&O rows trimmed to a few underlyings
 // (from Tradex) — fo-bhav-20251001.csv with tickers NSE later renamed, and
-// fo-bhav-20251029.csv.zip zipped the way NSE ships it — plus a synthetic cash
-// bhavcopy in NSE's column layout.
+// fo-bhav-20251029.csv.zip zipped the way NSE ships it — a synthetic cash
+// bhavcopy in NSE's column layout, and two real PR zips with every file but the
+// board meetings and the top-25 list deleted (`zip -d`, so NSE's own entries):
+// PR011026.zip (bm01102026.txt, today's layout, with a purpose running onto
+// lines of its own) and PR011010.zip (Bm011010.txt, the 2010 padded layout).
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
 const d = (iso: string) => parseIsoDay(iso)!;
 const quiet = createLogger({ level: "error", secrets: [], write: () => {} });
@@ -55,17 +58,49 @@ describe("parsers (pure)", () => {
     expect(oiBuildup(0, 1)).toBeNull();
   });
 
-  it("reads lot sizes, the ban list and the results calendar", () => {
+  it("reads lot sizes and the ban list", () => {
     const lots = parseNseLots(["UNDERLYING ,SYMBOL ,NOV-26 ,DEC-26 ,", "STATE BANK OF INDIA ,SBIN ,750 ,750 ,", "HINDUSTAN AERONAUTICS LTD ,HAL , ,150 ,"].join("\r\n"));
     expect(lots).toEqual({ SBIN: 750, HAL: 150 });
     expect(parseFnoBan("Securities in Ban For Trade Date 05-NOV-2026:\r\n1,ABFRL\r\n2,M&MFIN\r\n")).toEqual({ tradeDate: d("2026-11-05"), symbols: ["ABFRL", "M&MFIN"] });
     expect(parseFnoBan("Securities in Ban For Trade Date 06-NOV-2026: NIL\n").symbols).toEqual([]);
-    const events = parseCalendar([
-      { symbol: "TCS", company: "Tata Consultancy Services", purpose: "Financial Results/Dividend", date: "09-Oct-2026" },
-      { symbol: "ABC", company: "ABC", purpose: "Fund Raising", date: "10-Oct-2026" },
-      { symbol: "XYZ", sm_name: "XYZ Ltd", bm_purpose: "To consider Financial Results", bm_date: "2026-11-12" },
-    ]);
-    expect(events.map((e) => e.symbol)).toEqual(["TCS", "XYZ"]);
+  });
+
+  it("reads results dates from the PR zip's board meetings (today's layout and 2010's)", () => {
+    const bm = unzipFile(fixture("PR011026.zip"), (name) => boardMeetingsFileDay(name) !== null)!;
+    expect(bm.name).toBe("bm01102026.txt");
+    const parsed = parseBoardMeetings(bm.data.toString("utf8"));
+    expect(parsed.badRows).toBe(0);
+    // 20 meetings; ANANDRATHI's purpose runs onto two more lines, which aren't rows.
+    expect(parsed.meetings).toHaveLength(20);
+    expect(parsed.meetings.find((m) => m.symbol === "ANANDRATHI")).toMatchObject({ company: "Anand Rathi Wealth Limited", date: d("2026-10-09") });
+    expect(parsed.meetings.find((m) => m.symbol === "PGHL")).toEqual({
+      symbol: "PGHL",
+      company: "Procter & Gamble Health Limited",
+      date: d("2026-11-02"),
+      purpose: "Financial Results To consider and approve the financial results for the period ended September 30, 2026",
+    });
+    const events = resultsEvents(parsed.meetings);
+    expect(events).toHaveLength(19); // RMC's is about fund raising
+    expect(events.map((e) => e.symbol).slice(0, 3)).toEqual(["RENTOMOJO", "GLASSWALL", "KANOHAR"]); // by date
+    expect(events.every((e) => e.purpose.length <= 120)).toBe(true);
+
+    const old = unzipFile(fixture("PR011010.zip"), (name) => boardMeetingsFileDay(name) !== null)!;
+    expect(old.name).toBe("Bm011010.txt");
+    const oldParsed = parseBoardMeetings(old.data.toString("utf8"));
+    expect(oldParsed.meetings).toHaveLength(14);
+    expect(oldParsed.meetings[0]).toMatchObject({ symbol: "MEGH", company: "Meghmani Organics Limited", date: d("2010-10-29") });
+    expect(resultsEvents(oldParsed.meetings).map((e) => e.symbol)).toEqual(["DYNACONS", "KAJARIACER", "AXISBANK", "UTVSOF", "SUDARSCHEM", "COROMANDEL", "ECLERX", "JMFINANCIL", "BATAINDIA", "MEGH", "CHAMBLFERT"]);
+
+    expect(boardMeetingsFileDay("bm17112026.txt")).toBe(d("2026-11-17"));
+    expect(boardMeetingsFileDay("Bm100718.txt")).toBe(d("2018-07-10"));
+    expect(boardMeetingsFileDay("bm31022026.txt")).toBeNull();
+    expect(boardMeetingsFileDay("bc01102026.csv")).toBeNull();
+    // A day with no meetings (as in Bm100718.txt) and a row with a date NSE never writes.
+    expect(parseBoardMeetings("COMPANY NAME    SYMBOL     : BM DATE    : BM PURPOSE \r\n\r\n\r\n")).toEqual({ meetings: [], badRows: 0 });
+    expect(parseBoardMeetings("X Ltd XYZ : 09-ABC-2026 : Financial Results\n").badRows).toBe(1);
+    // The same meeting twice in one file: one event, both purposes.
+    const twice = resultsEvents(parseBoardMeetings("T Ltd TCS : 09-OCT-2026 : Financial Results\nT Ltd TCS : 09-OCT-2026 : Financial Results/Dividend\n").meetings);
+    expect(twice).toEqual([{ symbol: "TCS", company: "T Ltd", date: d("2026-10-09"), purpose: "Financial Results · Financial Results/Dividend" }]);
   });
 });
 
@@ -77,6 +112,13 @@ describe("unzip", () => {
     expect(() => unzipSingle(Buffer.from("<html>Access denied</html>"))).toThrow(ZipError);
     expect(() => unzipSingle(makeZip("a.csv", text, 8, 2))).toThrow(/one file/);
     expect(() => unzipSingle(makeZip("a.csv", text, 8), 100)).toThrow(/too large/);
+  });
+
+  it("finds one file in a zip of many", () => {
+    expect(unzipFile(fixture("PR011010.zip"), (name) => name === "Tt011010.csv")?.data.toString("utf8")).toMatch(/^.*\r?\n/);
+    expect(unzipFile(fixture("PR011010.zip"), () => false)).toBeNull();
+    expect(() => unzipSingle(fixture("PR011010.zip"))).toThrow(/one file/);
+    expect(() => unzipFile(Buffer.from("<html>Access denied</html>"), () => true)).toThrow(ZipError);
   });
 });
 
@@ -134,7 +176,7 @@ describe("NSE datasets", () => {
     t = makeHub();
     const time = fakeTime(now);
     const calls: Array<{ url: string; at: number; headers: Record<string, string> }> = [];
-    const ctx: NseContext = { db: t.db, log: quiet, clock: time.clock, urls: { archiveUrl: archive, wwwUrl: "https://www.nse.test" }, nse: new NseClient({ log: quiet, clock: time.clock, sleep: time.sleep, fetch: fakeFetch(routes, calls, time.clock) }) };
+    const ctx: NseContext = { db: t.db, log: quiet, clock: time.clock, urls: { archiveUrl: archive }, nse: new NseClient({ log: quiet, clock: time.clock, sleep: time.sleep, fetch: fakeFetch(routes, calls, time.clock) }) };
     return { ctx, calls, time };
   };
 
@@ -183,14 +225,12 @@ describe("NSE datasets", () => {
     expect(readRuns(ctx.db).get("cash_bhav")?.lastError).toMatch(/in a row/);
   });
 
-  it("refreshes lots (falling back to the F&O bhavcopy), the ban list and the results calendar", async () => {
+  it("refreshes lots (falling back to the F&O bhavcopy) and the ban list", async () => {
     const lotsCsv = ["UNDERLYING,SYMBOL,NOV-26,DEC-26", ...Array.from({ length: 60 }, (_, i) => `CO ${i},SYM${i},${100 + i},${100 + i}`)].join("\n");
     const { ctx, calls } = context(
       {
         [`${archive}/content/fo/fo_mktlots.csv`]: [new Response("oops", { status: 404 }), new Response(lotsCsv)],
         [`${archive}/content/fo/fo_secban.csv`]: new Response("Securities in Ban For Trade Date 05-NOV-2026:\n1,ABFRL\n"),
-        "https://www.nse.test/": new Response("<html>", { headers: { "set-cookie": "nsit=abc; Path=/" } }),
-        "https://www.nse.test/api/event-calendar": new Response(JSON.stringify([{ symbol: "TCS", company: "TCS", purpose: "Financial Results", date: "09-Nov-2026" }])),
       },
       ist(2026, 11, 4, 20),
     );
@@ -202,9 +242,47 @@ describe("NSE datasets", () => {
     expect(readLots(ctx.db).SYM0).toBe(100);
     expect(await refreshBan(ctx)).toBe(true);
     expect(latestBan(ctx.db)).toMatchObject({ tradeDate: d("2026-11-05"), symbols: ["ABFRL"] });
-    expect(await refreshResults(ctx)).toBe(true);
-    expect(calls.at(-1)!.headers.Cookie).toBe("nsit=abc");
-    expect(readResults(ctx.db, 0, Number.MAX_SAFE_INTEGER)).toEqual([{ symbol: "TCS", company: "TCS", date: d("2026-11-09"), purpose: "Financial Results" }]);
+    expect(calls.every((call) => call.url.startsWith(archive))).toBe(true);
+  });
+
+  it("builds the results calendar from PR zips, from the archive only", async () => {
+    const zip = fixture("PR011026.zip");
+    const { ctx, calls } = context({ [prUrl(archive, d("2026-10-01"))]: new Response(zip), [prUrl(archive, d("2026-10-05"))]: new Response(zip) }, ist(2026, 10, 6, 20));
+    const result = await syncDays(ctx, "pr", [d("2026-10-01"), d("2026-10-02"), d("2026-10-05")]);
+    expect(result).toEqual({ stored: 1, failed: 0, stopped: null });
+    expect([...checkedDays(ctx.db, "pr")].map(([day, status]) => [isoDay(day), status])).toEqual([
+      ["2026-10-01", "ok"],
+      ["2026-10-02", "holiday"], // 404 (Gandhi Jayanti)
+      ["2026-10-05", "mismatch"], // 1 Oct's zip served for 5 Oct
+    ]);
+    expect(readResults(ctx.db, d("2026-10-23"), d("2026-10-23"))).toEqual([
+      { symbol: "CRISIL", company: "Crisil Limited", date: d("2026-10-23"), purpose: "Financial Results/Dividend To consider and approve the financial results for the period ended September 30, 2026 and div" },
+      { symbol: "INDUSINDBK", company: "Indusind Bank Limited", date: d("2026-10-23"), purpose: "Financial Results To consider and approve the Unaudited Standalone and Consolidated Financial Results for the quarter an" },
+    ]);
+    expect(readResults(ctx.db, 0, Number.MAX_SAFE_INTEGER, "RMC")).toEqual([]);
+    // Only NSE's archive is asked; nothing from www.nseindia.com.
+    expect(calls.map((call) => call.url).every((url) => url.startsWith(`${archive}/archives/equities/bhavcopy/pr/`))).toBe(true);
+  });
+
+  it("adds each PR zip's meetings to those already stored (2010's layout too)", async () => {
+    const { ctx } = context({ [prUrl(archive, d("2010-10-01"))]: new Response(fixture("PR011010.zip")) }, ist(2010, 10, 4, 20));
+    // Announced on an earlier day; each zip holds only its own day's announcements.
+    writeResults(ctx.db, [{ symbol: "TCS", company: "TCS", date: d("2010-10-15"), purpose: "Financial Results" }]);
+    expect(await importDay(ctx, "pr", d("2010-10-01"))).toBe("ok");
+    expect(readResults(ctx.db, d("2010-10-14"), d("2010-10-15")).map((e) => e.symbol)).toEqual(["AXISBANK", "UTVSOF", "TCS"]);
+    expect(prUrl(archive, d("2010-10-01"))).toBe(`${archive}/archives/equities/bhavcopy/pr/PR011010.zip`);
+  });
+
+  it("reads PR zips 60 days back, re-asking a mismatch only for the recent days", () => {
+    const { ctx } = context({}, ist(2026, 11, 18, 20));
+    const all = recentDays(ctx, "pr", 60, 10);
+    expect(all).toHaveLength(43); // weekdays from 19 Sep, today included after 17:30
+    for (const day of all) markDay(ctx.db, "pr", day, "ok", 0, 0);
+    markDay(ctx.db, "pr", d("2026-11-16"), "mismatch", 0, 0);
+    markDay(ctx.db, "pr", d("2026-10-01"), "mismatch", 0, 0);
+    markDay(ctx.db, "pr", d("2026-11-10"), "mismatch", 0, 0);
+    markDay(ctx.db, "fo_bhav", d("2026-11-10"), "holiday", 0, 0); // Diwali: a holiday, not a mismatch
+    expect(recentDays(ctx, "pr", 60, 10).map(isoDay)).toEqual(["2026-11-16"]);
   });
 });
 
@@ -213,20 +291,19 @@ describe("scheduler (pure)", () => {
   const none: Runs = new Map();
   it("catches up missing days at once, and spaces retries half an hour apart", () => {
     const now = ist(2026, 11, 4, 10);
-    expect(dueTasks({ now, runs: none, missing: { cash_bhav: 3, fo_bhav: 0 }, banTradeDate: null })).toEqual(["cash_bhav", "lots", "fo_ban", "results"]);
+    expect(dueTasks({ now, runs: none, missing: { cash_bhav: 3, fo_bhav: 0, pr: 40 }, banTradeDate: null })).toEqual(["cash_bhav", "lots", "fo_ban", "pr"]);
     const runs: Runs = new Map([["cash_bhav", { lastAttemptAt: now - 10 * 60_000, lastSuccessAt: null }]]);
-    expect(dueTasks({ now, runs, missing: { cash_bhav: 3, fo_bhav: 0 }, banTradeDate: d("2026-11-04") })).not.toContain("cash_bhav");
+    expect(dueTasks({ now, runs, missing: { cash_bhav: 3, fo_bhav: 0, pr: 0 }, banTradeDate: d("2026-11-04") })).not.toContain("cash_bhav");
   });
 
-  it("refreshes lots and the results calendar once each evening", () => {
+  it("refreshes lots once each evening", () => {
     const morning = ist(2026, 11, 4, 9);
     const runs: Runs = new Map([
       ["lots", { lastAttemptAt: ist(2026, 11, 3, 19), lastSuccessAt: ist(2026, 11, 3, 19) }],
-      ["results", { lastAttemptAt: ist(2026, 11, 3, 19), lastSuccessAt: ist(2026, 11, 3, 19) }],
     ]);
-    const input = { runs, missing: { cash_bhav: 0, fo_bhav: 0 }, banTradeDate: d("2026-11-04") };
+    const input = { runs, missing: { cash_bhav: 0, fo_bhav: 0, pr: 0 }, banTradeDate: d("2026-11-04") };
     expect(dueTasks({ ...input, now: morning })).toEqual([]);
-    expect(dueTasks({ ...input, now: ist(2026, 11, 4, 19) })).toEqual(["lots", "fo_ban", "results"]);
+    expect(dueTasks({ ...input, now: ist(2026, 11, 4, 19) })).toEqual(["lots", "fo_ban"]);
   });
 
   it("wants the next session's ban list from the evening on", () => {
