@@ -420,6 +420,8 @@ environment in Docker). Copy [.env.example](.env.example) to start.
 | `HUB_LIVE_RETENTION_DAYS` | `30` | Days of 1-minute live bars kept (last quotes are kept forever, one row per symbol). |
 | `HUB_BACKUP_DIR` | — | Set it to back the database up there every night (outside market hours). Empty = no scheduled backups. |
 | `HUB_BACKUP_KEEP` | `7` | Backups kept (nightly and `hub data backup`); older ones are deleted. |
+| `HUB_DISK_WARN_GB` | `5` | `/v1/status` warns when free space where the database or backups live is under this (GB, decimals allowed). |
+| `HUB_DISK_MIN_GB` | `2` | …and reports a problem under this; `hub data nse-history` and backups won't start, and stop, below it. `0` = no floor. |
 | `HUB_EOD_HISTORY_YEARS` | `2` | End-of-day mode only (no broker): years of NSE archive the server downloads by itself on start, for daily candles. `0` = none. |
 | `FYERS_CLIENT_ID` | — | Fyers app ID, e.g. `ABCD1234EF-100`. |
 | `FYERS_SECRET_KEY` | — | Fyers app secret. |
@@ -470,12 +472,18 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
   investigating. Secrets are scrubbed before anything is written.
 - **Data** lives in `HUB_DATA_DIR` (default `./data`): `hub.db` plus SQLite's `-wal`/`-shm` files.
 - **Backups:** `npm run hub -- data backup [--to ./backups] [--keep 7]` takes a checked, consistent
-  copy while the hub runs (SQLite's online backup) and keeps the newest 7. Set `HUB_BACKUP_DIR` to
-  have the server do it every night. **Restore:** stop the hub, copy a backup over `hub.db` in
-  `HUB_DATA_DIR`, delete `hub.db-wal` and `hub.db-shm`, start it. Keep copies off the machine too.
+  copy while the hub runs (SQLite's online backup), gzips it (`hub-….db.gz`) and keeps the newest 7.
+  Set `HUB_BACKUP_DIR` to have the server do it every night. **Restore:** stop the hub,
+  `gunzip -c backups/hub-….db.gz > data/hub.db`, delete `hub.db-wal` and `hub.db-shm`, start it.
+  Keep copies off the machine too.
+- **Disk space:** a full NSE history plus a week of backups needs about 9 GB at the peak (with broker candles; plan for 11–12 GB with the 2 GB floor) — sizes per dataset
+  and per backup in [docs/api.md](docs/api.md#disk-space). `/v1/status` warns under 5 GB free and reports a problem
+  under 2 GB (`HUB_DISK_WARN_GB`, `HUB_DISK_MIN_GB`); NSE history downloads and backups won't start,
+  and stop, under the 2 GB floor, so the database itself keeps room to write.
 - **Health:** `/v1/status` starts with `healthy`, `problems` and `warnings` — stale NSE files (a
   trading day's file not stored by 20:00 IST), reference files not refreshed in 4 days, broker login
-  failing or stopped for the day, the live feed down during market hours, backups over 2 days old.
+  failing or stopped for the day, the live feed down during market hours, backups over 2 days old,
+  low free disk.
   Point an uptime checker at `/v1/status?strict=1` (503 when unhealthy) with a key of its own.
 - **Coming from Tradex?** `npm run hub -- data import-tradex --db <Tradex .cache/market.db>
   --screener <.cache/screener> --dry-run` shows what Tradex's stored candles, delivery % and F&O
@@ -522,7 +530,8 @@ market-data-hub/
 │  ├─ owner.ts           # owner lock: one process at a time talks to the broker and NSE
 │  ├─ hub.ts             # wires the services below for one process
 │  ├─ health.ts          # healthy / problems / warnings for /v1/status and `data status`
-│  ├─ backup.ts          # online SQLite backups, rotation, the nightly schedule
+│  ├─ backup.ts          # online SQLite backups (gzipped), rotation, the nightly schedule
+│  ├─ disk.ts            # free disk space: thresholds for /v1/status, the floor for big writers
 │  ├─ broker/            # Fyers: login, request budget, history + quotes, the data socket
 │  ├─ history/           # candle store, fetch planning, resampling, background fetch queue
 │  ├─ nse/               # NSE daily files: parsers, downloads, store
@@ -590,6 +599,7 @@ smoke-tests it.
 | `better-sqlite3` fails to install | Use Node 22; on Linux install build tools (`python3 make g++`), or use Docker. |
 | `Cannot connect to the Docker daemon` | Start Docker Desktop. |
 | Tunnel URL returns 502 | The hub isn't running, or the tunnel points to the wrong address (`http://hub:8787` in compose, `http://127.0.0.1:8787` otherwise). |
+| `Disk: only … free` in `/v1/status`, or a backup / NSE history paused for disk | Free space on that disk (old files in `HUB_BACKUP_DIR` named `hub-*.db` are uncompressed backups from before gzip: they rotate out, or delete them once newer `.db.gz` ones exist), or point `HUB_BACKUP_DIR` at another disk. Paused jobs carry on within 30 minutes. Sizes: [docs/api.md](docs/api.md#disk-space). |
 | `EPERM … uv_cwd` from npm on macOS | Your terminal lost access to its folder: `cd ~ && cd path/to/market-data-hub`, and allow Terminal under System Settings → Privacy & Security → Files and Folders. |
 
 ---

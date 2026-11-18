@@ -88,8 +88,8 @@ export function createHub(options: HubOptions): Hub {
     if (snapshot?.stoppedForToday) return new BrokerError("Today's broker data budget is used up, or calls are stopped after rate-limit strikes.", "budget");
     return blocked();
   };
-  hub.nse = { db, nse: new NseClient({ log, fetch: options.fetch, clock }), log, urls: config.nse, clock } satisfies NseContext;
-  hub.scheduler = new Scheduler({ nse: hub.nse, backfill: { db, history: hub.history, log, clock }, log, ...(config.backupDir ? { backup: { db, dir: config.backupDir, keep: config.backupKeep } } : {}) });
+  hub.nse = { db, nse: new NseClient({ log, fetch: options.fetch, clock }), log, urls: config.nse, clock, disk: { dir: config.dataDir, minFreeBytes: config.diskMinBytes } } satisfies NseContext;
+  hub.scheduler = new Scheduler({ nse: hub.nse, backfill: { db, history: hub.history, log, clock }, log, ...(config.backupDir ? { backup: { db, dir: config.backupDir, keep: config.backupKeep, minFreeBytes: config.diskMinBytes } } : {}) });
   hub.live = new LiveService({ config, db, log, clock, client, auth, test: options.live });
   return hub;
 }
