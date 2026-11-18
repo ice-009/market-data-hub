@@ -1,7 +1,10 @@
 import type { Db } from "../db.js";
 import { DAY_MS, isoDay, parseIsoDay } from "../time.js";
 import { enqueueJob, type Job, type NseHistoryParams } from "./backfill.js";
-import { HISTORY_DATASETS, historyDays, lastHistoryDay } from "./nseHistory.js";
+import { historyDays, lastHistoryDay } from "./nseHistory.js";
+
+/** What daily candles and F&O history need (the PR zip's past results dates aren't). */
+const EOD_DATASETS: NseHistoryParams["datasets"] = ["cash_bhav", "fo_bhav"];
 
 // End-of-day mode (no broker configured) has only NSE's files to build daily
 // candles from, and the evening job keeps just the last couple of weeks. So
@@ -20,7 +23,7 @@ export function queueEndOfDayHistory(db: Db, years: number, now = Date.now()): J
   if (db.prepare("select 1 from jobs where kind = 'nse_history' and state in ('queued', 'paused', 'running') limit 1").get()) return null;
   const to = lastHistoryDay(now);
   const from = to - Math.round(years * 365.25) * DAY_MS;
-  const params: NseHistoryParams = { from: isoDay(from), to: isoDay(to), datasets: [...HISTORY_DATASETS] };
-  const pending = HISTORY_DATASETS.some((dataset) => historyDays(db, dataset, parseIsoDay(params.from)!, to).length > 0);
+  const params: NseHistoryParams = { from: isoDay(from), to: isoDay(to), datasets: [...EOD_DATASETS] };
+  const pending = EOD_DATASETS.some((dataset) => historyDays(db, dataset, parseIsoDay(params.from)!, to).length > 0);
   return pending ? enqueueJob(db, "nse_history", params, now) : null;
 }

@@ -3,7 +3,7 @@ import type { Bar, HistoryResult, Resolution } from "../broker/fyers.js";
 import { isFuture, isIndex } from "../broker/symbols.js";
 import type { Db } from "../db.js";
 import { WEEKEND_SESSIONS } from "../nse/datasets.js";
-import { cashDayStatuses, lastOkDay } from "../nse/store.js";
+import { dayStatuses, lastOkDay } from "../nse/store.js";
 import { DAY_MS, isWeekday } from "../time.js";
 import { SPLIT_TOLERANCE } from "./fromBhav.js";
 import type { HistoryBroker } from "./service.js";
@@ -63,7 +63,7 @@ export function archiveDaily(db: Db, symbol: string, fromDay: number, toDay: num
 
   // The checked stretch around the newest stored session: stop at the first
   // trading day either side that is neither stored nor a known holiday.
-  const statuses = cashDayStatuses(db, Math.min(fromDay, newest));
+  const statuses = dayStatuses(db, "cash_bhav", Math.min(fromDay, newest));
   const checked = (day: number) => !isSessionDay(day) || statuses.get(day) === "ok" || statuses.get(day) === "holiday";
   let coveredFrom = newest;
   for (let day = newest - DAY_MS; day >= fromDay && checked(day); day -= DAY_MS) coveredFrom = day;
