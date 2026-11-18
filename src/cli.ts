@@ -145,7 +145,7 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
       console.error(invalid);
       return 1;
     }
-    // The whole archive adds about 1–1.5 GB to hub.db (docs/api.md#disk-space); it pauses at the floor anyway.
+    // The whole archive adds about 1.5 GB to hub.db (docs/api.md#disk-space); it pauses at the floor anyway.
     const short = shortOfSpace({ dir: config.dataDir, minFreeBytes: config.diskMinBytes });
     if (short) {
       console.error(`Not starting NSE history: ${short.message}. Free some space and run it again.`);

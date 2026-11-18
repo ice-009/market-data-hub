@@ -90,11 +90,11 @@ To keep what the Mac hub stored, copy a backup over instead of downloading it al
 # on the Mac
 npm run hub -- data backup --to ./backups
 # stop the Mac hub, then:
-scp backups/hub-*.db ubuntu@<public-ip>:market-data-hub/data/hub.db.new
+scp backups/hub-*.db.gz ubuntu@<public-ip>:market-data-hub/data/hub.db.gz
 
 # on the VM
 docker compose stop hub
-mv data/hub.db.new data/hub.db && rm -f data/hub.db-wal data/hub.db-shm
+gunzip -c data/hub.db.gz > data/hub.db && rm -f data/hub.db.gz data/hub.db-wal data/hub.db-shm
 docker compose start hub
 ```
 
@@ -103,7 +103,7 @@ API keys come along (they're in the database), so clients keep working with the 
 ## 5. Backups
 
 With `HUB_BACKUP_DIR=/data/backups` the hub backs itself up every night (outside market hours,
-newest 7 kept, `HUB_BACKUP_KEEP` to change) — inside the data volume, which protects against a bad
+gzipped, newest 7 kept, `HUB_BACKUP_KEEP` to change) — inside the data volume, which protects against a bad
 update or a corrupt file but not against losing the VM. Copy them off the machine as well, e.g.
 pull them to your Mac now and then:
 
@@ -112,11 +112,12 @@ rsync -av ubuntu@<public-ip>:market-data-hub/data/backups/ ~/hub-backups/
 ```
 
 or push them to OCI Object Storage (part of Always Free) with `rclone` or the `oci` CLI from a
-cron job. `/v1/status` reports a problem when the newest backup is over two days old.
+cron job. `/v1/status` reports a problem when the newest backup is over two days old, or when the
+disk has under 2 GB free (a warning under 5 GB).
 
 On-demand backup (safe while running): `docker compose exec hub node dist/cli.js data backup`.
-Restore: stop the hub, copy the backup over `data/hub.db`, delete `data/hub.db-wal` and
-`data/hub.db-shm`, start the hub.
+Restore: stop the hub, `gunzip -c data/backups/hub-….db.gz > data/hub.db`, delete
+`data/hub.db-wal` and `data/hub.db-shm`, start the hub.
 
 ## 6. Day to day
 
