@@ -1,10 +1,15 @@
 # docker compose up -d                      → hub only, on http://127.0.0.1:8787
 # docker compose --profile tunnel up -d     → hub + Cloudflare Tunnel (needs TUNNEL_TOKEN in .env)
+#
+# No .env and no broker keys needed: without them the hub runs in end-of-day
+# mode on NSE's daily files (see "Run without a broker" in the README).
 services:
   hub:
     build: .
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - ./data:/data
     ports:
@@ -17,6 +22,8 @@ services:
     restart: unless-stopped
     command: tunnel --no-autoupdate run
     environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env to use the tunnel profile}
+      # Set TUNNEL_TOKEN in .env to use this profile. (Not `:?`: Compose would then refuse
+      # `docker compose up` for the hub alone, even with the tunnel profile off.)
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
     depends_on:
       - hub

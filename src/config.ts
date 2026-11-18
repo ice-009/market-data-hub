@@ -35,6 +35,8 @@ export interface Config {
   backupDir: string | null;
   /** Backups kept (newest first) by the nightly backup and `hub data backup`. */
   backupKeep: number;
+  /** End-of-day mode (no broker): years of NSE archive the server downloads on its own (HUB_EOD_HISTORY_YEARS; 0 = none). */
+  eodHistoryYears: number;
   fyers: FyersConfig;
   /** NSE hosts (overridable for testing against a local server). */
   nse: { archiveUrl: string; wwwUrl: string };
@@ -117,6 +119,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     liveRetentionDays: int(env, "HUB_LIVE_RETENTION_DAYS", 30, 1, 3650),
     backupDir: env.HUB_BACKUP_DIR ? path.resolve(env.HUB_BACKUP_DIR) : null,
     backupKeep: int(env, "HUB_BACKUP_KEEP", 7, 1, 365),
+    eodHistoryYears: int(env, "HUB_EOD_HISTORY_YEARS", 2, 0, 35),
     fyers: fyersConfig(env),
     nse: {
       archiveUrl: (env.NSE_ARCHIVE_URL || "https://nsearchives.nseindia.com").replace(/\/+$/, ""),

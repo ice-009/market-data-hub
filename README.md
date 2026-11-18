@@ -124,7 +124,7 @@ Please read this before deploying.
 git clone https://github.com/ice-009/market-data-hub.git
 cd market-data-hub
 npm install
-cp .env.example .env        # without broker credentials: NSE datasets and stored data only
+cp .env.example .env        # optional; without broker credentials the hub runs in end-of-day mode
 npm run dev                 # starts on http://127.0.0.1:8787 and reloads on changes
 ```
 
@@ -150,6 +150,8 @@ curl -H "Authorization: Bearer mdh_Zm9vYmFyLi4u…" http://127.0.0.1:8787/v1/sta
   "version": "0.1.0",
   "time": 1793944324209,
   "uptimeSec": 2,
+  "mode": "end_of_day",
+  "modeLabel": "End-of-day only",
   "key": { "name": "my-laptop", "scopes": ["history", "live", "fo"] },
   "broker": { "configured": false, "connected": false },
   "data": { "dbBytes": 4096 }
@@ -168,17 +170,41 @@ npm start         # node dist/server.js
 
 ---
 
+## Run without a broker (end-of-day mode)
+
+No Fyers account? Start the hub without any `FYERS_*` settings and it runs in **end-of-day mode**
+on NSE's free daily files — nothing else to configure:
+
+- **Daily and weekly candles** for every NSE stock, built from the cash bhavcopies the hub stores
+  (each evening's file, plus NSE's archive), adjusted for splits and bonuses with NSE's own
+  `PREV_CLOSE`, with delivery %. On first start the hub downloads the last
+  `HUB_EOD_HISTORY_YEARS` years (default 2) from the archive by itself — about half an hour at
+  NSE's pace, paused in market hours; the last two weeks arrive within a minute.
+- **F&O data, lot sizes, the ban list, results dates, universes** — as with a broker: they are NSE
+  files anyway.
+- **Not available:** live quotes, the price stream, intraday candles, and index or futures candles.
+  Those endpoints answer `503` with `code: "not_configured"` (no `Retry-After` — asking again won't
+  help). The market regime needs NIFTY's history, so it waits for index closes from the archive (#23).
+
+`/v1/status` says which mode the hub is in (`"mode": "end_of_day"`, `"modeLabel": "End-of-day
+only"`, and a `features` map), so clients can hide what needs a broker. Add the broker settings to
+`.env` and restart to switch to the full hub; nothing stored is lost. Details:
+[docs/api.md](docs/api.md#end-of-day-mode-no-broker-configured).
+
+---
+
 ## Run it with Docker
 
 ```bash
-cp .env.example .env
+cp .env.example .env                 # optional: without it (or without broker keys) → end-of-day mode
 docker compose up -d                 # builds the image, starts the hub
 docker compose logs -f hub           # JSON log lines
 docker compose exec hub node dist/cli.js keys create tradex --scopes history,live,fo
 ```
 
-- The image runs as the unprivileged `node` user, keeps all data in the `./data` folder (mounted at
-  `/data`), and has a health check on `/healthz`.
+- The image runs as the unprivileged `node` user (uid 1000), keeps all data in the `./data` folder
+  (mounted at `/data`), and has a health check on `/healthz`. On Linux, create the folder for that
+  user first (`mkdir -p data && sudo chown 1000:1000 data`); Docker Desktop on a Mac needs nothing.
 - Compose publishes the port on **`127.0.0.1:8787` only** — not on your network. Inside the
   container the server listens on `0.0.0.0` so the port mapping and the tunnel container can reach it.
 - `restart: unless-stopped` brings it back after a reboot (enable "Start Docker Desktop when you
@@ -300,6 +326,7 @@ Errors always look like this and never echo your headers or the hub's configurat
 | 429 | `rate_limited` | Over the key's per-minute limit — see `Retry-After` |
 | 500 | `internal` | Unexpected error (details go to the hub's scrubbed log only) |
 | 503 | `broker_unavailable` | The broker is needed but not connected; stored data is returned where possible |
+| 503 | `not_configured` | The request needs a broker and none is configured ([end-of-day mode](#run-without-a-broker-end-of-day-mode)); don't retry |
 
 ### Endpoints
 
@@ -393,6 +420,7 @@ environment in Docker). Copy [.env.example](.env.example) to start.
 | `HUB_LIVE_RETENTION_DAYS` | `30` | Days of 1-minute live bars kept (last quotes are kept forever, one row per symbol). |
 | `HUB_BACKUP_DIR` | — | Set it to back the database up there every night (outside market hours). Empty = no scheduled backups. |
 | `HUB_BACKUP_KEEP` | `7` | Backups kept (nightly and `hub data backup`); older ones are deleted. |
+| `HUB_EOD_HISTORY_YEARS` | `2` | End-of-day mode only (no broker): years of NSE archive the server downloads by itself on start, for daily candles. `0` = none. |
 | `FYERS_CLIENT_ID` | — | Fyers app ID, e.g. `ABCD1234EF-100`. |
 | `FYERS_SECRET_KEY` | — | Fyers app secret. |
 | `FYERS_FY_ID` | — | Your Fyers login ID. |

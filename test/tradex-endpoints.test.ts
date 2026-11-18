@@ -409,7 +409,7 @@ describe("futures and 1m through the API, against the mock broker", () => {
   it("serves quotes for futures (and accepts Fyers' form)", async () => {
     const asked: string[][] = [];
     const tick = (symbol: string): Tick => ({ symbol, ltp: 950, ch: 1, chp: 0.1, open: 949, high: 951, low: 948, prevClose: 949, volume: 10, ltt: 1, ts: Date.now(), source: "poll" });
-    t = makeHub();
+    t = makeHub({ env: mock.env }); // a broker is configured (quotes come from the fake below)
     const { key } = createKey(t.db, "test", ["live"]);
     const app = t.app({ live: { feed: t.hub.live.feed, store: t.hub.live.store, quotes: { quotes: async (symbols) => (asked.push(symbols), symbols.map(tick)) } } });
     const res = await app.request("/v1/quotes?symbols=SBIN26NOVFUT,NSE:INFY26DECFUT", auth(key));

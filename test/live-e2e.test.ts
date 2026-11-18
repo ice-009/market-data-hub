@@ -10,7 +10,7 @@ import { writeBars } from "../src/history/store.js";
 import { DAY_MS, MINUTE_MS, istDayStart } from "../src/time.js";
 import { ist, makeHub, type TestHub } from "./support/hub.js";
 import { ACCESS_TOKEN, startMockFyers, type MockFyers } from "./support/mockFyers.js";
-import { SseReader, type SseEvent } from "./support/sse.js";
+import { SseReader } from "./support/sse.js";
 
 // The user's key requirement, end to end: when the hub goes down and comes
 // back, it loads what it had and carries on — subscriptions resume by
@@ -291,7 +291,7 @@ describe.each([
 });
 
 describe("a process without the broker", () => {
-  it("serves stored quotes and bars read-only and reports the feed down", async () => {
+  it("answers live requests not_configured (end-of-day mode) and reports the feed down", async () => {
     dir = mkdtempSync(path.join(tmpdir(), "hub-e2e-"));
     const time = new VirtualTime(MON(10, 0));
     // Something stored by an earlier run.
@@ -302,23 +302,24 @@ describe("a process without the broker", () => {
     first.hub.live.store.flush();
     first.db.close();
 
-    // No broker credentials (or HUB_LIVE=off): nothing is started, nothing is called.
+    // No broker credentials: nothing is started, nothing is called, and the live routes say so at once.
     const t = makeHub({ dir, clock: time.clock, owner: false });
     hubs.push(t);
     t.hub.live.start(); // a no-op without a broker
     const app = t.app();
-    const { key } = createKey(t.db, "ro", ["live"]);
+    const { key } = createKey(t.db, "ro", ["live", "admin"]);
     const headers = { authorization: `Bearer ${key}` };
-    const quotes = (await (await app.request("/v1/quotes?symbols=SBIN", { headers })).json()) as { quotes: Tick[]; reason: string };
-    expect(quotes).toMatchObject({ quotes: [{ symbol: "SBIN", ltp: 800, source: "store", stale: true }], reason: "not_configured" });
-    const stream = SseReader.of(await app.request(`/v1/stream?symbols=SBIN&since=${MON(9, 15)}`, { headers }));
-    const events: SseEvent[] = await stream.until(3);
-    expect(events[0]).toMatchObject({ event: "status", data: { mode: "down", socket: "disabled" } });
-    expect(events[1].data).toMatchObject({ quotes: [{ symbol: "SBIN", ltp: 800 }] });
-    expect((events[2].data as { bars: MinuteBar[] }).bars).toEqual([expect.objectContaining({ t: MON(9, 30), c: 800, source: "live" })]);
-    const status = (await (await app.request("/v1/status", { headers })).json()) as { live: Record<string, unknown> };
+    for (const [method, url] of [["GET", "/v1/quotes?symbols=SBIN"], ["GET", `/v1/stream?symbols=SBIN&since=${MON(9, 15)}`], ["POST", "/v1/live/pin"]] as const) {
+      const res = await app.request(url, { method, headers });
+      expect(res.status, url).toBe(503);
+      expect(res.headers.get("retry-after"), url).toBeNull();
+      expect(await res.json(), url).toMatchObject({ code: "not_configured", mode: "end_of_day" });
+    }
+    // Stored minutes stay readable through the store (and /v1/candles, for daily bars).
+    expect(t.hub.live.store.minuteBars("SBIN", MON(9, 15), MON(10, 0))).toEqual([expect.objectContaining({ t: MON(9, 30), c: 800, source: "live" })]);
+    const status = (await (await app.request("/v1/status", { headers })).json()) as { live: Record<string, unknown>; mode: string };
+    expect(status.mode).toBe("end_of_day");
     expect(status.live).toMatchObject({ enabled: false, running: false, feed: { mode: "down" }, persistentSymbols: ["SBIN"], recovery: null });
-    await stream.cancel();
     expect(mock.history).toHaveLength(0);
   });
 });
@@ -327,7 +328,8 @@ describe("/v1/candles with live minutes", () => {
   it("brings every timeframe up to the minute from stored candles plus live and repaired minutes", async () => {
     dir = mkdtempSync(path.join(tmpdir(), "hub-e2e-"));
     const now = MON(10, 11, 30);
-    const t = makeHub({ dir, clock: () => now }); // no broker: candles come from the store alone
+    // Another process owns the broker: candles come from the store alone.
+    const t = makeHub({ dir, env: { ...mock.env }, clock: () => now, owner: false });
     hubs.push(t);
     const bar = (time: number, c: number, v = 100) => ({ t: time, o: c, h: c + 1, l: c - 1, c, v });
     // History synced at 10:07: 5m and 15m bars through the forming 10:05 / 10:00 bar, daily bars through Friday.

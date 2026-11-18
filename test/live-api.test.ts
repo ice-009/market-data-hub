@@ -6,6 +6,7 @@ import { liveStatus, type LiveDeps, type LiveLimits } from "../src/http/routes/l
 import { Fanout } from "../src/live/fanout.js";
 import type { FeedStatus, LiveFeed, LiveStore, MinuteBar, Quote, QuoteFetcher, Tick } from "../src/live/types.js";
 import { makeHub, ist, type TestHub } from "./support/hub.js";
+import { FAKE_SECRETS } from "./support/mockFyers.js";
 import { SseReader, type SseEvent } from "./support/sse.js";
 
 // The live API against fakes of the feed, store and broker quotes: no broker,
@@ -112,7 +113,8 @@ afterEach(() => {
 });
 
 function setup(options: { scopes?: Scope[]; limits?: Partial<LiveLimits>; quotes?: FakeQuotes | null } = {}) {
-  t = makeHub();
+  // A configured broker (the live deps below are fakes, so it is never called).
+  t = makeHub({ env: { ...FAKE_SECRETS, FYERS_API_URL: "http://127.0.0.1:9/api/v3" } });
   const feed = new FakeFeed();
   const store = new FakeStore();
   const quotes = options.quotes === undefined ? new FakeQuotes() : options.quotes;

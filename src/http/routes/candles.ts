@@ -1,6 +1,8 @@
 import type { Hono } from "hono";
+import { BrokerError } from "../../broker/errors.js";
 import type { Bar } from "../../broker/fyers.js";
 import { isFuture, isIndex, normalizeSymbol } from "../../broker/symbols.js";
+import { EOD_INTRADAY_MESSAGE } from "../../history/fromArchive.js";
 import { needsBrokerBeyond } from "../../history/plan.js";
 import { readSeries } from "../../history/store.js";
 import type { BaseTf } from "../../history/timeframes.js";
@@ -25,6 +27,9 @@ import { ParamError, parseRange } from "../params.js";
 // daily bar, the hours since the last sync) are built from the hub's 1-minute
 // bars — ticks, or broker minutes where a gap was repaired. `liveThrough` says
 // up to which minute (null when no live minute was used).
+
+/** Timeframes built from daily bars: the only ones end-of-day mode serves. */
+const BASE_DAILY = new Set<Tf>(["1d", "1w"]);
 
 /** Default span when `from` is left out (days). */
 const DEFAULT_SPAN_DAYS: Record<Tf, number> = { "1d": 365, "1w": 5 * 365, "1h": 90, "15m": 30, "5m": 7, "1m": 5 };
@@ -63,16 +68,20 @@ export function candleRoutes(app: Hono<HubEnv>, hub: Hub) {
       throw error;
     }
 
+    // End-of-day mode: no intraday bars exist to serve or fetch (no Retry-After: asking again won't help).
+    if (hub.mode === "end_of_day" && !BASE_DAILY.has(tf)) return c.json({ ...errorBody(EOD_INTRADAY_MESSAGE, "not_configured"), mode: "end_of_day" }, 503);
+
     const answer = await hub.history.candles(symbol, tf, range.from, range.to);
     const live = withLiveMinutes(hub, symbol, tf, range, answer.candles, answer.base);
     const body = { symbol, tf, from: range.from, to: range.to, complete: answer.complete, coverage: answer.coverage, liveThrough: live.through, candles: live.candles };
     if (answer.status === "ok") return c.json(body);
     if (answer.status === "unknown_symbol") return c.json(errorBody(`Unknown symbol ${symbol}.`, "unknown_symbol"), 404);
+    if (answer.error?.kind === "not_configured") return c.json({ ...errorBody(answer.error.message, "not_configured"), mode: hub.mode, ...body }, 503);
     if (answer.status === "pending") return c.json({ ...errorBody("Still fetching from the broker; showing what is stored. Try again shortly.", "fetch_pending"), ...body }, 503, { "Retry-After": "10" });
     return c.json({ ...errorBody(`The broker is unavailable (${answer.error?.message ?? "unknown reason"}); showing what is stored.`, "broker_unavailable"), reason: answer.error?.kind ?? null, ...body }, 503, { "Retry-After": "60" });
   });
 
-  app.get("/v1/candles/batch", requireScope("history"), (c) => {
+  app.get("/v1/candles/batch", requireScope("history"), async (c) => {
     const parts = [...new Set((c.req.query("symbols") ?? "").split(",").map((part) => part.trim()).filter(Boolean))];
     if (!parts.length) return c.json(errorBody("symbols is required: comma-separated NSE tickers such as SBIN,INFY,NIFTY (send & as %26).", "bad_request"), 400);
     if (parts.length > MAX_BATCH_SYMBOLS) return c.json(errorBody(`At most ${MAX_BATCH_SYMBOLS} symbols per request (got ${parts.length}).`, "too_many_symbols"), 400);
@@ -102,17 +111,33 @@ export function candleRoutes(app: Hono<HubEnv>, hub: Hub) {
     const bhavPending = hub.config.jobsEnabled && (lastOkDay(hub.db, "cash_bhav") ?? -Infinity) < latestFinal;
     const series: Record<string, { complete: boolean; coverage: { from: number; to: number } | null; candles: Bar[] }> = {};
     const queued: string[] = [];
+    const eod = hub.mode === "end_of_day";
+    const eodUnknown: string[] = [];
     for (const symbol of symbols) {
-      const stored = hub.history.stored(symbol, batchTf, range.from, range.to);
+      let stored = hub.history.stored(symbol, batchTf, range.from, range.to);
+      // End-of-day mode reads the hub's own bhavcopy store, not a broker: fill a stock in place, no queue.
+      if (eod && !stored.complete && !isIndex(symbol) && !isFuture(symbol)) {
+        const error = await hub.history.ensure(symbol, stored.base, stored.want, "background").then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+        if (error instanceof BrokerError && error.kind === "bad_symbol") {
+          eodUnknown.push(symbol);
+          continue;
+        }
+        if (error && !(error instanceof BrokerError)) throw error;
+        stored = hub.history.stored(symbol, batchTf, range.from, range.to);
+      }
       const fromBhav = bhavPending && !isIndex(symbol) && !isFuture(symbol);
       const needed = !stored.complete && (!fromBhav || needsBrokerBeyond(stored.coverage, stored.want, latestFinal));
       if (needed && !unavailable && hub.historyQueue.enqueue(symbol, stored.base, stored.want)) queued.push(symbol);
       const live = withLiveMinutes(hub, symbol, batchTf, range, stored.candles, stored.base);
       series[symbol] = { complete: stored.complete, coverage: stored.coverage, candles: live.candles };
     }
-    const incomplete = symbols.some((symbol) => !series[symbol].complete);
+    unknown.push(...eodUnknown);
+    const incomplete = symbols.some((symbol) => series[symbol] && !series[symbol].complete);
     // Like /v1/quotes: a broker problem doesn't turn the answer into an error; it says why nothing was queued.
-    const warning = incomplete && unavailable ? { warning: `The broker is unavailable (${unavailable.message}); showing what is stored.`, reason: unavailable.kind } : {};
+    const warning = !incomplete || !unavailable ? {} : eod ? { warning: "End-of-day mode: served from NSE's stored files; indices, futures and days not downloaded yet are missing.", reason: unavailable.kind } : { warning: `The broker is unavailable (${unavailable.message}); showing what is stored.`, reason: unavailable.kind };
     return c.json({ tf: batchTf, from: range.from, to: range.to, series, queued, unknown, ...warning });
   });
 }

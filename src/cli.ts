@@ -1,7 +1,7 @@
 import path from "node:path";
 import { backupDb } from "./backup.js";
 import { createKey, listKeys, parseScopes, revokeKey } from "./auth/keys.js";
-import { loadConfig, secretValues } from "./config.js";
+import { brokerConfigured, loadConfig, secretValues } from "./config.js";
 import { openDb, type Db } from "./db.js";
 import { BACKFILL_TFS, BASE, finalBefore, type BaseTf } from "./history/timeframes.js";
 import { hubHealth } from "./health.js";
@@ -12,7 +12,7 @@ import { lastHistoryDay, runNseHistory, validateNseHistory } from "./jobs/nseHis
 import { createLogger } from "./log.js";
 import { acquireOwner, ownerPid } from "./owner.js";
 import { getUniverse } from "./reference/universe.js";
-import { brokerStatus, dataFreshness } from "./status.js";
+import { brokerStatus, dataFreshness, dataMode } from "./status.js";
 import { ARCHIVE_FROM } from "./nse/datasets.js";
 import { DAY_MS, isoDay, istParts } from "./time.js";
 
@@ -96,6 +96,10 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     const invalid = validateBackfill(params);
     if (invalid) {
       console.error(invalid);
+      return 1;
+    }
+    if (!brokerConfigured(config.secrets)) {
+      console.error("No broker is configured: this hub runs in end-of-day mode, and backfills download from the broker. Daily candles come from NSE's files instead — `hub data nse-history` downloads more of them.");
       return 1;
     }
     const release = acquireOwner(config.dataDir);
@@ -186,6 +190,8 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     for (const problem of health.problems) console.log(`  ✗ ${problem}`);
     for (const warning of health.warnings) console.log(`  ! ${warning}`);
     console.log("");
+    const mode = dataMode(hub);
+    console.log(`Mode: ${mode.modeLabel}${mode.modeNote ? ` — ${mode.modeNote}` : ""}`);
     console.log(`Owner process: ${pid ? `pid ${pid}` : "none (no hub server running)"}`);
     console.log(`Broker: ${broker.configured ? "configured" : "not configured"}, ${broker.connected ? "token valid" : "no valid token"}, last login ${fmt(broker.lastLoginAt)}${broker.lastLoginError ? `, last error: ${broker.lastLoginError}` : ""}`);
     if (broker.budget) console.log(`Budget today: ${broker.budget.usedToday} calls (user ${broker.budget.byPriority.user}, background ${broker.budget.byPriority.background}), strikes ${broker.budget.strikes}`);

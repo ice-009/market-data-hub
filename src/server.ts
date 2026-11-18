@@ -5,6 +5,7 @@ import { ConfigError, brokerConfigured, loadConfig, secretValues } from "./confi
 import { openDb } from "./db.js";
 import { createApp } from "./http/app.js";
 import { createHub } from "./hub.js";
+import { queueEndOfDayHistory } from "./jobs/endOfDay.js";
 import { createLogger } from "./log.js";
 import { acquireOwner, ownerPid } from "./owner.js";
 
@@ -21,6 +22,10 @@ function main() {
   // Owner-only work: background jobs and live prices (which resume their subscriptions and repair
   // the minutes missed while the hub was down — see src/live/service.ts).
   const startJobs = () => {
+    if (config.jobsEnabled && hub.mode === "end_of_day") {
+      const job = queueEndOfDayHistory(db, config.eodHistoryYears);
+      if (job) log.info("end-of-day mode: queued NSE archive history for daily candles", { job: job.id, ...job.params });
+    }
     if (config.jobsEnabled) hub.scheduler.start();
     hub.live.start();
   };
@@ -53,6 +58,7 @@ function main() {
       host: config.host,
       port: info.port,
       version,
+      mode: hub.mode === "end_of_day" ? "end-of-day only (no broker configured)" : "broker",
       broker: brokerConfigured(config.secrets) ? "configured" : "not configured",
       jobs: config.jobsEnabled ? "on" : "off",
       live: hub.live.running ? "on" : config.liveEnabled && brokerConfigured(config.secrets) ? "waiting for the owner lock" : "off",

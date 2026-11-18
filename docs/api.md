@@ -34,7 +34,42 @@ Common error codes: `bad_request` (400), `unauthorized` (401), `forbidden` (403,
 `not_found` / `no_data` / `unknown_symbol` (404), `rate_limited` / `too_many_streams` (429, per key),
 `too_many_symbols` (400),
 `broker_unavailable` / `fetch_pending` / `not_ready` (503; `not_ready` is 404 on `/v1/fo/oi/day` and
-`/v1/fo/contracts`, where it means no F&O bhavcopy is stored yet).
+`/v1/fo/contracts`, where it means no F&O bhavcopy is stored yet), `not_configured` (503, no
+`Retry-After`: the request needs a broker and none is configured — see below; don't retry).
+
+## End-of-day mode (no broker configured)
+
+Without Fyers credentials the hub starts and serves in **end-of-day mode**. `/v1/status` says so at
+the top:
+
+```json
+{ "mode": "end_of_day", "modeLabel": "End-of-day only",
+  "modeNote": "No broker is configured: daily candles, F&O data, lot sizes, the ban list and results dates come from NSE's end-of-day files and archive. Live quotes, the price stream and intraday candles answer not_configured.",
+  "features": { "dailyCandles": true, "indexCandles": false, "intradayCandles": false, "liveQuotes": false, "stream": false, "fo": true },
+  "broker": { "configured": false, "connected": false, … }, … }
+```
+
+(With a broker: `"mode": "broker"`, `"modeNote": null`, every feature `true`.)
+
+| Endpoint | In end-of-day mode |
+|---|---|
+| `/v1/candles?tf=1d\|1w`, `/v1/candles/batch` | Stocks, from the stored NSE cash bhavcopies (the evening files plus the archive), adjusted for splits and bonuses with NSE's own `PREV_CLOSE`; delivery % as usual. The batch endpoint fills each stock in place (nothing is `queued`). Days the archive doesn't hold yet are simply missing (`complete: false`, still `200`). |
+| `/v1/candles` for indices and futures contracts | `503 not_configured` (with whatever is stored): they aren't in NSE's cash file. |
+| `/v1/candles?tf=1h\|15m\|5m\|1m` | `503 not_configured`. |
+| `/v1/quotes`, `/v1/stream`, `/v1/live/pin` | `503 not_configured`. |
+| `/v1/market/regime` | `503 not_configured` until NIFTY's history is stored (index closes from the archive: #23). |
+| `/v1/fo/*`, `/v1/lots`, `/v1/results-calendar`, `/v1/universe/*` | As always: these are NSE files. |
+
+```json
+503
+{ "error": "Live prices need a broker: this hub has none configured and serves NSE end-of-day data only.", "code": "not_configured", "mode": "end_of_day" }
+```
+
+On start, an end-of-day server queues an NSE history job for the last `HUB_EOD_HISTORY_YEARS`
+years (default 2; `0` = none) unless every day of that window was already asked for, so daily
+candles reach back that far within about half an hour (one file per 1.1 s, paused in market hours).
+`hub data nse-history --from …` downloads more. `hub data backfill` (a broker download) refuses to
+run.
 
 ## GET /v1/candles
 
@@ -102,8 +137,8 @@ hang:
   "reason": "budget", "symbol": "SBIN", "tf": "1d", "complete": false, "coverage": {…}, "candles": [ … ] }
 ```
 
-`reason` is one of `not_configured`, `not_owner`, `auth`, `budget`, `rate_limited`, `upstream`,
-`network`. A fetch still running after the wait gives `503 fetch_pending` (`Retry-After: 10`) with
+`reason` is one of `not_owner`, `auth`, `budget`, `rate_limited`, `upstream`, `network`. (Without
+a broker the answer is `503 not_configured` instead — see [End-of-day mode](#end-of-day-mode-no-broker-configured).) A fetch still running after the wait gives `503 fetch_pending` (`Retry-After: 10`) with
 the stored candles; it continues in the background. A symbol the broker doesn't know gives `404
 unknown_symbol`.
 
@@ -300,8 +335,11 @@ For each symbol, in order of preference:
 1. the latest tick from the live feed, when it is under 5 s old;
 2. otherwise a broker quote — every such symbol in one batched call at user priority, cached for
    3 s and shared by concurrent requests (ten clients asking at once cost one call);
-3. otherwise (broker not configured, failing, out of budget or slower than 10 s) the last stored
-   quote, with `stale: true`.
+3. otherwise (broker failing, out of budget or slower than 10 s, or another process owning it) the
+   last stored quote, with `stale: true`.
+
+With no broker configured at all, `/v1/quotes` and `/v1/stream` answer `503 not_configured` (see
+[End-of-day mode](#end-of-day-mode-no-broker-configured)).
 
 Every quote carries `ageMs` (now − `ts`) and `stale`. Symbols with no quote anywhere are listed in
 `missing`. A broker problem never turns the answer into an error: it is still `200`, with what is
@@ -429,7 +467,8 @@ DELETE /v1/live/pin   { "symbols": ["SBIN", "NIFTY"] }
 
 ## GET /v1/status
 
-Health first, then version, uptime, the calling key, the broker connection and today's budget,
+Health first, then the mode (`mode`, `modeLabel`, `modeNote`, `features` — see
+[End-of-day mode](#end-of-day-mode-no-broker-configured)), version, uptime, the calling key, the broker connection and today's budget,
 data freshness per dataset, recent jobs and a `live` section. Never credentials, tokens or keys.
 
 **Health** (for people and uptime checkers): `healthy` (no problems), `problems` (strings: something

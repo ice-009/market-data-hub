@@ -205,7 +205,9 @@ export class HistoryService {
       }
     }
     const now = this.clock();
-    const claimed = { from: dayStartT(base, result.coveredFromDay), to: Math.min(dayStartT(base, toDay + DAY_MS), finalBefore(base, now)) };
+    // A source may hold less than asked for at the newest end (end-of-day mode: today's file isn't out yet).
+    const coveredTo = Math.min(toDay, result.coveredToDay ?? toDay);
+    const claimed = { from: dayStartT(base, result.coveredFromDay), to: Math.min(dayStartT(base, coveredTo + DAY_MS), finalBefore(base, now)) };
     const current = readSeries(this.deps.db, symbol, base)?.coverage ?? null;
     writeBars(this.deps.db, symbol, base, result.bars, extendCoverage(current, claimed), now);
     if (spec.prune) pruneBefore(this.deps.db, symbol, base, windowStart(base, now));

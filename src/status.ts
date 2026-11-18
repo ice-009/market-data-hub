@@ -54,4 +54,22 @@ export function brokerStatus(hub: Pick<Hub, "auth" | "gate" | "owner" | "db">) {
   };
 }
 
+/** What this hub can serve, given its mode (top of /v1/status, and `hub data status`). */
+export function dataMode(hub: Pick<Hub, "mode">) {
+  if (hub.mode === "end_of_day") {
+    return {
+      mode: "end_of_day" as const,
+      modeLabel: "End-of-day only",
+      modeNote: "No broker is configured: daily candles, F&O data, lot sizes, the ban list and results dates come from NSE's end-of-day files and archive. Live quotes, the price stream and intraday candles answer not_configured.",
+      features: { dailyCandles: true, indexCandles: false, intradayCandles: false, liveQuotes: false, stream: false, fo: true },
+    };
+  }
+  return {
+    mode: "broker" as const,
+    modeLabel: "Live (broker connected)",
+    modeNote: null,
+    features: { dailyCandles: true, indexCandles: true, intradayCandles: true, liveQuotes: true, stream: true, fo: true },
+  };
+}
+
 export const recentJobs = (db: Db) => listJobs(db, 5).map((job) => ({ id: job.id, kind: job.kind, params: job.params, state: job.state, done: job.done, total: job.total, failed: job.failed, message: job.message, resumeAfter: job.resumeAfter, updatedAt: job.updatedAt }));
