@@ -213,20 +213,21 @@ describe("scheduler (pure)", () => {
   const none: Runs = new Map();
   it("catches up missing days at once, and spaces retries half an hour apart", () => {
     const now = ist(2026, 11, 4, 10);
-    expect(dueTasks({ now, runs: none, missing: { cash_bhav: 3, fo_bhav: 0 }, banTradeDate: null })).toEqual(["cash_bhav", "lots", "fo_ban", "results"]);
+    expect(dueTasks({ now, runs: none, missing: { cash_bhav: 3, fo_bhav: 0 }, banTradeDate: null })).toEqual(["cash_bhav", "lots", "fo_ban", "results", "symbol_changes"]);
     const runs: Runs = new Map([["cash_bhav", { lastAttemptAt: now - 10 * 60_000, lastSuccessAt: null }]]);
     expect(dueTasks({ now, runs, missing: { cash_bhav: 3, fo_bhav: 0 }, banTradeDate: d("2026-11-04") })).not.toContain("cash_bhav");
   });
 
-  it("refreshes lots and the results calendar once each evening", () => {
+  it("refreshes lots, the results calendar and NSE's ticker renames once each evening", () => {
     const morning = ist(2026, 11, 4, 9);
     const runs: Runs = new Map([
       ["lots", { lastAttemptAt: ist(2026, 11, 3, 19), lastSuccessAt: ist(2026, 11, 3, 19) }],
       ["results", { lastAttemptAt: ist(2026, 11, 3, 19), lastSuccessAt: ist(2026, 11, 3, 19) }],
+      ["symbol_changes", { lastAttemptAt: ist(2026, 11, 3, 19), lastSuccessAt: ist(2026, 11, 3, 19) }],
     ]);
     const input = { runs, missing: { cash_bhav: 0, fo_bhav: 0 }, banTradeDate: d("2026-11-04") };
     expect(dueTasks({ ...input, now: morning })).toEqual([]);
-    expect(dueTasks({ ...input, now: ist(2026, 11, 4, 19) })).toEqual(["lots", "fo_ban", "results"]);
+    expect(dueTasks({ ...input, now: ist(2026, 11, 4, 19) })).toEqual(["lots", "fo_ban", "results", "symbol_changes"]);
   });
 
   it("wants the next session's ban list from the evening on", () => {

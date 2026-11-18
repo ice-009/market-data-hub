@@ -1,7 +1,7 @@
 import { backupDb, backupDue, listBackups } from "../backup.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
-import { recentDays, refreshBan, refreshLots, refreshResults, syncDays, type NseContext } from "../nse/datasets.js";
+import { recentDays, refreshBan, refreshLots, refreshResults, refreshSymbolChanges, syncDays, type NseContext } from "../nse/datasets.js";
 import { latestBan, readRuns, type DatasetName, type DatasetRun } from "../nse/store.js";
 import { DAY_MS, MINUTE_MS, istDayStart, istParts, isWeekday } from "../time.js";
 import { nextRunnableJob, recoverJobs, runBackfill, type BackfillDeps } from "./backfill.js";
@@ -12,8 +12,9 @@ import { runNseHistory } from "./nseHistory.js";
 //   - NSE daily files in the evening IST. The cash and F&O bhavcopies are
 //     fetched for any of the last RECENT_DAYS trading days not stored yet — on
 //     start that's the catch-up, in the evening it's normally just today's file
-//     once NSE has published it. Lots, the F&O ban list and the results
-//     calendar are refreshed once each evening (and on start when stale).
+//     once NSE has published it. Lots, the F&O ban list, the results
+//     calendar and NSE's ticker renames (symbolchange.csv) are refreshed once
+//     each evening (and on start when stale).
 //   - queued jobs, one at a time: broker backfills (`hub data backfill`) and
 //     NSE history downloads (`hub data nse-history`).
 //   - a nightly database backup when HUB_BACKUP_DIR is set (src/backup.ts).
@@ -71,6 +72,7 @@ export function dueTasks(input: ScheduleInput): Task[] {
   if (daily("lots") && rested("lots")) due.push("lots");
   if ((input.banTradeDate === null || input.banTradeDate < banTarget(now)) && minutes >= 7 * 60 && minutes < EVENING_TO_MIN && rested("fo_ban")) due.push("fo_ban");
   if (daily("results") && rested("results")) due.push("results");
+  if (daily("symbol_changes") && rested("symbol_changes")) due.push("symbol_changes");
   return due;
 }
 
@@ -138,7 +140,8 @@ export class Scheduler {
         else if (task === "fo_bhav") await syncDays(ctx, "fo_bhav", fo, () => this.stopping);
         else if (task === "lots") await refreshLots(ctx);
         else if (task === "fo_ban") await refreshBan(ctx);
-        else await refreshResults(ctx);
+        else if (task === "results") await refreshResults(ctx);
+        else await refreshSymbolChanges(ctx);
       }
     } catch (error) {
       this.deps.log.error("scheduled NSE refresh failed", { error });
