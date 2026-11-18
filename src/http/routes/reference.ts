@@ -4,6 +4,7 @@ import type { Hub } from "../../hub.js";
 import { combinedOiChangePct, oiFact } from "../../nse/openInterest.js";
 import type { FoDayRecord, FoLeg } from "../../nse/parsers/foBhav.js";
 import { foMembersBetween, foMembersOn, lastOkDay, latestBan, latestFoRecord, readFoDay, readFoSymbol, readLots, readResults, readRuns } from "../../nse/store.js";
+import { indexCatalog } from "../../reference/indexCatalog.js";
 import { computeRegime } from "../../reference/marketRegime.js";
 import { getUniverse, isUniverse, UNIVERSES } from "../../reference/universe.js";
 import { banTarget } from "../../jobs/scheduler.js";
@@ -22,6 +23,7 @@ import { ParamError, parseRange, parseTime } from "../params.js";
 //   GET /v1/lots[?symbol]                  history  stock-futures lot sizes
 //   GET /v1/results-calendar?from&to       history  results dates from NSE's event calendar
 //   GET /v1/market/regime[?universe]       history  NIFTY trend + breadth
+//   GET /v1/indices                        history  indices and synthetic baskets with daily history, sector map
 // Dates in responses are IST trade dates, as YYYY-MM-DD and as day keys (ms).
 
 /** Most calendar days one /v1/fo/members range may span. */
@@ -179,4 +181,6 @@ export function referenceRoutes(app: Hono<HubEnv>, hub: Hub) {
     if (answer.status !== "ok") return c.json({ ...errorBody(`Computed from stored data only (${answer.error ?? "broker unavailable"}).`, "broker_unavailable"), ...answer.regime }, 503, { "Retry-After": "60" });
     return c.json(answer.regime);
   });
+
+  app.get("/v1/indices", requireScope("history"), (c) => c.json(indexCatalog(hub.db)));
 }

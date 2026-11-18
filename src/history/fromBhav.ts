@@ -8,7 +8,7 @@ import { readBars, readSeries, listSeries, resetSymbol, writeBars } from "./stor
 
 // Stored daily series move forward from NSE's free cash bhavcopy instead of the
 // broker: one file a day covers every stock, so the daily tail costs no broker
-// calls at all (index series still come from the broker). (The approach is
+// calls at all (index series come from NSE's index file: src/history/fromIndices.ts). (The approach is
 // Tradex's screener store, MIT.)
 //
 // A day is appended only to a series that is complete through the previous

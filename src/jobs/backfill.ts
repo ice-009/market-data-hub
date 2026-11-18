@@ -36,7 +36,7 @@ export interface NseHistoryParams {
   /** ISO days, inclusive. */
   from: string;
   to: string;
-  datasets: Array<"cash_bhav" | "fo_bhav">;
+  datasets: Array<"cash_bhav" | "fo_bhav" | "index_close">;
 }
 
 /** A row of the `jobs` table: a broker backfill or an NSE history download. */

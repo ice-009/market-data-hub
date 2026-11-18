@@ -1,4 +1,6 @@
 import type { Db } from "../db.js";
+import { refreshBaskets } from "../history/baskets.js";
+import { syncIndexSeries } from "../history/fromIndices.js";
 import { ARCHIVE_FROM, daysToCheck, syncDays, type DayOutcome, type NseContext } from "../nse/datasets.js";
 import { checkedDays, type DayDataset } from "../nse/store.js";
 import { DAY_MS, isMarketOpen, isWeekday, isoDay, istParts, parseIsoDay } from "../time.js";
@@ -20,10 +22,13 @@ import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "
 // first. In the cash market every weekend day is asked for too — NSE has held
 // Budget-day and Muhurat sessions on weekends, and a missing session would make
 // the next day's PREVCLOSE look like a corporate action. F&O is then asked for
-// the weekend days the cash market traded. The whole archive is ~24,000
-// requests at NSE's pace of one per 1.1 s: seven to eight hours.
+// the weekend days the cash market traded, and so is NSE's index file (every
+// index's OHLC, from Feb 2012), which becomes index candles back to 2012. When
+// a run stops, the index candles and the synthetic baskets
+// (src/history/baskets.ts) are rebuilt from what is stored. The whole archive
+// is ~28,000 requests at NSE's pace of one per 1.1 s: about eight and a half hours.
 
-export const HISTORY_DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav"];
+export const HISTORY_DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "index_close"];
 
 /** A message for invalid parameters, or null. `today` is the IST day key (the evening run owns it). */
 export function validateNseHistory(params: NseHistoryParams, today: number): string | null {
@@ -32,7 +37,7 @@ export function validateNseHistory(params: NseHistoryParams, today: number): str
   if (from === null || to === null) return "--from and --to must be dates like 1994-11-03.";
   if (from > to) return "--from must be on or before --to.";
   if (to >= today) return "--to must be before today (the evening run fetches today's files).";
-  if (!params.datasets.length || params.datasets.some((dataset) => !HISTORY_DATASETS.includes(dataset))) return "--only must be cash or fo.";
+  if (!params.datasets.length || params.datasets.some((dataset) => !HISTORY_DATASETS.includes(dataset))) return "--only must be cash, fo or indices.";
   return null;
 }
 
@@ -47,7 +52,7 @@ export function historyDays(db: Db, dataset: DayDataset, from: number, to: numbe
   return [...new Set([...daysToCheck(ask), ...weekendSessions])].sort((a, b) => a - b);
 }
 
-const LABEL: Record<DayDataset, string> = { cash_bhav: "cash", fo_bhav: "F&O" };
+const LABEL: Record<DayDataset, string> = { cash_bhav: "cash", fo_bhav: "F&O", index_close: "indices" };
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const tally = (counts: Record<"ok" | "holiday" | "mismatch", number>) =>
   `${plural(counts.ok, "session", "sessions")} stored, ${plural(counts.holiday, "day", "days")} without a file${counts.mismatch ? `, ${plural(counts.mismatch, "file", "files")} for another date` : ""}`;
@@ -97,6 +102,15 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
         refused = result.stopped;
         break outer;
       }
+    }
+  }
+
+  if (counts.ok) {
+    try {
+      if (datasets.includes("index_close")) syncIndexSeries(ctx.db, ctx.clock());
+      if (datasets.includes("cash_bhav")) refreshBaskets(ctx.db, ctx.clock());
+    } catch (error) {
+      ctx.log.error("rebuilding index candles or baskets after NSE history failed", { error });
     }
   }
 

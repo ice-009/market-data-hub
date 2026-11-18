@@ -1,21 +1,25 @@
 import type { Db } from "../db.js";
 import { applyCashBhav } from "../history/fromBhav.js";
+import { syncIndexSeries } from "../history/fromIndices.js";
 import type { Logger } from "../log.js";
 import { DAY_MS, isoDay, istParts } from "../time.js";
 import { NseError, type NseClient } from "./client.js";
 import { parseCashBhav, type CashBhavParse } from "./parsers/cashBhav.js";
 import { parseCmBhav } from "./parsers/cmBhav.js";
 import { aggregateStockFutures, parseFoBhav, parseFoBhavLegacy } from "./parsers/foBhav.js";
+import { parseIndexClose } from "./parsers/indexClose.js";
 import { mtoKey, parseMto } from "./parsers/mto.js";
 import { parseFnoBan } from "./parsers/ban.js";
 import { parseNseLots } from "./parsers/lots.js";
 import { parseCalendar } from "./parsers/results.js";
-import { cashDayStatuses, checkedDays, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeFoDay, writeLots, writeResults, type DayDataset, type DayStatus } from "./store.js";
+import { cashDayStatuses, checkedDays, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeFoDay, writeIndexDay, writeLots, writeResults, type DayDataset, type DayStatus } from "./store.js";
 import { ZipError, isZip, unzipSingle } from "./unzip.js";
 
 // NSE's daily files, downloaded from its free public archive — no broker calls:
 //   cash_bhav  sec_bhavdata_full_DDMMYYYY.csv: close, volume, delivery % per stock
 //   fo_bhav    BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv.zip (UDiFF): stock futures OI
+//   index_close  content/indices/ind_close_all_DDMMYYYY.csv: every NSE index's OHLC
+//              (from Feb/Mar 2012); extends index candles (src/history/fromIndices.ts)
 //   lots       fo_mktlots.csv (fallback: the lot column of the latest F&O bhavcopy)
 //   fo_ban     fo_secban.csv
 //   results    the website's event-calendar JSON (needs the home page's cookies first)
@@ -34,7 +38,7 @@ export interface NseContext {
 }
 
 /** Don't ask for today's file before this (minutes after IST midnight). */
-export const PUBLISH_MIN: Record<DayDataset, number> = { cash_bhav: 17 * 60 + 30, fo_bhav: 18 * 60 };
+export const PUBLISH_MIN: Record<DayDataset, number> = { cash_bhav: 17 * 60 + 30, fo_bhav: 18 * 60, index_close: 18 * 60 };
 
 /** Weekend days NSE held a full session on. Add new ones here (e.g. a Budget day on a weekend). */
 export const WEEKEND_SESSIONS: readonly number[] = [Date.UTC(2026, 1, 1)]; // Sun 1 Feb 2026, Union Budget
@@ -45,9 +49,10 @@ export const LEGACY_LAST_DAY = Date.UTC(2024, 6, 5);
 /**
  * The first session worth asking NSE's archive for: the cash market's first (3
  * Nov 1994) and the first with stock futures (9 Nov 2001; F&O files from 12 Jun
- * 2000 have index futures only, and only stock futures are stored).
+ * 2000 have index futures only, and only stock futures are stored). NSE's
+ * index file starts in the second half of Feb 2012 (15 Feb: none; 1 Mar: there).
  */
-export const ARCHIVE_FROM: Record<DayDataset, number> = { cash_bhav: Date.UTC(1994, 10, 3), fo_bhav: Date.UTC(2001, 10, 9) };
+export const ARCHIVE_FROM: Record<DayDataset, number> = { cash_bhav: Date.UTC(1994, 10, 3), fo_bhav: Date.UTC(2001, 10, 9), index_close: Date.UTC(2012, 1, 16) };
 
 /** Delivery positions (MTO files) start in 2002 (none in 2001 when checked); earlier days have no delivery %. */
 export const MTO_FROM = Date.UTC(2002, 0, 1);
@@ -99,6 +104,8 @@ export function foBhavUrl(archiveUrl: string, day: number): string {
   const { folder, stamp } = legacyParts(day);
   return `${archiveUrl}/content/historical/DERIVATIVES/${folder}/fo${stamp}bhav.csv.zip`;
 }
+
+export const indexCloseUrl = (archiveUrl: string, day: number) => `${archiveUrl}/content/indices/ind_close_all_${ddmmyyyy(day)}.csv`;
 
 export const mtoUrl = (archiveUrl: string, day: number) => `${archiveUrl}/archives/equities/mto/MTO_${ddmmyyyy(day)}.DAT`;
 
@@ -187,9 +194,30 @@ export function readFoFile(ctx: NseContext, day: number, body: Buffer): DayParse
   };
 }
 
+/** Parse NSE's index file for `day`; `extend` (the evening run) also extends the index candles. */
+export function readIndexFile(ctx: NseContext, day: number, body: Buffer, options: ImportOptions = {}): DayParse {
+  const parsed = parseIndexClose(body.toString("utf8"));
+  const wrong = checkDate(parsed.tradeDate, parsed.mixedDates, day);
+  if (wrong) return { kind: "mismatch", note: wrong };
+  if (!parsed.rows.length) throw new NseError("no rows in the index file (format change?)", null, false);
+  const { extend = true } = options;
+  return {
+    kind: "ok",
+    badRows: parsed.badRows,
+    store: () => {
+      writeIndexDay(ctx.db, day, parsed.rows, ctx.clock());
+      if (extend) syncIndexSeries(ctx.db, ctx.clock(), day);
+      return parsed.rows.length;
+    },
+  };
+}
+
+const dayUrl = (archiveUrl: string, dataset: DayDataset, day: number) =>
+  dataset === "cash_bhav" ? cashBhavUrl(archiveUrl, day) : dataset === "fo_bhav" ? foBhavUrl(archiveUrl, day) : indexCloseUrl(archiveUrl, day);
+
 /** Download, check and store one day. Throws NseError when NSE won't serve it. */
 export async function importDay(ctx: NseContext, dataset: DayDataset, day: number, options: ImportOptions = {}): Promise<DayOutcome> {
-  const url = dataset === "cash_bhav" ? cashBhavUrl(ctx.urls.archiveUrl, day) : foBhavUrl(ctx.urls.archiveUrl, day);
+  const url = dayUrl(ctx.urls.archiveUrl, dataset, day);
   const response = await ctx.nse.get(url);
   const today = istParts(ctx.clock()).day;
   if (response.status === 404) {
@@ -200,6 +228,7 @@ export async function importDay(ctx: NseContext, dataset: DayDataset, day: numbe
   }
   let parsed: DayParse;
   if (dataset === "fo_bhav") parsed = readFoFile(ctx, day, response.body);
+  else if (dataset === "index_close") parsed = readIndexFile(ctx, day, response.body, options);
   else {
     parsed = readCashFile(ctx, day, response.body, options);
     // An old-format day's delivery % is a second file, asked for only once the prices check out.

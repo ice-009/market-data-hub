@@ -22,7 +22,7 @@ import { DAY_MS, isoDay, istParts } from "./time.js";
 //   npm run hub -- keys list
 //   npm run hub -- keys revoke key_1a2b3c4d5e6f
 //   npm run hub -- data backfill --tf 1d --years 5 [--symbols SBIN,INFY]
-//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo]
+//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|indices]
 //   npm run hub -- data status
 //   npm run hub -- data cancel <job id>
 //   npm run hub -- data backup [--to ./backups] [--keep 7]
@@ -37,7 +37,7 @@ const USAGE = `Usage:
   hub keys list
   hub keys revoke <id>
   hub data backfill --tf 1d|15m|5m [--years N] [--symbols SBIN,INFY,…]
-  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo]
+  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo|indices]
   hub data status
   hub data cancel <job id>
   hub data backup [--to <dir>] [--keep N]
@@ -77,7 +77,7 @@ function keys(db: Db, action: string, rest: string[]): number {
 
 const jobTitle = (job: Job) =>
   job.kind === "nse_history"
-    ? `NSE history ${job.params.from} → ${job.params.to} (${job.params.datasets.map((dataset) => (dataset === "cash_bhav" ? "cash" : "F&O")).join(", ")})`
+    ? `NSE history ${job.params.from} → ${job.params.to} (${job.params.datasets.map((dataset) => (dataset === "cash_bhav" ? "cash" : dataset === "fo_bhav" ? "F&O" : "indices")).join(", ")})`
     : `${job.params.tf} ${job.params.years}y ${job.params.symbols ? `${job.params.symbols.length} symbols` : "F&O + indices"}`;
 const jobLine = (job: Job) => `#${job.id} ${jobTitle(job)}: ${job.state} ${job.done}/${job.total}${job.failed ? ` (${job.failed} failed)` : ""} — ${job.message}${job.resumeAfter && job.state === "paused" ? ` (resumes ${fmt(job.resumeAfter)})` : ""}`;
 
@@ -137,7 +137,7 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
 
   if (action === "nse-history") {
     const only = flag(rest, "--only");
-    const datasets: NseHistoryParams["datasets"] = only === undefined ? ["cash_bhav", "fo_bhav"] : only === "cash" ? ["cash_bhav"] : only === "fo" ? ["fo_bhav"] : [];
+    const datasets: NseHistoryParams["datasets"] = only === undefined ? ["cash_bhav", "fo_bhav", "index_close"] : only === "cash" ? ["cash_bhav"] : only === "fo" ? ["fo_bhav"] : only === "indices" ? ["index_close"] : [];
     const params: NseHistoryParams = { from: flag(rest, "--from") ?? isoDay(ARCHIVE_FROM.cash_bhav), to: flag(rest, "--to") ?? isoDay(lastHistoryDay(Date.now())), datasets };
     const invalid = validateNseHistory(params, istParts().day);
     if (invalid) {

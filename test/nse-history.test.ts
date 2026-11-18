@@ -172,7 +172,7 @@ describe("NSE history", () => {
     expect(validateNseHistory(params({ to: "2026-11-16" }), today)).toMatch(/before today/);
     expect(validateNseHistory(params({ from: "2026-11-15", to: "2026-11-14" }), today)).toMatch(/on or before/);
     expect(validateNseHistory(params({ from: "1994-13-01" }), today)).toMatch(/dates like/);
-    expect(validateNseHistory(params({ datasets: [] }), today)).toMatch(/cash or fo/);
+    expect(validateNseHistory(params({ datasets: [] }), today)).toMatch(/cash, fo or indices/);
   });
 
   // Thu 4 Jul – Tue 9 Jul 2024: old formats through Fri 5 Jul, the current ones from Mon 8 Jul.

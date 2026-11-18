@@ -318,6 +318,7 @@ Errors always look like this and never echo your headers or the hub's configurat
 | `GET /v1/lots` | history | ✅ | Futures lot sizes. |
 | `GET /v1/results-calendar` | history | ✅ | Upcoming and recent results dates. |
 | `GET /v1/market/regime` | history | ✅ | NIFTY vs its 50- and 200-day averages, breadth. |
+| `GET /v1/indices` | history | ✅ | NIFTY, NIFTY 500 and the sector indices with daily history from NSE's index file (since 2012), synthetic equal-weight sector baskets (labelled `synthetic`) for earlier years, and the industry → sector-index map. |
 | `GET /v1/quotes?symbols=SBIN,TCS` | live | ✅ | Last price, change, OHLC, volume, with `ageMs`, `source` and `stale`. From the live feed when fresh, else one batched broker call (cached 3 s), else the last stored quote — never an error because the broker is down. |
 | `GET /v1/stream?symbols=SBIN,TCS` | live | ✅ | Server-Sent Events: `status`, a `snapshot` of last quotes, a `bars` replay of 1-minute bars (resumes from `Last-Event-ID`), then `tick` events from one shared broker socket. |
 | `POST` / `DELETE /v1/live/pin` | admin | ✅ | Add or remove symbols kept subscribed across restarts (on top of `HUB_LIVE_SYMBOLS`). |
@@ -454,7 +455,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
   history would bring; the whole move is in [docs/migrate-tradex.md](docs/migrate-tradex.md).
 - **Decades of history:** the broker serves 5 years of daily candles; NSE's archive goes back to
   1994. `npm run hub -- data nse-history` downloads it (raw daily prices of every stock, delisted
-  ones included, delivery % since 2002, F&O since 2001) in about eight hours, pausing in market
+  ones included, delivery % since 2002, F&O since 2001, every NSE index since 2012) in about eight and a half hours, pausing in market
   hours — details in [docs/api.md](docs/api.md#data-nse-history).
 - **Updating:** `git pull && npm install && npm run build` (or `docker compose up -d --build`).
   Database migrations run automatically at start-up.
