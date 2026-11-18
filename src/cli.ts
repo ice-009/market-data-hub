@@ -8,7 +8,7 @@ import { hubHealth } from "./health.js";
 import { createHub } from "./hub.js";
 import { ImportError, formatImportReport, importTradexLocked } from "./import/tradex.js";
 import { DEFAULT_INDICES, cancelJob, enqueueBackfill, enqueueJob, listJobs, maxYears, recoverJobs, runBackfill, validateBackfill, type Job, type NseHistoryParams } from "./jobs/backfill.js";
-import { lastHistoryDay, runNseHistory, validateNseHistory } from "./jobs/nseHistory.js";
+import { HISTORY_DATASETS, HISTORY_LABEL, lastHistoryDay, runNseHistory, validateNseHistory } from "./jobs/nseHistory.js";
 import { createLogger } from "./log.js";
 import { acquireOwner, ownerPid } from "./owner.js";
 import { getUniverse } from "./reference/universe.js";
@@ -22,7 +22,7 @@ import { DAY_MS, isoDay, istParts } from "./time.js";
 //   npm run hub -- keys list
 //   npm run hub -- keys revoke key_1a2b3c4d5e6f
 //   npm run hub -- data backfill --tf 1d --years 5 [--symbols SBIN,INFY]
-//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo]
+//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr]
 //   npm run hub -- data status
 //   npm run hub -- data cancel <job id>
 //   npm run hub -- data backup [--to ./backups] [--keep 7]
@@ -37,7 +37,7 @@ const USAGE = `Usage:
   hub keys list
   hub keys revoke <id>
   hub data backfill --tf 1d|15m|5m [--years N] [--symbols SBIN,INFY,…]
-  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo]
+  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo|pr]
   hub data status
   hub data cancel <job id>
   hub data backup [--to <dir>] [--keep N]
@@ -77,7 +77,7 @@ function keys(db: Db, action: string, rest: string[]): number {
 
 const jobTitle = (job: Job) =>
   job.kind === "nse_history"
-    ? `NSE history ${job.params.from} → ${job.params.to} (${job.params.datasets.map((dataset) => (dataset === "cash_bhav" ? "cash" : "F&O")).join(", ")})`
+    ? `NSE history ${job.params.from} → ${job.params.to} (${job.params.datasets.map((dataset) => HISTORY_LABEL[dataset]).join(", ")})`
     : `${job.params.tf} ${job.params.years}y ${job.params.symbols ? `${job.params.symbols.length} symbols` : "F&O + indices"}`;
 const jobLine = (job: Job) => `#${job.id} ${jobTitle(job)}: ${job.state} ${job.done}/${job.total}${job.failed ? ` (${job.failed} failed)` : ""} — ${job.message}${job.resumeAfter && job.state === "paused" ? ` (resumes ${fmt(job.resumeAfter)})` : ""}`;
 
@@ -141,7 +141,8 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
 
   if (action === "nse-history") {
     const only = flag(rest, "--only");
-    const datasets: NseHistoryParams["datasets"] = only === undefined ? ["cash_bhav", "fo_bhav"] : only === "cash" ? ["cash_bhav"] : only === "fo" ? ["fo_bhav"] : [];
+    const ONLY: Record<string, NseHistoryParams["datasets"]> = { cash: ["cash_bhav"], fo: ["fo_bhav"], pr: ["pr"] };
+    const datasets: NseHistoryParams["datasets"] = only === undefined ? [...HISTORY_DATASETS] : (ONLY[only] ?? []);
     const params: NseHistoryParams = { from: flag(rest, "--from") ?? isoDay(ARCHIVE_FROM.cash_bhav), to: flag(rest, "--to") ?? isoDay(lastHistoryDay(Date.now())), datasets };
     const invalid = validateNseHistory(params, istParts().day);
     if (invalid) {
@@ -202,7 +203,8 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     console.log(`                  ${fresh.foBhav.sessions} sessions stored, from ${fresh.foBhav.firstSession ?? "—"}`);
     console.log(`  lot sizes       ${fresh.lots.count} (${fresh.lots.source ?? "—"})   fetched ${fmt(fresh.lots.lastSuccessAt)}`);
     console.log(`  F&O ban         for ${fresh.foBan.tradeDate ?? "—"}   fetched ${fmt(fresh.foBan.lastSuccessAt)}`);
-    console.log(`  results         ${fresh.resultsCalendar.events} events   fetched ${fmt(fresh.resultsCalendar.lastSuccessAt)}`);
+    console.log(`  results (PR)    last session ${fresh.resultsCalendar.lastSession ?? "—"}   checked ${fmt(fresh.resultsCalendar.lastAttemptAt)}${fresh.resultsCalendar.lastError ? `   error: ${fresh.resultsCalendar.lastError}` : ""}`);
+    console.log(`                  ${fresh.resultsCalendar.upcoming} upcoming events; ${fresh.resultsCalendar.sessions} sessions stored, from ${fresh.resultsCalendar.firstSession ?? "—"}`);
     console.log("\nCandles:");
     if (!fresh.candles.length) console.log("  none stored yet");
     for (const row of fresh.candles) console.log(`  ${row.tf.padEnd(4)} ${String(row.series).padStart(5)} series ${String(row.candles).padStart(9)} candles   newest ${row.lastSession ?? "—"}`);

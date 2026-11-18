@@ -39,7 +39,7 @@ export interface Config {
   eodHistoryYears: number;
   fyers: FyersConfig;
   /** NSE hosts (overridable for testing against a local server). */
-  nse: { archiveUrl: string; wwwUrl: string };
+  nse: { archiveUrl: string };
   secrets: Secrets;
 }
 
@@ -123,7 +123,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     fyers: fyersConfig(env),
     nse: {
       archiveUrl: (env.NSE_ARCHIVE_URL || "https://nsearchives.nseindia.com").replace(/\/+$/, ""),
-      wwwUrl: (env.NSE_WWW_URL || "https://www.nseindia.com").replace(/\/+$/, ""),
     },
     secrets: {
       fyersClientId: env.FYERS_CLIENT_ID ?? "",

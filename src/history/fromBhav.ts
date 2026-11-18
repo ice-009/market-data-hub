@@ -2,7 +2,7 @@ import { isFuture } from "../broker/symbols.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
 import type { CashBhavRow } from "../nse/parsers/cashBhav.js";
-import { cashDayStatuses, lastOkDay } from "../nse/store.js";
+import { dayStatuses, lastOkDay } from "../nse/store.js";
 import { DAY_MS, isWeekday } from "../time.js";
 import { readBars, readSeries, listSeries, resetSymbol, writeBars } from "./store.js";
 
@@ -31,7 +31,7 @@ export function applyCashBhav(db: Db, day: number, rows: CashBhavRow[], log: Log
   const prevDay = lastOkDay(db, "cash_bhav", day);
   if (prevDay === null) return result;
   // Every weekday between the previous stored session and this one must be a known holiday.
-  const checked = cashDayStatuses(db, prevDay);
+  const checked = dayStatuses(db, "cash_bhav", prevDay);
   for (let d = prevDay + DAY_MS; d < day; d += DAY_MS) if (isWeekday(d) && checked.get(d) !== "holiday") return result;
 
   const bySymbol = new Map(rows.map((row) => [row.symbol, row]));

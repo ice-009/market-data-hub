@@ -1,10 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createKey, type Scope } from "../src/auth/keys.js";
 import { readBars, writeBars } from "../src/history/store.js";
-import { writeCashDay, writeBan, writeFoDay, writeLots, writeResults, recordRun } from "../src/nse/store.js";
+import { writeCashDay, writeBan, writeFoDay, writeLots, writePrDay, recordRun } from "../src/nse/store.js";
 import { aggregateStockFutures, parseFoBhav } from "../src/nse/parsers/foBhav.js";
 import { unzipSingle } from "../src/nse/unzip.js";
-import { DAY_MS, istDayKey, isWeekday, parseIsoDay } from "../src/time.js";
+import { DAY_MS, isoDay, istDayKey, isWeekday, parseIsoDay } from "../src/time.js";
 import { readFileSync } from "node:fs";
 import { ACCESS_TOKEN, FAKE_SECRETS, startMockFyers, type MockFyers } from "./support/mockFyers.js";
 import { makeHub, type TestHub } from "./support/hub.js";
@@ -171,9 +171,11 @@ describe("reference endpoints", () => {
     expect((await get("/v1/lots?symbol=NOPE")).status).toBe(404);
 
     const today = istDayKey();
-    writeResults(t.db, [{ symbol: "TCS", company: "TCS", date: today + 3 * DAY_MS, purpose: "Financial Results" }]);
-    recordRun(t.db, "results", { at: 9, ok: true, info: { count: 1 } });
+    expect((await get("/v1/results-calendar")).status).toBe(503); // no PR zip read yet
+    writePrDay(t.db, today - DAY_MS, [{ symbol: "TCS", company: "TCS", date: today + 3 * DAY_MS, purpose: "Financial Results" }], 9);
+    recordRun(t.db, "pr", { at: 9, ok: true });
     const calendar = await get("/v1/results-calendar");
+    expect(calendar.body).toMatchObject({ asOf: isoDay(today - DAY_MS), fetchedAt: 9 });
     expect(calendar.body.events).toHaveLength(1);
     expect(calendar.body.events[0]).toMatchObject({ symbol: "TCS", day: today + 3 * DAY_MS });
     expect((await get("/v1/results-calendar?symbol=INFY")).body.events).toEqual([]);
