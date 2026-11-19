@@ -6,7 +6,7 @@ import type { Db } from "../db.js";
 import { hubHealth } from "../health.js";
 import type { Hub } from "../hub.js";
 import type { Logger } from "../log.js";
-import { brokerStatus, dataFreshness, diskStatus, recentJobs } from "../status.js";
+import { brokerStatus, dataFreshness, dataMode, diskStatus, recentJobs } from "../status.js";
 import { errorBody, type HubEnv } from "./common.js";
 import { candleRoutes } from "./routes/candles.js";
 import { liveRoutes, liveStatus, type LiveDeps } from "./routes/live.js";
@@ -20,6 +20,10 @@ export { errorBody, requireScope, type HubEnv } from "./common.js";
 // process is alive, and says nothing else. Error bodies are always
 // { error, code } and never echo request headers or configuration. Data routes
 // live in ./routes; they read the hub's store and services.
+//
+// In end-of-day mode (no broker configured) the live routes — quotes, the
+// stream, pins — answer 503 { code: "not_configured" } at once: there is no
+// live price to give, and a client shouldn't retry or wait for one.
 
 export interface AppDeps {
   db: Db;
@@ -66,6 +70,7 @@ export function createApp(deps: AppDeps) {
     return c.json({
       ...unhealthy,
       ...health,
+      ...dataMode(deps.hub),
       service: "market-data-hub",
       version: deps.version,
       time: Date.now(),
@@ -78,6 +83,11 @@ export function createApp(deps: AppDeps) {
       live: { ...liveNow, ...deps.hub.live.status() },
     }, strict && !health.healthy ? 503 : 200);
   });
+
+  if (deps.hub.mode === "end_of_day") {
+    const noLive = { ...errorBody("Live prices need a broker: this hub has none configured and serves NSE end-of-day data only.", "not_configured"), mode: "end_of_day" };
+    for (const path of ["/v1/quotes", "/v1/stream", "/v1/live/*"]) app.use(path, async (c) => c.json(noLive, 503));
+  }
 
   candleRoutes(app, deps.hub);
   referenceRoutes(app, deps.hub);

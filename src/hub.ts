@@ -5,6 +5,7 @@ import { BrokerError } from "./broker/errors.js";
 import { FyersClient } from "./broker/fyers.js";
 import { FyersAuth } from "./broker/fyersAuth.js";
 import { BrokerGate } from "./broker/gate.js";
+import { ArchiveHistory } from "./history/fromArchive.js";
 import { HistoryQueue } from "./history/queue.js";
 import { HistoryService } from "./history/service.js";
 import { Scheduler } from "./jobs/scheduler.js";
@@ -19,9 +20,19 @@ import type { NseContext } from "./nse/datasets.js";
 // still reads the store; requests that would need the broker get a clear error.
 // Live prices (`live`) are built here but only started by the owner
 // (`hub.live.start()`, from src/server.ts) — see src/live/service.ts.
+//
+// Without broker credentials the hub runs in end-of-day mode (`mode`):
+// daily stock candles come from NSE's stored bhavcopies instead of the broker
+// (src/history/fromArchive.ts), F&O data, lots, the ban list and results work
+// as always (they're NSE files anyway), and live quotes, the stream and
+// intraday candles answer `not_configured`.
+
+/** "broker": a broker account is configured (live prices, intraday). "end_of_day": NSE's end-of-day files only. */
+export type HubMode = "broker" | "end_of_day";
 
 export interface Hub {
   config: Config;
+  mode: HubMode;
   db: Db;
   log: Logger;
   /** The hub's time source (injected in tests). */
@@ -63,12 +74,16 @@ export function createHub(options: HubOptions): Hub {
     client = new FyersClient({ fyers: config.fyers, secrets: config.secrets, auth, gate, log, fetch: options.fetch, clock });
   }
   // `owner` can change while running (the server takes the lock once a CLI backfill exits).
-  const hub = { config, db, log, clock, owner: options.owner, gate, auth } as Hub;
+  const mode: HubMode = client ? "broker" : "end_of_day";
+  const hub = { config, mode, db, log, clock, owner: options.owner, gate, auth } as Hub;
   const blocked = () => (hub.owner ? null : new BrokerError("Another hub process owns the broker connection; try again when it's done.", "not_owner"));
-  hub.history = new HistoryService({ db, broker: client, blocked, log, fetchWaitMs: config.fetchWaitMs, clock });
+  // End-of-day mode reads the hub's own store, so it isn't limited to the owner process.
+  hub.history = client
+    ? new HistoryService({ db, broker: client, blocked, log, fetchWaitMs: config.fetchWaitMs, clock })
+    : new HistoryService({ db, broker: new ArchiveHistory(db), log, fetchWaitMs: config.fetchWaitMs, clock });
   hub.historyQueue = new HistoryQueue({ history: hub.history, log, clock });
   hub.brokerUnavailable = () => {
-    if (!client) return new BrokerError("No broker is configured.", "not_configured");
+    if (!client) return new BrokerError("No broker is configured: this hub serves NSE end-of-day data only.", "not_configured");
     const snapshot = gate?.snapshot();
     if (snapshot?.stoppedForToday) return new BrokerError("Today's broker data budget is used up, or calls are stopped after rate-limit strikes.", "budget");
     return blocked();

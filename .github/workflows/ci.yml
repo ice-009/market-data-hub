@@ -42,3 +42,34 @@ jobs:
           for i in $(seq 1 20); do curl -fs http://127.0.0.1:8787/healthz && break; sleep 1; done
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/v1/status)" = "401"
           docker logs hub
+
+  # The default compose.yaml with no .env and no broker keys: the hub starts in
+  # end-of-day mode and says so. (Background jobs off, so CI makes no NSE calls.)
+  compose-no-broker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose up (no .env, no broker keys)
+        run: |
+          test ! -e .env
+          mkdir -p data && sudo chown 1000:1000 data
+          printf 'services:\n  hub:\n    environment:\n      HUB_JOBS: "off"\n' > "$RUNNER_TEMP/jobs-off.yaml"
+          docker compose -f compose.yaml -f "$RUNNER_TEMP/jobs-off.yaml" up -d --build
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:8787/healthz && break; sleep 2; done
+      - name: End-of-day mode; live and intraday answer not_configured
+        run: |
+          key=$(docker compose exec -T hub node dist/cli.js keys create ci --scopes history,live,fo | grep -o 'mdh_[A-Za-z0-9_-]*' | head -n 1)
+          get() { curl -s -H "Authorization: Bearer $key" -o body.json -w '%{http_code}' "http://127.0.0.1:8787$1"; }
+          test "$(get /v1/status)" = 200; cat body.json; echo
+          grep -q '"mode":"end_of_day"' body.json
+          grep -q '"modeLabel":"End-of-day only"' body.json
+          test "$(get '/v1/quotes?symbols=SBIN')" = 503; grep -q '"code":"not_configured"' body.json
+          test "$(get '/v1/candles?symbol=SBIN&tf=5m')" = 503; grep -q '"code":"not_configured"' body.json
+          test "$(get '/v1/universe/nifty50')" = 200
+          docker compose logs hub | grep -q 'end-of-day only (no broker configured)'
+      - name: Logs
+        if: always()
+        run: docker compose logs --no-color
+      - name: Clean up
+        if: always()
+        run: docker compose down -v

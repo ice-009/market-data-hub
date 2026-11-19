@@ -45,7 +45,7 @@ describe("/v1/candles", () => {
     expect((await get("/v1/candles?symbol=SBIN")).status).toBe(403);
   });
 
-  it("serves stored candles with delivery %, and 503 + what's stored when the broker would be needed", async () => {
+  it("serves stored candles with delivery %, and without a broker only what NSE's stored files hold", async () => {
     const { get } = withKey(); // no broker configured
     const days = [d("2026-10-05"), d("2026-10-06")];
     writeBars(t.db, "SBIN", "1d", days.map((day, i) => ({ t: day, o: 10, h: 12, l: 9, c: 11 + i, v: 100 })), { from: days[0], to: days[1] + DAY_MS }, Date.now());
@@ -59,10 +59,10 @@ describe("/v1/candles", () => {
       { t: days[1], o: 10, h: 12, l: 9, c: 12, v: 100, dp: 47.5 },
     ]);
 
+    // End-of-day mode: older days aren't in any stored bhavcopy, so there's nothing more to get (not an error).
     const more = await get("/v1/candles?symbol=SBIN&tf=1d&from=2026-10-01&to=2026-10-06");
-    expect(more.status).toBe(503);
-    expect(more.res.headers.get("retry-after")).toBe("60");
-    expect(more.body).toMatchObject({ code: "broker_unavailable", reason: "not_configured", complete: false });
+    expect(more.status).toBe(200);
+    expect(more.body).toMatchObject({ complete: false });
     expect(more.body.candles).toHaveLength(2);
   });
 

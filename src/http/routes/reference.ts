@@ -177,6 +177,8 @@ export function referenceRoutes(app: Hono<HubEnv>, hub: Hub) {
     const universe = c.req.query("universe") ?? "nifty500";
     if (!isUniverse(universe)) return c.json(errorBody(`universe must be one of ${UNIVERSES.join(", ")}.`, "bad_request"), 400);
     const answer = await computeRegime(hub.db, hub.history, universe);
+    // End-of-day mode has no NIFTY history yet (index closes from the archive: market-data-hub#23).
+    if (!answer.regime && hub.mode === "end_of_day") return c.json({ ...errorBody(`The market regime needs NIFTY's history (${answer.error ?? "not stored"}).`, "not_configured"), mode: "end_of_day" }, 503);
     if (!answer.regime) return c.json(errorBody(`NIFTY history isn't available (${answer.error ?? "unknown"}).`, answer.status === "pending" ? "fetch_pending" : "broker_unavailable"), 503, { "Retry-After": answer.status === "pending" ? "10" : "60" });
     if (answer.status !== "ok") return c.json({ ...errorBody(`Computed from stored data only (${answer.error ?? "broker unavailable"}).`, "broker_unavailable"), ...answer.regime }, 503, { "Retry-After": "60" });
     return c.json(answer.regime);

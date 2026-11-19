@@ -38,6 +38,8 @@ export interface HistoryResult {
   coveredFromDay: number;
   /** False when a request failed part-way (the older part is still missing). */
   complete: boolean;
+  /** Latest day (key) the result is complete through, when earlier than the requested `toDay` (end-of-day archive). */
+  coveredToDay?: number;
 }
 
 /** Day ranges (inclusive day keys) of at most `maxDays` + 1 dates each, newest first. Pure. */

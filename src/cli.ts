@@ -2,7 +2,7 @@ import path from "node:path";
 import { backupDb } from "./backup.js";
 import { gb, shortOfSpace } from "./disk.js";
 import { createKey, listKeys, parseScopes, revokeKey } from "./auth/keys.js";
-import { loadConfig, secretValues } from "./config.js";
+import { brokerConfigured, loadConfig, secretValues } from "./config.js";
 import { openDb, type Db } from "./db.js";
 import { BACKFILL_TFS, BASE, finalBefore, type BaseTf } from "./history/timeframes.js";
 import { hubHealth } from "./health.js";
@@ -14,7 +14,7 @@ import { createLogger } from "./log.js";
 import { acquireOwner, ownerPid } from "./owner.js";
 import { listingOf, loadRenames, storedListing } from "./reference/renames.js";
 import { getUniverse } from "./reference/universe.js";
-import { brokerStatus, dataFreshness, diskStatus } from "./status.js";
+import { brokerStatus, dataFreshness, dataMode, diskStatus } from "./status.js";
 import { ARCHIVE_FROM, refreshSymbolChanges } from "./nse/datasets.js";
 import { readRuns } from "./nse/store.js";
 import { DAY_MS, isoDay, istParts, parseIsoDay } from "./time.js";
@@ -101,6 +101,10 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     const invalid = validateBackfill(params);
     if (invalid) {
       console.error(invalid);
+      return 1;
+    }
+    if (!brokerConfigured(config.secrets)) {
+      console.error("No broker is configured: this hub runs in end-of-day mode, and backfills download from the broker. Daily candles come from NSE's files instead — `hub data nse-history` downloads more of them.");
       return 1;
     }
     const release = acquireOwner(config.dataDir);
@@ -198,6 +202,8 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     for (const problem of health.problems) console.log(`  ✗ ${problem}`);
     for (const warning of health.warnings) console.log(`  ! ${warning}`);
     console.log("");
+    const mode = dataMode(hub);
+    console.log(`Mode: ${mode.modeLabel}${mode.modeNote ? ` — ${mode.modeNote}` : ""}`);
     console.log(`Owner process: ${pid ? `pid ${pid}` : "none (no hub server running)"}`);
     const disk = diskStatus(config);
     for (const volume of disk.volumes) console.log(`Disk: ${volume.freeBytes === null ? "free space unknown" : `${gb(volume.freeBytes)} free`} for ${volume.holds} (warning under ${gb(disk.warnBelowBytes)}; NSE history and backups stop under ${gb(disk.minFreeBytes)})`);
