@@ -1,8 +1,14 @@
+import { isBasket, isNseIndex } from "../reference/indices.js";
+
 // Hub symbols are plain NSE tickers (SBIN, M&M, BAJAJ-AUTO), a few index names
 // (NIFTY, BANKNIFTY…) and futures contracts written the way Fyers writes them
 // without the exchange: underlying + YY + MON + "FUT" (SBIN26NOVFUT, M&M26DECFUT).
 // Fyers wants EXCHANGE:SYMBOL-SEGMENT for stocks and indices and NSE:<contract>
 // for futures; the mapping is string construction, never a network lookup. Pure.
+//
+// Other NSE indices (NIFTY500, NIFTYAUTO…) and the synthetic baskets (EW-IT…)
+// have daily history from NSE's files only (src/reference/indices.ts): the
+// broker is never asked for them.
 
 export const INDEX_SYMBOLS: Readonly<Record<string, string>> = {
   NIFTY: "NSE:NIFTY50-INDEX",
@@ -33,7 +39,11 @@ export function normalizeSymbol(raw: string): string | null {
   return TICKER.test(symbol) || FUTURE.test(symbol) ? symbol : null;
 }
 
-export const isIndex = (symbol: string) => symbol in INDEX_SYMBOLS;
+/** An index (broker-served or NSE-file-only) or a synthetic basket: not in the cash bhavcopy. */
+export const isIndex = (symbol: string) => symbol in INDEX_SYMBOLS || isNseIndex(symbol) || isBasket(symbol);
+
+/** Daily history from NSE's files only: an index the broker isn't asked for, or a synthetic basket. */
+export const isNseOnly = (symbol: string) => !(symbol in INDEX_SYMBOLS) && (isNseIndex(symbol) || isBasket(symbol));
 
 export interface FutureContract {
   underlying: string;

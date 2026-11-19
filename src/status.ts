@@ -6,7 +6,7 @@ import { hubVolumes } from "./disk.js";
 import { candleStats } from "./history/store.js";
 import type { Hub } from "./hub.js";
 import { listJobs } from "./jobs/backfill.js";
-import { countResults, lastOkDay, latestBan, readRuns, storedDays, type DayDataset } from "./nse/store.js";
+import { countResults, isinStats, lastOkDay, latestBan, readRuns, storedDays, unmappedIndexNames, type DayDataset } from "./nse/store.js";
 import { isoDay, istParts } from "./time.js";
 
 // What /v1/status and `hub data status` report: data freshness per dataset,
@@ -27,13 +27,16 @@ export function dataFreshness(db: Db) {
   };
   const ban = latestBan(db);
   const lots = runs.get("lots")?.info;
+  const renames = runs.get("symbol_changes")?.info;
   return {
     cashBhav: { lastSession: day(lastOkDay(db, "cash_bhav")), ...archive("cash_bhav"), ...run("cash_bhav") },
     foBhav: { lastSession: day(lastOkDay(db, "fo_bhav")), ...archive("fo_bhav"), ...run("fo_bhav") },
+    indexFile: { lastSession: day(lastOkDay(db, "index_close")), ...archive("index_close"), unmappedNames: unmappedIndexNames(db).length, ...run("index_close") },
     lots: { count: (lots?.count as number | undefined) ?? 0, source: (lots?.source as string | undefined) ?? null, ...run("lots") },
     foBan: { tradeDate: ban ? isoDay(ban.tradeDate) : null, ...run("fo_ban") },
     // From the PR zip's board meetings: `upcoming` counts events dated today or later.
     resultsCalendar: { upcoming: countResults(db, istParts().day), lastSession: day(lastOkDay(db, "pr")), ...archive("pr"), ...run("pr") },
+    symbolChanges: { count: (renames?.count as number | undefined) ?? 0, isins: isinStats(db), ...run("symbol_changes") },
     candles: candleStats(db).map((row) => ({ tf: row.tf, series: row.series, candles: row.candles, lastSession: row.lastT === null ? null : row.tf === "1d" ? isoDay(row.lastT) : new Date(row.lastT).toISOString() })),
   };
 }

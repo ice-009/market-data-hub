@@ -157,7 +157,7 @@ describe("the API in end-of-day mode", () => {
     }
     const index = await get("/v1/candles?symbol=NIFTY&tf=1d&from=2026-10-26&to=2026-11-06");
     expect(index.status).toBe(503);
-    expect(index.body).toMatchObject({ code: "not_configured", error: expect.stringMatching(/Index candles need a broker/), candles: [] });
+    expect(index.body).toMatchObject({ code: "not_configured", error: expect.stringMatching(/Index candles beyond NSE's index file/), candles: [] });
     expect((await get("/v1/candles?symbol=SBIN26NOVFUT&tf=1d&from=2026-10-26&to=2026-11-06")).body.code).toBe("not_configured");
     expect((await get("/v1/candles?symbol=NOSUCH&tf=1d&from=2026-10-26&to=2026-11-06")).status).toBe(404);
   });
@@ -216,12 +216,13 @@ describe("queueEndOfDayHistory", () => {
     t = makeHub();
     expect(queueEndOfDayHistory(t.db, 0, now)).toBeNull();
     const job = queueEndOfDayHistory(t.db, 1, now)!;
-    expect(job).toMatchObject({ kind: "nse_history", params: { from: "2025-11-17", to: "2026-11-17", datasets: ["cash_bhav", "fo_bhav"] } });
+    expect(job).toMatchObject({ kind: "nse_history", params: { from: "2025-11-17", to: "2026-11-17", datasets: ["cash_bhav", "fo_bhav", "index_close"] } });
     expect(queueEndOfDayHistory(t.db, 1, now)).toBeNull(); // still open
     updateJob(t.db, job.id, { state: "done" }, now);
     for (let day = d("2025-11-17"); day <= d("2026-11-17"); day += DAY_MS) {
       markDay(t.db, "cash_bhav", day, "holiday", 0, now);
       markDay(t.db, "fo_bhav", day, "holiday", 0, now);
+      markDay(t.db, "index_close", day, "holiday", 0, now);
     }
     expect(queueEndOfDayHistory(t.db, 1, now)).toBeNull();
     expect(getJob(t.db, job.id)?.state).toBe("done");

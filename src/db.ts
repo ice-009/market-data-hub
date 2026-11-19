@@ -12,6 +12,8 @@ import Database from "better-sqlite3";
 //   2  NSE datasets            nse_days, cash_bhav, fo_futures, lot_sizes, fo_ban, results_events, datasets
 //   3  hub state               kv (broker budget), jobs (queued backfills)
 //   4  live prices             live_quotes, live_bars_1m, live_subscriptions; see src/live/store.ts
+//   5  ticker renames          symbol_changes, isin_symbols, isin_days; see src/reference/renames.ts
+//   6  index closes            index_closes (NSE's ind_close_all); see src/nse/store.ts
 
 export type Db = Database.Database;
 
@@ -157,6 +159,46 @@ const MIGRATIONS: string[] = [
      added_at integer not null,
      origin text not null check (origin in ('config', 'pin'))
    ) without rowid;`,
+  // Ticker renames. symbol_changes: NSE's symbolchange.csv as downloaded (day =
+  // the effective date, the first session under new_symbol). isin_symbols: which
+  // ticker each ISIN traded under, and over which stored days (from the cash
+  // bhavcopy's ISIN column, in NSE's old-format files from 2011 to 5 Jul 2024);
+  // a change of ticker under one ISIN is a rename too. isin_days: old-format
+  // cash days whose ISINs were read, so they're never asked for again.
+  `create table symbol_changes (
+     old_symbol text not null,
+     new_symbol text not null,
+     day integer not null,
+     company text not null,
+     primary key (old_symbol, day)
+   ) without rowid;
+   create index symbol_changes_new on symbol_changes (new_symbol, day);
+   create table isin_symbols (
+     isin text not null,
+     symbol text not null,
+     first_day integer not null,
+     last_day integer not null,
+     primary key (isin, symbol)
+   ) without rowid;
+   create index isin_symbols_symbol on isin_symbols (symbol);
+   create table isin_days (day integer primary key, isins integer not null);`,
+  // NSE's daily index file, every row as printed (name as NSE spelled it that
+  // day). symbol is the hub ticker the name maps to (src/reference/indices.ts),
+  // null for indices the hub doesn't serve; re-mapped when the list changes.
+  `create table index_closes (
+     day integer not null,
+     name text not null,
+     symbol text,
+     o real, h real, l real,
+     c real not null,
+     points_change real,
+     change_pct real,
+     volume real,
+     turnover_cr real,
+     pe real, pb real, div_yield real,
+     primary key (day, name)
+   ) without rowid;
+   create index index_closes_symbol on index_closes (symbol, day);`,
 ];
 
 /** Small JSON values the hub keeps between restarts (e.g. the broker budget). */

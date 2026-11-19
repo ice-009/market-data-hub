@@ -59,12 +59,12 @@ const secFull = (day: number, close: number) =>
   `SYMBOL, SERIES, DATE1, PREV_CLOSE, OPEN_PRICE, HIGH_PRICE, LOW_PRICE, LAST_PRICE, CLOSE_PRICE, AVG_PRICE, TTL_TRD_QNTY, TURNOVER_LACS, NO_OF_TRADES, DELIV_QTY, DELIV_PER\nSBIN, EQ, ${nseDate(day)}, ${close - 1}, ${close}, ${close}, ${close}, ${close}, ${close}, ${close}, 1000, 1, 1, 500, 50.00\n`;
 
 describe("NSE's old formats (pure)", () => {
-  it("reads the old cash bhavcopy into the current rows, without delivery %", () => {
+  it("reads the old cash bhavcopy into the current rows, without delivery % (and with the ISIN where the file has one)", () => {
     const parsed = parseCmBhav(cmCsv(d("1994-11-03"), [["ACC", "EQ", 4636.75, 0], ["ACC", "BE", 1, 1], ["XYZ", "BE", 10, 9], ["SRERAYHY+H", "EQ", 8.5, 8.85], ["NCD1", "N1", 100, 100]], false));
     expect(parsed.tradeDate).toBe(d("1994-11-03"));
     expect(parsed.badRows).toBe(0);
     expect(parsed.rows.map((row) => `${row.symbol}/${row.series}`)).toEqual(["ACC/EQ", "XYZ/BE", "SRERAYHY+H/EQ"]); // EQ wins; debt series skipped
-    expect(parsed.rows[0]).toEqual({ symbol: "ACC", series: "EQ", prevClose: 0, open: 4636.75, high: 4637.75, low: 4635.75, close: 4636.75, volume: 1000, deliveryPct: null });
+    expect(parsed.rows[0]).toEqual({ symbol: "ACC", series: "EQ", prevClose: 0, open: 4636.75, high: 4637.75, low: 4635.75, close: 4636.75, volume: 1000, deliveryPct: null, isin: "INE000000000" });
     expect(parseCmBhav(`${cmCsv(d("2010-01-04"), [["SBIN", "EQ", 1, 1]])}\nINFY,EQ,1,1,1,1,1,1,1,1,05-JAN-2010,`).mixedDates).toBe(true);
     expect(parseCmBhav("garbage\n1,2").rows).toEqual([]);
   });
@@ -174,7 +174,7 @@ describe("NSE history", () => {
     expect(validateNseHistory(params({ to: "2026-11-16" }), today)).toMatch(/before today/);
     expect(validateNseHistory(params({ from: "2026-11-15", to: "2026-11-14" }), today)).toMatch(/on or before/);
     expect(validateNseHistory(params({ from: "1994-13-01" }), today)).toMatch(/dates like/);
-    expect(validateNseHistory(params({ datasets: [] }), today)).toMatch(/cash, fo or pr/);
+    expect(validateNseHistory(params({ datasets: [] }), today)).toMatch(/cash, fo, pr or indices/);
   });
 
   // Thu 4 Jul – Tue 9 Jul 2024: old formats through Fri 5 Jul, the current ones from Mon 8 Jul.

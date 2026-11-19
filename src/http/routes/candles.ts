@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 import { BrokerError } from "../../broker/errors.js";
 import type { Bar } from "../../broker/fyers.js";
-import { isFuture, isIndex, normalizeSymbol } from "../../broker/symbols.js";
+import { isFuture, isIndex, isNseOnly, normalizeSymbol } from "../../broker/symbols.js";
 import { EOD_INTRADAY_MESSAGE } from "../../history/fromArchive.js";
 import { needsBrokerBeyond } from "../../history/plan.js";
 import { readSeries } from "../../history/store.js";
@@ -10,6 +10,7 @@ import { finalBefore, isTf, TIMEFRAMES, type Tf } from "../../history/timeframes
 import type { Hub } from "../../hub.js";
 import { bucketOf, mergeMinutes } from "../../live/merge.js";
 import { lastOkDay } from "../../nse/store.js";
+import { isBasket } from "../../reference/indices.js";
 import { DAY_MS, weekdayOnOrBefore } from "../../time.js";
 import { errorBody, requireScope, type HubEnv } from "../common.js";
 import { ParamError, parseRange } from "../params.js";
@@ -69,11 +70,12 @@ export function candleRoutes(app: Hono<HubEnv>, hub: Hub) {
     }
 
     // End-of-day mode: no intraday bars exist to serve or fetch (no Retry-After: asking again won't help).
-    if (hub.mode === "end_of_day" && !BASE_DAILY.has(tf)) return c.json({ ...errorBody(EOD_INTRADAY_MESSAGE, "not_configured"), mode: "end_of_day" }, 503);
+    // NSE-file-only indices and baskets have no intraday bars with a broker either: they answer 404 below.
+    if (hub.mode === "end_of_day" && !BASE_DAILY.has(tf) && !isNseOnly(symbol)) return c.json({ ...errorBody(EOD_INTRADAY_MESSAGE, "not_configured"), mode: "end_of_day" }, 503);
 
     const answer = await hub.history.candles(symbol, tf, range.from, range.to);
     const live = withLiveMinutes(hub, symbol, tf, range, answer.candles, answer.base);
-    const body = { symbol, tf, from: range.from, to: range.to, complete: answer.complete, coverage: answer.coverage, liveThrough: live.through, candles: live.candles };
+    const body = { symbol, tf, from: range.from, to: range.to, complete: answer.complete, coverage: answer.coverage, liveThrough: live.through, ...indexLabel(symbol), candles: live.candles };
     if (answer.status === "ok") return c.json(body);
     if (answer.status === "unknown_symbol") return c.json(errorBody(`Unknown symbol ${symbol}.`, "unknown_symbol"), 404);
     if (answer.error?.kind === "not_configured") return c.json({ ...errorBody(answer.error.message, "not_configured"), mode: hub.mode, ...body }, 503);
@@ -109,7 +111,10 @@ export function candleRoutes(app: Hono<HubEnv>, hub: Hub) {
     const now = hub.clock();
     const latestFinal = weekdayOnOrBefore(finalBefore("1d", now) - DAY_MS);
     const bhavPending = hub.config.jobsEnabled && (lastOkDay(hub.db, "cash_bhav") ?? -Infinity) < latestFinal;
-    const series: Record<string, { complete: boolean; coverage: { from: number; to: number } | null; candles: Bar[] }> = {};
+    // Likewise index series, once the hub stores NSE's index file (which comes out in the evening too).
+    const lastIndexDay = lastOkDay(hub.db, "index_close");
+    const indexFilePending = hub.config.jobsEnabled && lastIndexDay !== null && lastIndexDay < latestFinal;
+    const series: Record<string, { complete: boolean; coverage: { from: number; to: number } | null; candles: Bar[]; synthetic?: boolean }> = {};
     const queued: string[] = [];
     const eod = hub.mode === "end_of_day";
     const eodUnknown: string[] = [];
@@ -128,18 +133,25 @@ export function candleRoutes(app: Hono<HubEnv>, hub: Hub) {
         if (error && !(error instanceof BrokerError)) throw error;
         stored = hub.history.stored(symbol, batchTf, range.from, range.to);
       }
-      const fromBhav = bhavPending && !isIndex(symbol) && !isFuture(symbol);
-      const needed = !stored.complete && (!fromBhav || needsBrokerBeyond(stored.coverage, stored.want, latestFinal));
+      const fromNse = isIndex(symbol) ? indexFilePending : bhavPending && !isFuture(symbol);
+      // NSE-file-only series (other indices, baskets) are never queued: the broker can't add to them.
+      const needed = !isNseOnly(symbol) && !stored.complete && (!fromNse || needsBrokerBeyond(stored.coverage, stored.want, latestFinal));
       if (needed && !unavailable && hub.historyQueue.enqueue(symbol, stored.base, stored.want)) queued.push(symbol);
       const live = withLiveMinutes(hub, symbol, batchTf, range, stored.candles, stored.base);
-      series[symbol] = { complete: stored.complete, coverage: stored.coverage, candles: live.candles };
+      series[symbol] = { complete: stored.complete, coverage: stored.coverage, candles: live.candles, ...indexLabel(symbol) };
     }
     unknown.push(...eodUnknown);
-    const incomplete = symbols.some((symbol) => series[symbol] && !series[symbol].complete);
+    const incomplete = symbols.some((symbol) => series[symbol] && !series[symbol].complete && !isNseOnly(symbol));
     // Like /v1/quotes: a broker problem doesn't turn the answer into an error; it says why nothing was queued.
-    const warning = !incomplete || !unavailable ? {} : eod ? { warning: "End-of-day mode: served from NSE's stored files; indices, futures and days not downloaded yet are missing.", reason: unavailable.kind } : { warning: `The broker is unavailable (${unavailable.message}); showing what is stored.`, reason: unavailable.kind };
+    const warning = !incomplete || !unavailable ? {} : eod ? { warning: "End-of-day mode: served from NSE's stored files; futures, indices before NSE's index file (Feb 2012) and days not downloaded yet are missing.", reason: unavailable.kind } : { warning: `The broker is unavailable (${unavailable.message}); showing what is stored.`, reason: unavailable.kind };
     return c.json({ tf: batchTf, from: range.from, to: range.to, series, queued, unknown, ...warning });
   });
+}
+
+/** `synthetic` for indices and baskets (absent for stocks and futures): a basket is never an NSE index. */
+export function indexLabel(symbol: string): { synthetic?: boolean } {
+  if (isBasket(symbol)) return { synthetic: true };
+  return isIndex(symbol) ? { synthetic: false } : {};
 }
 
 /** Stored candles with the live minutes since the newest one folded in, kept inside the requested range. */

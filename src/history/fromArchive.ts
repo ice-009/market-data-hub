@@ -31,7 +31,7 @@ import type { HistoryBroker } from "./service.js";
 // don't exist in end-of-day data: those answer `not_configured`.
 
 export const EOD_INTRADAY_MESSAGE = "Intraday candles need a broker: this hub has none configured and serves NSE end-of-day data only.";
-export const EOD_INDEX_MESSAGE = "Index candles need a broker: NSE's end-of-day files this hub reads have stock prices only.";
+export const EOD_INDEX_MESSAGE = "Index candles beyond NSE's index file (stored daily from Feb 2012) need a broker.";
 export const EOD_FUTURE_MESSAGE = "Futures-contract candles need a broker: this hub has none configured and serves NSE end-of-day data only.";
 
 interface CashRow {
