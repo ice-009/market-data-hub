@@ -88,7 +88,7 @@ describe("data quality: price outliers and repeated files", () => {
     const [finding, ...rest] = feed(40, (prev) => ({ c: prev * 0.502 }));
     expect(rest).toEqual([]);
     expect(finding).toMatchObject({ check: "price_outlier", subject: "ACME", severity: "warning", detail: { actionLike: "1/2", priceBand: "beyond" } });
-    expect(finding.message).toMatch(/^ACME: -49\.8% close to close on Wed 18 Nov 2026 .+ with no corporate action on record\. That's beyond NSE's widest daily price band \(20%\).+matches a 1\/2 price ratio/);
+    expect(finding.message).toMatch(/^ACME: -49\.8% close to close on Wed 18 Nov 2026 .+ with no corporate action on record\. Beyond NSE's widest price band \(20%\) and a 1\/2 price ratio: most likely a split/);
   });
 
   it("leaves alone moves a corporate action explains: NSE's PREV_CLOSE, an F&O lot change, or the hook", () => {

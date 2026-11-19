@@ -250,11 +250,17 @@ export class CashScanner {
           const like = action ? null : actionLike(raw);
           const band = Math.abs(move - 1) > PRICE_BAND_MAX + BAND_SLACK ? "beyond" : atPriceBand(row) ? "at" : null;
           const adjusted = action ? `, after a ×${action.factor.toFixed(3)} ${action.source} adjustment` : "";
-          const why = [
-            band === "beyond" ? ` That's beyond NSE's widest daily price band (${PRICE_BAND_MAX * 100}%): a corporate action not on record, or a bad price.` : "",
-            band === "at" ? " It closed at its price band: a real move, most likely." : "",
-            like ? ` The move matches a ${like} price ratio: probably a corporate action (split, bonus, consolidation, demerger) not adjusted for yet.` : "",
-          ].join("");
+          const widest = `NSE's widest price band (${PRICE_BAND_MAX * 100}%)`;
+          const why =
+            band === "beyond" && like
+              ? ` Beyond ${widest} and a ${like} price ratio: most likely a split, bonus or other corporate action not adjusted for yet.`
+              : band === "beyond"
+                ? ` Beyond ${widest}: a corporate action not on record, or a bad price.`
+                : band === "at"
+                  ? " It closed at its price band: most likely a real move."
+                  : like
+                    ? ` A ${like} price ratio: possibly a corporate action not adjusted for yet.`
+                    : "";
           out.push({
             check: "price_outlier",
             day,
