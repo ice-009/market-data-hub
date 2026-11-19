@@ -5,6 +5,7 @@ import { ConfigError, brokerConfigured, loadConfig, secretValues } from "./confi
 import { openDb } from "./db.js";
 import { createApp } from "./http/app.js";
 import { createHub } from "./hub.js";
+import { ensureFactors } from "./history/adjustments.js";
 import { queueEndOfDayHistory } from "./jobs/endOfDay.js";
 import { createLogger } from "./log.js";
 import { acquireOwner, ownerPid } from "./owner.js";
@@ -22,6 +23,9 @@ function main() {
   // Owner-only work: background jobs and live prices (which resume their subscriptions and repair
   // the minutes missed while the hub was down — see src/live/service.ts).
   const startJobs = () => {
+    // Split and bonus factors from the stored archive, once (and again after the derivation changes).
+    const derived = ensureFactors(db, { endOfDay: hub.mode === "end_of_day", now: Date.now() });
+    if (derived) log.info("derived split and bonus factors from the stored NSE files", { factors: derived.factors, ...derived.bySource, seriesDropped: derived.reset.length });
     if (config.jobsEnabled && hub.mode === "end_of_day") {
       const job = queueEndOfDayHistory(db, config.eodHistoryYears);
       if (job) log.info("end-of-day mode: queued NSE archive history for daily candles", { job: job.id, ...job.params });

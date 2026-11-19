@@ -14,6 +14,7 @@ import Database from "better-sqlite3";
 //   4  live prices             live_quotes, live_bars_1m, live_subscriptions; see src/live/store.ts
 //   5  ticker renames          symbol_changes, isin_symbols, isin_days; see src/reference/renames.ts
 //   6  index closes            index_closes (NSE's ind_close_all); see src/nse/store.ts
+//   7  adjustments             corporate_actions, corporate_action_days, adjustment_factors; see src/history/adjustments.ts
 
 export type Db = Database.Database;
 
@@ -199,6 +200,43 @@ const MIGRATIONS: string[] = [
      primary key (day, name)
    ) without rowid;
    create index index_closes_symbol on index_closes (symbol, day);`,
+  // Split and bonus adjustment. corporate_actions: the PR zip's bc file, every
+  // equity row as NSE wrote it (symbol = the ticker that day), with what the
+  // purpose means for prices; first_day/last_day = the PR days that listed it.
+  // corporate_action_days: PR days whose bc file was read. adjustment_factors:
+  // one row per ex-date found in the cash bhavcopies — prices before `day`
+  // times `factor` (volumes divided) give prices comparable with `day` on;
+  // raw prices stay as they are in cash_bhav.
+  `create table corporate_actions (
+     symbol text not null,
+     ex_day integer not null,
+     purpose text not null,
+     series text not null,
+     company text not null,
+     record_day integer,
+     kinds text not null,
+     ratio real,
+     first_day integer not null,
+     last_day integer not null,
+     primary key (symbol, ex_day, purpose)
+   ) without rowid;
+   create index corporate_actions_ex on corporate_actions (ex_day);
+   create table corporate_action_days (day integer primary key, rows integer not null);
+   create table adjustment_factors (
+     symbol text not null,
+     day integer not null,
+     factor real not null,
+     source text not null,
+     prev_day integer not null,
+     prev_c real not null,
+     prev_close real not null,
+     o real not null,
+     c real not null,
+     action text,
+     renamed_from text,
+     primary key (symbol, day)
+   ) without rowid;
+   create index adjustment_factors_day on adjustment_factors (day);`,
 ];
 
 /** Small JSON values the hub keeps between restarts (e.g. the broker budget). */

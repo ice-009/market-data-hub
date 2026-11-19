@@ -4,6 +4,8 @@ import { gb, shortOfSpace } from "./disk.js";
 import { createKey, listKeys, parseScopes, revokeKey } from "./auth/keys.js";
 import { brokerConfigured, loadConfig, secretValues } from "./config.js";
 import { openDb, type Db } from "./db.js";
+import { checkAdjustments, REASONS } from "./history/adjustCheck.js";
+import { factorStats, lastAdjustmentRun, listingFactors, rederiveAll } from "./history/adjustments.js";
 import { BACKFILL_TFS, BASE, finalBefore, type BaseTf } from "./history/timeframes.js";
 import { hubHealth } from "./health.js";
 import { createHub } from "./hub.js";
@@ -28,6 +30,7 @@ import { DAY_MS, isoDay, istParts, parseIsoDay } from "./time.js";
 //   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr|indices]
 //   npm run hub -- data status
 //   npm run hub -- data symbols [INFY TMPV …] [--date 2005-01-03] [--refresh]
+//   npm run hub -- data adjustments [INFY …] [--rebuild] [--check [--symbols A,B] [--tolerance 0.005] [--json]]
 //   npm run hub -- data cancel <job id>
 //   npm run hub -- data backup [--to ./backups] [--keep 7]
 //   npm run hub -- data import-tradex --db ../tradex/.cache/market.db [--screener ../tradex/.cache/screener] [--dry-run]
@@ -44,6 +47,7 @@ const USAGE = `Usage:
   hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo|pr|indices]
   hub data status
   hub data symbols [SYMBOL …] [--date YYYY-MM-DD] [--refresh]
+  hub data adjustments [SYMBOL …] [--rebuild] [--check [--symbols A,B,…] [--tolerance 0.005] [--json]]
   hub data cancel <job id>
   hub data backup [--to <dir>] [--keep N]
   hub data import-tradex --db <market.db> [--screener <dir>] [--dry-run]`;
@@ -220,6 +224,8 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     console.log(`  results (PR)    last session ${fresh.resultsCalendar.lastSession ?? "—"}   checked ${fmt(fresh.resultsCalendar.lastAttemptAt)}${fresh.resultsCalendar.lastError ? `   error: ${fresh.resultsCalendar.lastError}` : ""}`);
     console.log(`                  ${fresh.resultsCalendar.upcoming} upcoming events; ${fresh.resultsCalendar.sessions} sessions stored, from ${fresh.resultsCalendar.firstSession ?? "—"}`);
     console.log(`  symbol changes  ${fresh.symbolChanges.count} renames   fetched ${fmt(fresh.symbolChanges.lastSuccessAt)}   ISINs read for ${fresh.symbolChanges.isins.days} days`);
+    const adjustments = factorStats(db);
+    console.log(`  adjustments     ${adjustments.factors} split/bonus factors for ${adjustments.symbols} tickers   derived ${fmt(lastAdjustmentRun(db)?.derivedAt ?? null)}   ${adjustments.corporateActions} corporate actions from ${adjustments.corporateActionDays} PR days`);
     console.log("\nCandles:");
     if (!fresh.candles.length) console.log("  none stored yet");
     for (const row of fresh.candles) console.log(`  ${row.tf.padEnd(4)} ${String(row.series).padStart(5)} series ${String(row.candles).padStart(9)} candles   newest ${row.lastSession ?? "—"}`);
@@ -290,6 +296,53 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     console.log(`F&O stocks: ${members.length}; ${renamed.length} renamed at least once (${renames.changes.length} renames known). Continuous across every rename: ${renamed.length - gaps.length - unknown.length}; with a gap: ${gaps.length}; not stored on both sides: ${unknown.length}.`);
     for (const entry of renamed) for (const line of entry.lines) console.log(line);
     return gaps.length ? 1 : 0;
+  }
+
+  if (action === "adjustments") {
+    if (rest.includes("--rebuild")) {
+      const started = Date.now();
+      const derived = rederiveAll(db, { endOfDay: !brokerConfigured(config.secrets), now: started });
+      console.log(`Derived ${derived.factors} split/bonus factors in ${((Date.now() - started) / 1000).toFixed(1)} s (${Object.entries(derived.bySource).map(([source, n]) => `${source} ${n}`).join(", ")}); ${derived.changed.length} tickers changed${derived.reset.length ? `, ${derived.reset.length} stored daily series dropped (end-of-day mode)` : ""}.`);
+    }
+    if (rest.includes("--check")) {
+      const symbolsRaw = flag(rest, "--symbols");
+      const toleranceRaw = flag(rest, "--tolerance");
+      const tolerance = toleranceRaw === undefined ? undefined : Number(toleranceRaw);
+      if (tolerance !== undefined && !(tolerance > 0 && tolerance < 0.5)) {
+        console.error("--tolerance must be a fraction like 0.005 (0.5%).");
+        return 1;
+      }
+      if (!brokerConfigured(config.secrets)) console.log("Note: no broker is configured, so stored daily series were built from these same factors; the check is meaningful against a broker's series.");
+      const report = checkAdjustments(db, { symbols: symbolsRaw ? symbolsRaw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean) : undefined, tolerance });
+      if (rest.includes("--json")) {
+        console.log(JSON.stringify(report, null, 2));
+        return report.byReason.unexplained ? 1 : 0;
+      }
+      const pct = (part: number, whole: number) => (whole ? `${((100 * part) / whole).toFixed(2)}%` : "—");
+      console.log(`Broker daily series: ${report.symbols} stocks, ${report.overlapping} overlapping NSE's stored files (${report.overlapBars} sessions).`);
+      console.log(`Adjusted closes matching the broker within ${(report.tolerance * 100).toFixed(2)}%: ${report.matchingBars}/${report.overlapBars} (${pct(report.matchingBars, report.overlapBars)}).`);
+      console.log(`Ex-dates in the overlap (ours or the broker's): ${report.events}; agreeing: ${report.agreed} (${pct(report.agreed, report.events)}). Our factors there: ${Object.entries(report.derived).map(([source, n]) => `${source} ${n}`).join(", ")}.`);
+      console.log(`Disagreements: ${report.disagreements.length}${report.disagreements.length ? ` — ${REASONS.filter((reason) => report.byReason[reason]).map((reason) => `${reason} ${report.byReason[reason]}`).join(", ")}` : ""}.`);
+      for (const item of report.disagreements) {
+        console.log(`  ${item.symbol.padEnd(12)} ${item.prevDate} → ${item.date}  broker ×${item.broker}  ours ×${item.derived}${item.source ? ` (${item.source})` : ""}  [${item.reason}] ${item.note}${item.actions.length ? `; NSE: ${item.actions.join(" · ")}` : ""}`);
+      }
+      return report.byReason.unexplained ? 1 : 0;
+    }
+    const named = rest.filter((arg, i) => !arg.startsWith("--") && rest[i - 1] !== "--symbols" && rest[i - 1] !== "--tolerance").map((arg) => arg.trim().toUpperCase());
+    if (named.length) {
+      const renames = loadRenames(db);
+      for (const symbol of named) {
+        const { listing, factors } = listingFactors(db, symbol, istParts().day, renames);
+        console.log(`${symbol}${listing.current !== symbol ? ` → ${listing.current}` : ""}: ${factors.length} factor(s)${listing.names.length > 1 ? ` across ${listing.names.map((name) => name.symbol).join(" → ")}` : ""}`);
+        for (const factor of factors) console.log(`  ${isoDay(factor.day)} ${factor.symbol.padEnd(12)} ×${factor.factor.toFixed(4)}  ${factor.source.padEnd(16)} close ${factor.prevC} (${isoDay(factor.prevDay)}) → open ${factor.o}, PREV_CLOSE ${factor.prevClose}${factor.renamedFrom ? `, renamed from ${factor.renamedFrom}` : ""}${factor.action ? `; NSE: ${factor.action}` : ""}`);
+      }
+      return 0;
+    }
+    const stats = factorStats(db);
+    const run = lastAdjustmentRun(db);
+    console.log(`Split/bonus factors: ${stats.factors} for ${stats.symbols} tickers${stats.first === null ? "" : `, ex-dates ${isoDay(stats.first)} – ${isoDay(stats.last!)}`} (${Object.entries(stats.bySource).map(([source, n]) => `${source} ${n}`).join(", ")}); last derived ${fmt(run?.derivedAt ?? null)}.`);
+    console.log(`Corporate actions: ${stats.corporateActions} from ${stats.corporateActionDays} PR days' bc files.`);
+    return 0;
   }
 
   if (action === "backup") {

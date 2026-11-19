@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createKey } from "../src/auth/keys.js";
 import { BrokerError } from "../src/broker/errors.js";
+import { deriveFactors, rederiveAll } from "../src/history/adjustments.js";
 import { applyCashBhav } from "../src/history/fromBhav.js";
 import { archiveDaily } from "../src/history/fromArchive.js";
 import { readBars, readSeries } from "../src/history/store.js";
@@ -13,7 +14,8 @@ import { ist, makeHub, type TestHub } from "./support/hub.js";
 
 // End-of-day mode (market-data-hub#32): no broker credentials at all. Daily
 // stock candles come from the stored NSE cash bhavcopies, adjusted for splits
-// with NSE's own PREV_CLOSE; live and intraday requests answer not_configured.
+// with the stored factors (here from NSE's own PREV_CLOSE; market-data-hub#20);
+// live and intraday requests answer not_configured.
 
 const d = (iso: string) => parseIsoDay(iso)!;
 const row = (symbol: string, prevClose: number, close: number, extra: Partial<CashBhavRow> = {}): CashBhavRow => ({
@@ -53,6 +55,7 @@ function seedArchive(t: TestHub) {
     infy += 10;
   }
   markDay(t.db, "cash_bhav", d("2026-10-27"), "holiday", 0, 0);
+  deriveFactors(t.db);
 }
 
 let t: TestHub;
@@ -94,6 +97,7 @@ describe("daily candles from the stored archive (pure read)", () => {
     t = makeHub();
     seedArchive(t);
     markDay(t.db, "cash_bhav", d("2026-10-23"), "holiday", 0, 0);
+    deriveFactors(t.db);
     const older = archiveDaily(t.db, "SBIN", d("2026-10-01"), d("2026-11-09"));
     expect(older.bars[0]).toMatchObject({ t: d("2026-10-22"), c: 495 });
     expect(older.coveredToDay).toBe(d("2026-11-08")); // through the weekend; 9 Nov's file isn't stored yet
@@ -170,8 +174,9 @@ describe("the API in end-of-day mode", () => {
     writeCashDay(t.db, d("2026-11-09"), [row("SBIN", 520, 530)], clock.now);
     applyCashBhav(t.db, d("2026-11-09"), [row("SBIN", 520, 530)], t.hub.log);
     expect(readBars(t.db, "SBIN", "1d", d("2026-11-09"), d("2026-11-10"))).toHaveLength(1);
-    // `hub data nse-history` later asks NSE for 23 Oct (a holiday, say): the next request reaches 22 Oct.
+    // `hub data nse-history` later asks NSE for 23 Oct (a holiday, say), and derives the factors again: the next request reaches 22 Oct.
     markDay(t.db, "cash_bhav", d("2026-10-23"), "holiday", 0, 0);
+    expect(rederiveAll(t.db, { endOfDay: true, now: clock.now }).changed).toEqual([]);
     const answer = await get("/v1/candles?symbol=SBIN&tf=1d&from=2026-10-22&to=2026-11-09");
     expect(answer.body.complete).toBe(true);
     expect(answer.body.candles.map((bar: { c: number }) => bar.c)).toEqual([495, 500, 505, 510, 500, 495, 500, 505, 510, 520, 530]);
@@ -216,12 +221,13 @@ describe("queueEndOfDayHistory", () => {
     t = makeHub();
     expect(queueEndOfDayHistory(t.db, 0, now)).toBeNull();
     const job = queueEndOfDayHistory(t.db, 1, now)!;
-    expect(job).toMatchObject({ kind: "nse_history", params: { from: "2025-11-17", to: "2026-11-17", datasets: ["cash_bhav", "fo_bhav", "index_close"] } });
+    expect(job).toMatchObject({ kind: "nse_history", params: { from: "2025-11-17", to: "2026-11-17", datasets: ["cash_bhav", "fo_bhav", "pr", "index_close"] } });
     expect(queueEndOfDayHistory(t.db, 1, now)).toBeNull(); // still open
     updateJob(t.db, job.id, { state: "done" }, now);
     for (let day = d("2025-11-17"); day <= d("2026-11-17"); day += DAY_MS) {
       markDay(t.db, "cash_bhav", day, "holiday", 0, now);
       markDay(t.db, "fo_bhav", day, "holiday", 0, now);
+      markDay(t.db, "pr", day, "holiday", 0, now);
       markDay(t.db, "index_close", day, "holiday", 0, now);
     }
     expect(queueEndOfDayHistory(t.db, 1, now)).toBeNull();
