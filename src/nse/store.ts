@@ -407,18 +407,30 @@ export interface DatasetRun {
   lastSuccessAt: number | null;
   lastError: string | null;
   info: Record<string, unknown> | null;
+  /** Attempts that failed in a row (0 after a success). */
+  failures: number;
+  /** When the current run of failures began (null while the last attempt succeeded). */
+  failingSince: number | null;
 }
 
 export function recordRun(db: Db, name: DatasetName, outcome: { at: number; ok: boolean; error?: string | null; info?: Record<string, unknown> }) {
   db.prepare(
-    `insert into datasets (name, last_attempt_at, last_success_at, last_error, info) values (@name, @at, @success, @error, @info)
+    `insert into datasets (name, last_attempt_at, last_success_at, last_error, info, failures, failing_since)
+     values (@name, @at, @success, @error, @info, @failed, case when @failed = 1 then @at end)
      on conflict(name) do update set last_attempt_at = excluded.last_attempt_at,
        last_success_at = coalesce(excluded.last_success_at, datasets.last_success_at),
-       last_error = excluded.last_error, info = coalesce(excluded.info, datasets.info)`,
-  ).run({ name, at: outcome.at, success: outcome.ok ? outcome.at : null, error: outcome.ok ? null : (outcome.error ?? "failed"), info: outcome.info ? JSON.stringify(outcome.info) : null });
+       last_error = excluded.last_error, info = coalesce(excluded.info, datasets.info),
+       failures = case when @failed = 1 then datasets.failures + 1 else 0 end,
+       failing_since = case when @failed = 1 then coalesce(datasets.failing_since, @at) end`,
+  ).run({ name, at: outcome.at, success: outcome.ok ? outcome.at : null, error: outcome.ok ? null : (outcome.error ?? "failed"), info: outcome.info ? JSON.stringify(outcome.info) : null, failed: outcome.ok ? 0 : 1 });
 }
 
 export function readRuns(db: Db): Map<DatasetName, DatasetRun> {
-  const rows = db.prepare("select * from datasets").all() as Array<{ name: DatasetName; last_attempt_at: number | null; last_success_at: number | null; last_error: string | null; info: string | null }>;
-  return new Map(rows.map((row) => [row.name, { name: row.name, lastAttemptAt: row.last_attempt_at, lastSuccessAt: row.last_success_at, lastError: row.last_error, info: row.info ? (JSON.parse(row.info) as Record<string, unknown>) : null }]));
+  const rows = db.prepare("select * from datasets").all() as Array<{ name: DatasetName; last_attempt_at: number | null; last_success_at: number | null; last_error: string | null; info: string | null; failures: number; failing_since: number | null }>;
+  return new Map(
+    rows.map((row) => [
+      row.name,
+      { name: row.name, lastAttemptAt: row.last_attempt_at, lastSuccessAt: row.last_success_at, lastError: row.last_error, info: row.info ? (JSON.parse(row.info) as Record<string, unknown>) : null, failures: row.failures, failingSince: row.failing_since },
+    ]),
+  );
 }

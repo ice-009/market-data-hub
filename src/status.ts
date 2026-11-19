@@ -7,6 +7,7 @@ import { candleStats } from "./history/store.js";
 import type { Hub } from "./hub.js";
 import { listJobs } from "./jobs/backfill.js";
 import { countResults, isinStats, lastOkDay, latestBan, readRuns, storedDays, unmappedIndexNames, type DayDataset } from "./nse/store.js";
+import { qualitySummary } from "./quality/summary.js";
 import { isoDay, istParts } from "./time.js";
 
 // What /v1/status and `hub data status` report: data freshness per dataset,
@@ -93,3 +94,6 @@ export function dataMode(hub: Pick<Hub, "mode">) {
 }
 
 export const recentJobs = (db: Db) => listJobs(db, 5).map((job) => ({ id: job.id, kind: job.kind, params: job.params, state: job.state, done: job.done, total: job.total, failed: job.failed, message: job.message, resumeAfter: job.resumeAfter, updatedAt: job.updatedAt }));
+
+/** The data-quality checks' state and the last month's open findings (`quality` in /v1/status). */
+export const dataQuality = (db: Db, now = Date.now()) => qualitySummary(db, now);

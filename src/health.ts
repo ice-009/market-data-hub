@@ -4,7 +4,8 @@ import { gb, hubVolumes, type Volume } from "./disk.js";
 import type { Hub } from "./hub.js";
 import type { FeedStatus } from "./live/types.js";
 import { WEEKEND_SESSIONS } from "./nse/datasets.js";
-import { checkedDays, lastOkDay, readRuns, type DayDataset, type DayStatus } from "./nse/store.js";
+import { checkedDays, lastOkDay, readRuns, type DatasetName, type DayDataset, type DayStatus } from "./nse/store.js";
+import { HEALTH_FINDING_DAYS, recentProblems } from "./quality/summary.js";
 import { DAY_MS, isMarketOpen, isoDay, istDayStart, istParts, isWeekday } from "./time.js";
 
 // Is the hub healthy? `healthy`, `problems` and `warnings` at the top of
@@ -17,6 +18,10 @@ import { DAY_MS, isMarketOpen, isoDay, istDayStart, istParts, isWeekday } from "
 export const NSE_DUE_MIN = 20 * 60;
 /** Lots and the ban list are refreshed daily; older than this is stale. */
 export const DAILY_STALE_MS = 4 * DAY_MS;
+/** A dataset whose last this many refresh attempts failed is a warning (market-data-hub#14)… */
+export const FAILING_WARN_ATTEMPTS = 3;
+/** …and a problem once it has been failing this long. */
+export const FAILING_PROBLEM_MS = DAY_MS;
 /** With HUB_BACKUP_DIR set, the newest backup should be younger than this. */
 export const BACKUP_STALE_MS = 2 * DAY_MS;
 
@@ -56,6 +61,10 @@ export interface HealthInput {
   backup: { lastAt: number | null } | null;
   /** Free space where the database and backups live; `warnBytes` HUB_DISK_WARN_GB, `minBytes` HUB_DISK_MIN_GB. */
   disk: { volumes: Volume[]; warnBytes: number; minBytes: number };
+  /** Datasets whose refreshes are failing: attempts failed in a row, since when, the last error. */
+  failing?: Array<{ name: DatasetName; failures: number; failingSince: number | null; lastError: string | null }>;
+  /** Open data-quality problems about the last HEALTH_FINDING_DAYS days' data (src/quality), newest first. */
+  quality?: { problems: Array<{ message: string }> };
 }
 
 export interface Health {
@@ -66,6 +75,7 @@ export interface Health {
 
 const LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip (results calendar)", index_close: "Index file" };
 const REFRESHED_LABEL = { lots: "Lot sizes", fo_ban: "F&O ban list" } as const;
+const RUN_LABEL: Record<DatasetName, string> = { ...LABEL, ...REFRESHED_LABEL, symbol_changes: "Ticker renames (symbolchange.csv)" };
 const age = (ms: number) => (ms >= 2 * DAY_MS ? `${Math.floor(ms / DAY_MS)} days` : `${Math.max(1, Math.round(ms / 3_600_000))} hours`);
 
 /** Problems and warnings from the hub's state. Pure. */
@@ -99,6 +109,17 @@ export function assessHealth(input: HealthInput): Health {
     if (at === null) problems.push(`${REFRESHED_LABEL[name]}: never fetched.`);
     else if (now - at > DAILY_STALE_MS) problems.push(`${REFRESHED_LABEL[name]}: last fetched ${age(now - at)} ago.`);
   }
+
+  // A refresh that keeps failing, before (or while) its data goes stale.
+  for (const run of input.failing ?? []) {
+    if (run.failures < FAILING_WARN_ATTEMPTS || !(run.name in RUN_LABEL)) continue;
+    const text = `${RUN_LABEL[run.name]}: the last ${run.failures} refresh attempts failed${run.failingSince === null ? "" : ` (failing for ${age(now - run.failingSince)})`}; last error: ${run.lastError ?? "unknown"}`;
+    if (run.failingSince !== null && now - run.failingSince >= FAILING_PROBLEM_MS) problems.push(text);
+    else warnings.push(text);
+  }
+
+  const quality = input.quality?.problems ?? [];
+  if (quality.length) warnings.push(`Data quality: ${quality.length} problem${quality.length === 1 ? "" : "s"} in the last ${HEALTH_FINDING_DAYS} days' data (see /v1/quality). ${quality[0].message}`);
 
   if (!input.jobsEnabled) warnings.push("Background jobs are off (HUB_JOBS=off): NSE files aren't refreshed and nightly backups don't run.");
 
@@ -170,5 +191,7 @@ export function hubHealth(hub: Pick<Hub, "db" | "config" | "owner" | "auth" | "g
     live: feed ? { enabled: live.enabled, running: live.running, feed } : { enabled: false, running: false, feed: { mode: "idle", socket: "disabled" } },
     backup: hub.config.backupDir ? { lastAt: listBackups(hub.config.backupDir)[0]?.at ?? null } : null,
     disk: { volumes: hubVolumes(hub.config.dataDir, hub.config.backupDir), warnBytes: hub.config.diskWarnBytes, minBytes: hub.config.diskMinBytes },
+    failing: [...runs.values()].filter((run) => run.failures > 0).map((run) => ({ name: run.name, failures: run.failures, failingSince: run.failingSince, lastError: run.lastError })),
+    quality: { problems: recentProblems(db, now) },
   });
 }

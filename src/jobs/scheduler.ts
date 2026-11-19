@@ -6,7 +6,8 @@ import { syncIndexSeries } from "../history/fromIndices.js";
 import type { Logger } from "../log.js";
 import { recentDays, refreshBan, refreshLots, refreshSymbolChanges, syncDays, type NseContext } from "../nse/datasets.js";
 import { latestBan, readRuns, type DatasetName, type DatasetRun } from "../nse/store.js";
-import { DAY_MS, MINUTE_MS, istDayStart, istParts, isWeekday } from "../time.js";
+import { logFindings, runQuality, type QualityHooks } from "../quality/run.js";
+import { DAY_MS, MINUTE_MS, isMarketOpen, istDayStart, istParts, isWeekday } from "../time.js";
 import { nextRunnableJob, recoverJobs, runBackfill, type BackfillDeps } from "./backfill.js";
 import { runNseHistory } from "./nseHistory.js";
 
@@ -25,6 +26,11 @@ import { runNseHistory } from "./nseHistory.js";
 //   - queued jobs, one at a time: broker backfills (`hub data backfill`) and
 //     NSE history downloads (`hub data nse-history`).
 //   - a nightly database backup when HUB_BACKUP_DIR is set (src/backup.ts).
+//   - the data-quality checks (src/quality/run.ts) every minute, and right
+//     after an evening import: each round checks what changed (new days from
+//     the evening run or an archive download) within QUALITY_BUDGET_MS
+//     (QUALITY_MARKET_BUDGET_MS in market hours, so live prices aren't held up),
+//     and logs what it finds for the first time.
 // Every attempt is spaced at least RETRY_MS from the last one per dataset, so a
 // file NSE hasn't published yet costs one request every half hour.
 
@@ -38,6 +44,9 @@ export const BACKUP_RETRY_MS = 60 * MINUTE_MS;
 /** The evening window for once-a-day refreshes (minutes after IST midnight). */
 export const EVENING_FROM_MIN = 18 * 60 + 30;
 export const EVENING_TO_MIN = 23 * 60 + 30;
+/** Data-quality work per scheduler round (ms; better-sqlite3 blocks while it runs), and in market hours. */
+export const QUALITY_BUDGET_MS = 1500;
+export const QUALITY_MARKET_BUDGET_MS = 250;
 /** The ban list for the next session appears in the evening; it's worth asking for from here on. */
 const BAN_NEXT_DAY_FROM_MIN = 18 * 60;
 
@@ -94,6 +103,8 @@ export interface SchedulerDeps {
   log: Logger;
   /** Nightly backups; absent when HUB_BACKUP_DIR isn't set. `minFreeBytes`: HUB_DISK_MIN_GB. */
   backup?: { db: Db; dir: string; keep: number; minFreeBytes: number; free?: (dir: string) => number | null };
+  /** Corporate actions and price adjustments for the data-quality checks (none yet: market-data-hub#20). */
+  quality?: QualityHooks;
 }
 
 export class Scheduler {
@@ -121,7 +132,20 @@ export class Scheduler {
 
   /** One round: start NSE refreshes and a queued job if due (each runs in the background). */
   async tick() {
+    this.qualityRound();
     await Promise.all([this.nseRound(), this.jobRound(), this.backupRound()]);
+  }
+
+  /** Data-quality checks for whatever changed since the last round, within the round's budget. Never throws. */
+  qualityRound() {
+    if (this.stopping) return;
+    const { db, clock } = this.deps.nse;
+    try {
+      const result = runQuality(db, { clock, budgetMs: isMarketOpen(clock()) ? QUALITY_MARKET_BUDGET_MS : QUALITY_BUDGET_MS, hooks: this.deps.quality });
+      logFindings(this.deps.log, result.fresh);
+    } catch (error) {
+      this.deps.log.error("data-quality checks failed", { error });
+    }
   }
 
   private async backupRound() {
@@ -171,6 +195,8 @@ export class Scheduler {
         else if (task === "pr") await syncDays(ctx, "pr", pr, () => this.stopping);
         else await refreshSymbolChanges(ctx);
       }
+      // Check the evening's files as soon as they're stored.
+      if (tasks.length) this.qualityRound();
     } catch (error) {
       this.deps.log.error("scheduled NSE refresh failed", { error });
     } finally {
@@ -196,8 +222,10 @@ export class Scheduler {
     if (!job) return;
     this.jobBusy = true;
     try {
-      if (job.kind === "nse_history") await runNseHistory(this.deps.nse, job.id);
-      else await runBackfill(this.deps.backfill, job.id);
+      if (job.kind === "nse_history") {
+        await runNseHistory(this.deps.nse, job.id);
+        this.qualityRound();
+      } else await runBackfill(this.deps.backfill, job.id);
     } catch (error) {
       this.deps.log.error("job failed", { id: job.id, kind: job.kind, error });
     } finally {
