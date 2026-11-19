@@ -129,7 +129,11 @@ describe("deriving factors (pure)", () => {
   it("snaps a gap to a standard ratio only when open and close both say so", () => {
     expect(inferRatio(0.1008, 0.099)).toBe(0.1); // ANGELONE 1:10, 26 Feb 2026
     expect(inferRatio(0.7687, 0.7854)).toBe(0.75); // CUB bonus 1:3, 12 Jun 2026
+    expect(inferRatio(0.27, 0.2704)).toBe(0.25); // MOTILALOFS bonus 3:1, 10 Jun 2024: traded 8% above its new base
+    expect(inferRatio(0.506, 0.6)).toBe(0.5); // COCHINSHIP bonus 1:1, 10 Jan 2024: closed 19% above
+    expect(inferRatio(0.1577, 0.1778)).toBe(1 / 6); // NYKAA bonus 5:1, 10 Nov 2022
     expect(inferRatio(0.85, 0.8)).toBeNull(); // a bad day
+    expect(inferRatio(0.62, 0.6)).toBeNull(); // a worse one: near 2/3, but 2/3 and 3/4 must be close
     expect(inferRatio(0.5, 0.7)).toBeNull(); // opened at half, closed far from it
   });
 

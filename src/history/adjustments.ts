@@ -40,10 +40,10 @@ import { resetSymbol } from "./store.js";
 //                         ex-rights price over the last close.
 //   price_gap         no bc file was read for the week before the ex-date
 //                     (before 2010, or PR zips not downloaded): an opening gap
-//                     within 6% of a standard ratio (STANDARD_RATIOS) with the
-//                     close within 20% of it — a move a price band or a normal
-//                     day doesn't make — is taken for that ratio. Where a bc
-//                     file was read and lists nothing, a gap is just a gap.
+//                     near a standard ratio (STANDARD_RATIOS; inferRatio) — a
+//                     move a price band or a normal day doesn't make — is taken
+//                     for that ratio. Where a bc file was read and lists
+//                     nothing, a gap is just a gap.
 //
 // Renamed tickers (src/reference/renames.ts): a pair is never formed across a
 // rename of its ticker (the ticker may have passed to another company), and the
@@ -61,9 +61,16 @@ export const SPLIT_TOLERANCE = 0.015;
  * day: bonuses 1:1, 2:1, 3:1, 4:1, 1:2, 3:2, 1:3 and face-value splits 2→1,
  * 5→1, 10→1, 5→2, 10→2…, and consolidations 1→2, 1→5, 1→10.
  */
-export const STANDARD_RATIOS: readonly number[] = [1 / 10, 1 / 5, 1 / 4, 1 / 3, 2 / 5, 1 / 2, 2 / 3, 3 / 4, 2, 5, 10];
-const INFER_OPEN = Math.log(1.06);
-const INFER_CLOSE = Math.log(1.2);
+export const STANDARD_RATIOS: readonly number[] = [1 / 10, 1 / 6, 1 / 5, 1 / 4, 1 / 3, 2 / 5, 1 / 2, 2 / 3, 3 / 4, 2, 5, 10];
+/**
+ * How near the open and the close must be to the ratio. A halving or more (or a
+ * doubling) is no market move, so the stock may trade well away from its new
+ * base that day (MOTILALOFS opened 8% above a 3:1 bonus's quarter, 10 Jun 2024;
+ * COCHINSHIP closed 19% above a 1:1 bonus's half, 10 Jan 2024); 2/3 and 3/4 are
+ * moves a bad day can make, so they must be close.
+ */
+const WIDE = { open: Math.log(1.12), close: Math.log(1.25) };
+const NARROW = { open: Math.log(1.06), close: Math.log(1.2) };
 const INFER_MAX_GAP_MS = 15 * DAY_MS;
 const CONFIRM = Math.log(1.25);
 const SMALL_FACTOR = Math.log(1.15);
@@ -149,8 +156,12 @@ function rightsFactor(actions: readonly StoredCorporateAction[], close: number):
 
 /** The standard ratio a gap is, or null. Pure. */
 export function inferRatio(openGap: number, closeGap: number): number | null {
-  for (const ratio of STANDARD_RATIOS) if (Math.abs(Math.log(openGap / ratio)) < INFER_OPEN && Math.abs(Math.log(closeGap / ratio)) < INFER_CLOSE) return ratio;
-  return null;
+  if (!(openGap > 0) || !(closeGap > 0)) return null;
+  // The nearest ratio to the open, then whether open and close are near enough.
+  let ratio = STANDARD_RATIOS[0];
+  for (const candidate of STANDARD_RATIOS) if (Math.abs(Math.log(openGap / candidate)) < Math.abs(Math.log(openGap / ratio))) ratio = candidate;
+  const window = ratio <= 0.5 || ratio >= 2 ? WIDE : NARROW;
+  return Math.abs(Math.log(openGap / ratio)) < window.open && Math.abs(Math.log(closeGap / ratio)) < window.close ? ratio : null;
 }
 
 export interface PairContext {
@@ -176,7 +187,8 @@ export function decideFactor(prev: { day: number; c: number }, row: { symbol: st
   };
   const nse = row.prev_close > 0 ? row.prev_close / prev.c : 1;
   // An adjusted PREV_CLOSE the opening price doesn't bear out is a slip in the file (seen: VERTOZ, 11 Jul 2025, a 1→10 consolidation printed 9.81 for 9.17).
-  if (Math.abs(nse - 1) > SPLIT_TOLERANCE && confirmed(nse)) return { ...base, factor: nse, source: "prev_close" };
+  // Only between sessions close together: after weeks without a row (FORCEMOT, Oct 2023 – Feb 2024) PREV_CLOSE is a close the store doesn't have.
+  if (Math.abs(nse - 1) > SPLIT_TOLERANCE && confirmed(nse) && row.day - prev.day <= INFER_MAX_GAP_MS) return { ...base, factor: nse, source: "prev_close" };
   const ratio = actionRatio(context.actions);
   if (ratio !== null) return confirmed(ratio) ? { ...base, factor: ratio, source: "corporate_action" } : null;
   if (context.actions.some((action) => action.kinds.includes("demerger")) && gap < 1 - SPLIT_TOLERANCE) return { ...base, factor: gap, source: "corporate_action" };

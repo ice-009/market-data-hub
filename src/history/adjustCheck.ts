@@ -121,7 +121,7 @@ export function compareSeries(symbol: string, joined: readonly Joined[], factors
     // A bar off on one side and back the next session: one bad bar, not an action.
     const after = steps[i + 1];
     if (after && Math.abs(after.error) > tol && Math.abs(step.error + after.error) <= tol && Math.abs(Math.log(step.derived)) <= tol && Math.abs(Math.log(after.derived)) <= tol) {
-      disagreements.push({ ...base, reason: "data_error", note: `the ${isoDay(step.next.day)} close differs by ${(100 * (Math.exp(-step.error) - 1)).toFixed(2)}% between NSE (${step.next.raw}) and the broker (${step.next.broker}) and agrees again the next session` });
+      disagreements.push({ ...base, reason: "data_error", note: `relative to the sessions either side, the ${isoDay(step.next.day)} bar is ${(100 * (Math.exp(step.error) - 1)).toFixed(2)}% off between the broker and NSE, and the next step puts it back: one bar differs` });
       i += 1;
       continue;
     }
