@@ -195,7 +195,8 @@ Nov 2023; Budget days 28 Feb 2015 and 1 Feb 2020; special sessions 20 Jan, 2 Mar
 2. **Adjustment:** split/bonus factors from the bhavcopy itself — NSE's `PREVCLOSE` on an ex-date
    is the previous close adjusted, so `prev_close(d) / close(d−1)` is the day's factor (1 on normal
    days) — checked against the broker's adjusted 5 years where they overlap; renamed tickers joined
-   with NSE's `symbolchange.csv` (and ISINs, in files from 2011 on). Index history (NIFTY,
+   with NSE's `symbolchange.csv` (and ISINs, in files from 2011 on) ✅ (`src/reference/renames.ts`,
+   `/v1/symbols`, `hub data symbols`). Index history (NIFTY,
    sectors) needs another source: it isn't in these files.
 3. **Serving:** `/v1/candles?tf=1d` with `from` before the broker's window answers from the
    adjusted NSE series; Tradex's backtests and evidence check use the full range.

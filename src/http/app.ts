@@ -11,6 +11,7 @@ import { errorBody, type HubEnv } from "./common.js";
 import { candleRoutes } from "./routes/candles.js";
 import { liveRoutes, liveStatus, type LiveDeps } from "./routes/live.js";
 import { referenceRoutes } from "./routes/reference.js";
+import { symbolRoutes } from "./routes/symbols.js";
 
 export { errorBody, requireScope, type HubEnv } from "./common.js";
 
@@ -80,6 +81,7 @@ export function createApp(deps: AppDeps) {
 
   candleRoutes(app, deps.hub);
   referenceRoutes(app, deps.hub);
+  symbolRoutes(app, deps.hub);
   // The live routes share one fan-out per hub (keyed on hub.live.deps); the hub closes their streams at shutdown.
   deps.hub.live.attach(liveRoutes(app, live));
 

@@ -17,6 +17,8 @@ export interface CashBhavRow {
   volume: number;
   /** Delivered quantity as % of traded (null when NSE prints "-"). */
   deliveryPct: number | null;
+  /** The security's ISIN, where the file has one (NSE's old-format files from 2011); see ./cmBhav.ts. */
+  isin?: string;
 }
 
 export interface CashBhavParse {

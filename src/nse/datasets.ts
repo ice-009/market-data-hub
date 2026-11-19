@@ -11,7 +11,8 @@ import { mtoKey, parseMto } from "./parsers/mto.js";
 import { parseFnoBan } from "./parsers/ban.js";
 import { parseNseLots } from "./parsers/lots.js";
 import { boardMeetingsFileDay, parseBoardMeetings, resultsEvents } from "./parsers/results.js";
-import { dayStatuses, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeFoDay, writeLots, writePrDay, type DayDataset, type DayStatus } from "./store.js";
+import { parseSymbolChanges } from "./parsers/symbolChange.js";
+import { dayStatuses, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeFoDay, writeIsins, writeLots, writePrDay, writeSymbolChanges, type DayDataset, type DayStatus } from "./store.js";
 import { ZipError, isZip, unzipFile, unzipSingle } from "./unzip.js";
 
 // NSE's daily files, downloaded from its free public archive — no broker calls:
@@ -21,14 +22,16 @@ import { ZipError, isZip, unzipFile, unzipSingle } from "./unzip.js";
 //   fo_ban     fo_secban.csv
 //   pr         PRDDMMYY.zip, the daily "PR" bundle (since 2010): its board-meetings file
 //              bmDDMMYYYY.txt fills the results calendar
+//   symbol_changes  content/equities/symbolchange.csv: every ticker rename since 1999
 // Nothing comes from www.nseindia.com: its JSON API (the event calendar the
 // results used to come from) hangs behind bot protection since Nov 2026.
 // Days up to 5 Jul 2024 come from the archive's older formats (src/jobs/nseHistory.ts
 // downloads them back to 1994): the cash bhavcopy cmDDMONYYYYbhav.csv.zip plus
 // the delivery file MTO_DDMMYYYY.DAT, and the F&O bhavcopy foDDMONYYYYbhav.csv.zip.
-// NSE's archive has been seen to serve another day's file for a holiday URL, so
-// the trade date written inside a file (for the PR zip, in its board-meetings
-// file's name) must equal the date asked for.
+// The old cash files also carry each security's ISIN (from 2011), recorded in
+// isin_symbols to join renamed tickers. NSE's archive has been seen to serve
+// another day's file for a holiday URL, so the trade date written inside a file
+// (for the PR zip, in its board-meetings file's name) must equal the date asked for.
 
 export interface NseContext {
   db: Db;
@@ -59,6 +62,14 @@ export const ARCHIVE_FROM: Record<DayDataset, number> = { cash_bhav: Date.UTC(19
 
 /** Delivery positions (MTO files) start in 2002 (none in 2001 when checked); earlier days have no delivery %. */
 export const MTO_FROM = Date.UTC(2002, 0, 1);
+
+/**
+ * The old cash bhavcopy has an ISIN column from 2011 (cm04JAN2010 has none,
+ * cm28JUN2011 has it). Stored days from here to LEGACY_LAST_DAY whose ISINs
+ * weren't read (downloaded before the hub kept them) are read again by
+ * `hub data nse-history`; earlier days aren't asked for.
+ */
+export const ISIN_FROM = Date.UTC(2011, 0, 1);
 
 /** Stop a run after this many days in a row fail hard (403/429/timeouts after retries). */
 export const MAX_CONSECUTIVE_FAILURES = 3;
@@ -159,6 +170,7 @@ export function readCashFile(ctx: NseContext, day: number, body: Buffer, options
     badRows: parsed.badRows,
     store: () => {
       writeCashDay(ctx.db, day, rows, ctx.clock());
+      if (isLegacyDay(day)) writeIsins(ctx.db, day, rows);
       if (extend) applyCashBhav(ctx.db, day, rows, ctx.log);
       return rows.length;
     },
@@ -256,6 +268,28 @@ export async function importDay(ctx: NseContext, dataset: DayDataset, day: numbe
   return "ok";
 }
 
+/**
+ * Read only the ISINs of a stored old-format cash day (one that was downloaded
+ * before the hub kept them): the prices and delivery % stored are left as they
+ * are, and nse_days isn't touched. Throws NseError when NSE won't serve it.
+ */
+export async function importIsins(ctx: NseContext, day: number): Promise<DayOutcome> {
+  if (!isLegacyDay(day)) throw new Error(`${isoDay(day)} is in NSE's current format, which has no ISIN column`);
+  const response = await ctx.nse.get(cashBhavUrl(ctx.urls.archiveUrl, day));
+  if (response.status === 404) {
+    writeIsins(ctx.db, day, []);
+    return "holiday";
+  }
+  const parsed = parseCmBhav(unzipped(response.body));
+  const wrong = checkDate(parsed.tradeDate, parsed.mixedDates, day);
+  if (wrong) {
+    ctx.log.warn("NSE served a file for another date; its ISINs weren't read", { day: isoDay(day), note: wrong });
+    return "mismatch";
+  }
+  writeIsins(ctx.db, day, parsed.rows);
+  return "ok";
+}
+
 export interface SyncResult {
   stored: number;
   failed: number;
@@ -270,6 +304,8 @@ export interface SyncOptions extends ImportOptions {
    * or mask the evening run.
    */
   record?: boolean;
+  /** Read only the ISINs of stored old-format cash days (importIsins). */
+  isinsOnly?: boolean;
 }
 
 /**
@@ -277,7 +313,7 @@ export interface SyncOptions extends ImportOptions {
  * order). Stops after MAX_CONSECUTIVE_FAILURES hard failures in a row.
  */
 export async function syncDays(ctx: NseContext, dataset: DayDataset, days: number[], shouldStop: () => boolean = () => false, onDay?: (day: number, outcome: DayOutcome | "failed") => void, options: SyncOptions = {}): Promise<SyncResult> {
-  const { record = true, ...importOptions } = options;
+  const { record = true, isinsOnly = false, ...importOptions } = options;
   const result: SyncResult = { stored: 0, failed: 0, stopped: null };
   let consecutive = 0;
   let lastError = "";
@@ -287,7 +323,7 @@ export async function syncDays(ctx: NseContext, dataset: DayDataset, days: numbe
       break;
     }
     try {
-      const outcome = await importDay(ctx, dataset, day, importOptions);
+      const outcome = isinsOnly ? await importIsins(ctx, day) : await importDay(ctx, dataset, day, importOptions);
       if (outcome === "ok") result.stored += 1;
       consecutive = 0;
       onDay?.(day, outcome);
@@ -322,7 +358,7 @@ export function recentDays(ctx: NseContext, dataset: DayDataset, lookbackDays: n
   return daysToCheck({ today, minutes, from, publishMin: PUBLISH_MIN[dataset], checked, recheck: ["mismatch"] }).filter((day) => day >= recheckFrom || !checked.has(day));
 }
 
-async function guarded(ctx: NseContext, name: "lots" | "fo_ban", run: () => Promise<Record<string, unknown>>): Promise<boolean> {
+async function guarded(ctx: NseContext, name: "lots" | "fo_ban" | "symbol_changes", run: () => Promise<Record<string, unknown>>): Promise<boolean> {
   try {
     const info = await run();
     recordRun(ctx.db, name, { at: ctx.clock(), ok: true, info });
@@ -364,5 +400,21 @@ export function refreshBan(ctx: NseContext): Promise<boolean> {
     if (list.tradeDate === null) throw new Error("ban list has no trade date (format change?)");
     writeBan(ctx.db, list.tradeDate, list.symbols, ctx.clock());
     return { tradeDate: isoDay(list.tradeDate), count: list.symbols.length };
+  });
+}
+
+/** Fewer rows than this means a cut-off or changed file (NSE's list had 1,080 in Nov 2026): keep the stored one. */
+export const MIN_SYMBOL_CHANGES = 100;
+
+/** NSE's ticker renames (symbolchange.csv), replacing the stored list. */
+export function refreshSymbolChanges(ctx: NseContext): Promise<boolean> {
+  return guarded(ctx, "symbol_changes", async () => {
+    const response = await ctx.nse.get(`${ctx.urls.archiveUrl}/content/equities/symbolchange.csv`, { Accept: "text/csv,*/*" });
+    if (response.status !== 200) throw new Error(`NSE symbol changes ${response.status}`);
+    const parsed = parseSymbolChanges(response.body.toString("utf8"));
+    if (parsed.rows.length < MIN_SYMBOL_CHANGES) throw new Error(`only ${parsed.rows.length} symbol changes found (format change?)`);
+    if (parsed.badRows) ctx.log.warn("some symbol changes couldn't be read", { badRows: parsed.badRows });
+    writeSymbolChanges(ctx.db, parsed.rows);
+    return { count: parsed.rows.length };
   });
 }

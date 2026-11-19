@@ -8,7 +8,7 @@ date** (so `new Date(t).toISOString().slice(0, 10)` is the trade date); intraday
 instant they start. Query dates are `YYYY-MM-DD` (IST) or epoch ms. For intraday data `from` means
 the start of that IST day and `to` its end.
 
-**Scopes.** `history`: candles, universes, lots, results calendar, regime. `fo`: everything under
+**Scopes.** `history`: candles, universes, lots, results calendar, regime, ticker renames. `fo`: everything under
 `/v1/fo`. `live`: quotes and the price stream. `admin` holds every scope (and alone may pin live
 symbols).
 
@@ -26,6 +26,8 @@ symbols).
 | `GET /v1/lots[?symbol]` | history | NSE `fo_mktlots.csv` (fallback: F&O bhavcopy lots) |
 | `GET /v1/results-calendar?from&to[&symbol]` | history | board meetings from NSE's daily PR zip |
 | `GET /v1/market/regime[?universe]` | history | stored daily candles + cash bhavcopy |
+| `GET /v1/symbols/history?symbol[&date]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
+| `GET /v1/symbols/changes[?symbol][&from&to]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
 | `GET /v1/quotes?symbols` | live | live feed; broker quotes; last stored quote |
 | `GET /v1/stream?symbols[&since]` | live | Server-Sent Events: stored snapshot + minute-bar replay, then live ticks |
 | `POST` / `DELETE /v1/live/pin` | admin | the persistent live symbol set |
@@ -293,6 +295,70 @@ cash bhavcopy closes and stored daily candles). `healthy` / `caution` / `risk-of
 
 `counted` is how many members had 50 sessions of stored closes; breadth is `null` until some do.
 
+## Ticker renames: /v1/symbols
+
+NSE renames a company's ticker now and then (TELCO → TATAMOTORS on 26 Dec 2003 → TMPV on 24 Oct
+2025; INFOSYSTCH → INFY on 29 Jun 2011), and its files are written under whatever the ticker was
+that day. The hub joins the names from two sources:
+
+- **NSE's `content/equities/symbolchange.csv`** (on the archive): every rename since 1999 with its
+  effective date — the first session under the new ticker (INFOSYSTCH's last bhavcopy row is 28 Jun
+  2011, INFY's first 29 Jun). Downloaded on start and once each evening, replacing the stored list
+  (a file with under 100 rows is refused and the stored list kept).
+- **ISINs** in NSE's old-format cash bhavcopy (the column exists from 2011 to 5 Jul 2024): one ISIN
+  traded under ticker A, then, after A's last day, under B, is a rename too. These add renames NSE's
+  list lacks; where the list has the same change (the same pair, or the same old or new ticker within
+  31 days) NSE's row wins. `hub data nse-history` records ISINs as it stores those days, and reads
+  them once from days stored before the hub kept them.
+
+A **listing** is one company's names, oldest first. Lookups are **point in time**: `symbol` is a
+ticker as it was on `date` (default today), so `INFOSYSTCH` on 2005-01-03 and `INFY` today are the
+same listing, and a ticker renamed away and later taken by another company resolves by date.
+Renames chained on one day (GBNOV23 → SBNOV23 → SGBNOV23) count as one.
+
+### GET /v1/symbols/history?symbol=INFY[&date=YYYY-MM-DD]
+
+```json
+GET /v1/symbols/history?symbol=INFOSYSTCH&date=2005-01-03
+{ "symbol": "INFOSYSTCH", "date": "2005-01-03", "match": "exact", "onDate": "INFOSYSTCH", "current": "INFY",
+  "names": [
+    { "symbol": "INFOSYSTCH", "from": null, "to": "2011-06-28", "stored": { "first": "2011-06-28", "last": "2011-06-28", "sessions": 1 } },
+    { "symbol": "INFY", "from": "2011-06-29", "to": null, "stored": { "first": "2011-06-29", "last": "2011-06-29", "sessions": 1 } } ],
+  "changes": [ { "date": "2011-06-29", "day": 1309305600000, "oldSymbol": "INFOSYSTCH", "newSymbol": "INFY",
+      "company": "Infosys Limited", "source": "nse", "isin": null, "continuous": true } ],
+  "fetchedAt": 1795010799626 }
+```
+
+(From NSE's real `symbolchange.csv` and the 28/29 Jun 2011 bhavcopies.)
+
+- `names[]`: each ticker with the days it was in use, inclusive (`from: null` — since before any
+  record; `to: null` — still in use), and `stored`: the cash-bhavcopy sessions stored under it in that
+  span (`null` when none). `current` is the last name; `onDate` the name on `date`.
+- `match`: `exact` — the listing had `symbol` on `date`; `later` — nobody had it on `date` (and no row
+  is stored under it then), so this is the listing that took it later (`INFY` asked for 2005);
+  `earlier` — it had been renamed away by `date` and nothing has traded under it since, so this is
+  the listing that last had it (`INFOSYSTCH` asked for today). A ticker with no renames is its own
+  listing (`names` is one entry with `from` and `to` null).
+- `changes[i]` took `names[i]` to `names[i + 1]`; `source` is `nse` or `isin` (with the ISIN).
+  `continuous`: the old ticker's last stored session and the new one's first are consecutive stored
+  sessions — the history runs on across the rename; `false` shows a gap (a session missing on both
+  sides: a suspension, or NSE's effective date off from the files); `null` when either side has
+  nothing stored.
+- `503 not_ready` until NSE's list has been downloaded once; `400` for a missing or malformed
+  `symbol` (old tickers may contain `+` and `.`) or a bad `date`.
+
+### GET /v1/symbols/changes[?symbol=…][&from=…&to=…]
+
+Every known rename, oldest first, optionally those with an effective date in `from`..`to` and those
+whose old or new ticker is `symbol`. `from`/`to` are `null` in the answer when not given.
+
+```json
+GET /v1/symbols/changes?symbol=TMPV
+{ "from": null, "to": null, "fetchedAt": 1795010799626, "count": 1, "changes": [
+    { "date": "2025-10-24", "day": 1761264000000, "oldSymbol": "TATAMOTORS", "newSymbol": "TMPV",
+      "company": "Tata Motors Passenger Vehicles Limited", "source": "nse", "isin": null } ] }
+```
+
 ## Live prices
 
 One broker socket feeds every client. Symbols are hub tickers as for candles (`SBIN`, `M%26M`,
@@ -493,6 +559,7 @@ the last tick and heartbeat the previous run left, which is where restart recove
     "foBhav": { "lastSession": "2026-11-05", "firstSession": "2001-11-09", "sessions": …, … }, "lots": { "count": 224, "source": "nse_mktlots", … },
     "foBan": { "tradeDate": "2026-11-06", … },
     "resultsCalendar": { "upcoming": 41, "lastSession": "2026-11-05", "firstSession": "2026-09-08", "sessions": 42, "lastSuccessAt": …, "lastAttemptAt": …, "lastError": null },
+    "symbolChanges": { "count": 1071, "isins": { "pairs": 1484, "days": 2 }, "lastSuccessAt": …, … },
     "candles": [ { "tf": "1d", "series": 2, "candles": 310, "lastSession": "2026-11-06" } ] },
   "disk": { "volumes": [ { "holds": "the database and backups", "freeBytes": 41870000000 } ], "warnBelowBytes": 5000000000, "minFreeBytes": 2000000000,
     "backups": { "count": 7, "bytes": 2650000000, "newestBytes": 380000000 } },
@@ -522,11 +589,12 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
 ## Background jobs (in the server)
 
 - **NSE files**, in the evening IST: cash bhavcopy (after 17:30) and F&O bhavcopy (after 18:00)
-  for any of the last 10 trading days not stored yet — on start that is the catch-up — then lots
-  and the ban list (from 18:00 the next session's) once each evening (and on start when never
-  fetched or over two days old), then the PR zip (after 17:30) for any of the last **60** days not
-  stored yet: its board meetings are the results calendar, and meetings are announced weeks ahead
-  (a new hub reads ~40 zips once, about a minute). Each dataset is retried at most every 30 minutes.
+  for any of the last 10 trading days not stored yet — on start that is the catch-up — then lots,
+  the ban list (from 18:00 the next session's) and NSE's ticker renames (`symbolchange.csv`) once
+  each evening (and on start when never fetched or over two days old), then the PR zip (after 17:30)
+  for any of the last **60** days not stored yet: its board meetings are the results calendar, and
+  meetings are announced weeks ahead (a new hub reads ~40 zips once, about a minute). Each dataset
+  is retried at most every 30 minutes.
   All NSE requests share one client: at most one per 1.1 s, browser headers, back-off on 403/429.
   Everything comes from NSE's archive host (`nsearchives.nseindia.com`); nothing from
   `www.nseindia.com`, whose JSON API hangs behind bot protection.
@@ -549,6 +617,8 @@ npm run hub -- data backfill --tf 15m --years 1 --symbols SBIN,INFY
 npm run hub -- data nse-history                                 # NSE's archive since 1994 (cash), 2001 (F&O), 2010 (PR zip)
 npm run hub -- data nse-history --from 2015-01-01 --only cash
 npm run hub -- data status
+npm run hub -- data symbols                                     # every F&O stock's history across its renames
+npm run hub -- data symbols INFY TMPV [--date 2005-01-03] [--refresh]
 npm run hub -- data cancel <job id>
 npm run hub -- data backup [--to ./backups] [--keep 7]
 npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tradex .cache/screener>] [--dry-run]
@@ -588,7 +658,12 @@ results dates in `/v1/results-calendar`) back to **2010** (2008 and 2009 answer 
 - **Raw prices.** Bhavcopy prices are as traded: a split or bonus shows as a gap. `prev_close` is
   NSE's, adjusted on the ex-date, which is what an adjustment step can be built on. Delisted stocks
   are included (nothing is filtered to today's list). Old tickers stay as NSE wrote them
-  (`INFOSYSTCH` before 2011, `TELCO` before 2004) — `/v1/candles` doesn't serve these rows yet.
+  (`INFOSYSTCH` before 2011, `TELCO` before 2004); `/v1/symbols/history` joins them to today's
+  ticker. `/v1/candles` doesn't serve these rows yet.
+- **ISINs.** Old-format cash days from 2011 carry each security's ISIN, recorded as the day is stored
+  (`isin_symbols`, for renames). Stored days whose ISINs weren't read — downloaded before the hub kept
+  them — have just their cash file read again, once, whenever the cash market is included: about 3,400
+  requests (an hour) for 2011 to 5 Jul 2024. Prices and delivery % already stored are left alone.
 - Every weekend day is asked for in the cash market: NSE held Budget-day, Muhurat and special
   sessions on weekends (e.g. 1 Feb 2020, 12 Nov 2023, 20 Jan 2024). F&O and the PR zip are asked
   for the weekend days the cash market traded.
@@ -604,6 +679,16 @@ results dates in `/v1/results-calendar`) back to **2010** (2008 and 2009 answer 
   `HUB_DISK_MIN_GB` (default 2 GB), and a running job checks before every file and **pauses** below
   it with a message saying so; the server retries every 30 minutes, so it carries on once space is
   freed. Leave room for what it adds ([Disk space](#disk-space)).
+
+### data symbols
+
+Ticker renames from the store (see [/v1/symbols](#ticker-renames-v1symbols)). With tickers, each
+one's listing as of `--date` (default today): its names, the stored cash sessions under each, and
+whether the history runs on across each rename. Without, the same for **every current F&O stock that
+was ever renamed**, with a count of those continuous across every rename, with a gap, and not stored
+on both sides; it exits 1 when any has a gap. `--refresh` downloads NSE's `symbolchange.csv` first
+(when no hub server owns the NSE connection; the server refreshes it each evening). Read-only
+otherwise, so it may run alongside the server.
 
 ### data backup
 
@@ -710,6 +795,9 @@ free space and what the backups take.
 | `lot_sizes` | symbol → lot |
 | `fo_ban` | trade date → symbols |
 | `results_events` | (symbol, meeting date) → company, purpose; from the PR zips' board meetings |
+| `symbol_changes` | NSE's `symbolchange.csv`: (old symbol, effective date) → new symbol, company |
+| `isin_symbols` | (ISIN, symbol) → first and last stored day it traded under that ticker (old-format cash files, 2011–2024) |
+| `isin_days` | old-format cash days whose ISINs were read, with how many |
 | `datasets` | per dataset: last attempt, last success, last error, info |
 | `kv` | small hub state: the broker budget (today's counts, strikes, cooldown), the live heartbeat (`live.heartbeat`: when the last run was known alive) and the gap-repair queue (`live.recovery`) |
 | `jobs` | queued jobs (`backfill`, `nse_history`): params, state, progress, resume time |

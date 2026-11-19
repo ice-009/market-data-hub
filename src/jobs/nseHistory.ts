@@ -1,7 +1,7 @@
 import type { Db } from "../db.js";
 import { shortOfSpace } from "../disk.js";
-import { ARCHIVE_FROM, daysToCheck, syncDays, type DayOutcome, type NseContext } from "../nse/datasets.js";
-import { checkedDays, type DayDataset } from "../nse/store.js";
+import { ARCHIVE_FROM, ISIN_FROM, LEGACY_LAST_DAY, daysToCheck, syncDays, type DayOutcome, type NseContext } from "../nse/datasets.js";
+import { checkedDays, isinDaysRead, type DayDataset } from "../nse/store.js";
 import { DAY_MS, isMarketOpen, isWeekday, isoDay, istParts, parseIsoDay } from "../time.js";
 import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "./backfill.js";
 
@@ -26,6 +26,12 @@ import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "
 // the next day's PREVCLOSE look like a corporate action. F&O and the PR zip are
 // then asked for the weekend days the cash market traded. The whole archive is
 // ~28,000 requests at NSE's pace of one per 1.1 s: eight to nine hours.
+//
+// Old-format cash files carry ISINs from 2011, which join renamed tickers
+// (src/reference/renames.ts). A day downloaded here records them as it's
+// stored; stored days whose ISINs weren't read (downloaded before the hub kept
+// them) have just their cash file read again, once — about 3,400 requests
+// for 2011 to 5 Jul 2024.
 
 export const HISTORY_DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "pr"];
 
@@ -51,10 +57,22 @@ export function historyDays(db: Db, dataset: DayDataset, from: number, to: numbe
   return [...new Set([...daysToCheck(ask), ...weekendSessions])].sort((a, b) => a - b);
 }
 
+/** Stored old-format cash days from..to whose ISINs haven't been read, oldest first. */
+export function isinDays(db: Db, from: number, to: number): number[] {
+  const start = Math.max(from, ISIN_FROM);
+  const end = Math.min(to, LEGACY_LAST_DAY);
+  if (start > end) return [];
+  const read = isinDaysRead(db, start);
+  return [...checkedDays(db, "cash_bhav", start)]
+    .filter(([day, status]) => status === "ok" && day <= end && !read.has(day))
+    .map(([day]) => day)
+    .sort((a, b) => a - b);
+}
+
 export const HISTORY_LABEL: Record<DayDataset, string> = { cash_bhav: "cash", fo_bhav: "F&O", pr: "PR" };
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-const tally = (counts: Record<"ok" | "holiday" | "mismatch", number>) =>
-  `${plural(counts.ok, "session", "sessions")} stored, ${plural(counts.holiday, "day", "days")} without a file${counts.mismatch ? `, ${plural(counts.mismatch, "file", "files")} for another date` : ""}`;
+const tally = (counts: Record<"ok" | "holiday" | "mismatch" | "isins", number>) =>
+  `${plural(counts.ok, "session", "sessions")} stored, ${plural(counts.holiday, "day", "days")} without a file${counts.mismatch ? `, ${plural(counts.mismatch, "file", "files")} for another date` : ""}${counts.isins ? `, ISINs read for ${plural(counts.isins, "stored day", "stored days")}` : ""}`;
 
 /**
  * Run one NSE history job to its end, a pause, or a cancel. Returns the job's
@@ -79,10 +97,11 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
   }
 
   // F&O weekend sessions are found as the cash market's years are fetched, so they aren't in the starting count.
-  const total = datasets.reduce((sum, dataset) => sum + historyDays(ctx.db, dataset, from, to).length, 0);
+  const isins = datasets.includes("cash_bhav");
+  const total = datasets.reduce((sum, dataset) => sum + historyDays(ctx.db, dataset, from, to).length, 0) + (isins ? isinDays(ctx.db, from, to).length : 0);
   let done = 0;
   let failed = 0;
-  const counts: Record<"ok" | "holiday" | "mismatch", number> = { ok: 0, holiday: 0, mismatch: 0 };
+  const counts: Record<"ok" | "holiday" | "mismatch" | "isins", number> = { ok: 0, holiday: 0, mismatch: 0, isins: 0 };
   updateJob(ctx.db, id, { state: "running", total, done: 0, failed: 0, startedAt: job.startedAt ?? now, resumeAfter: null, message: total ? `Asking NSE for ${total} days…` : "Everything is already stored." }, now);
   onProgress?.(getJob(ctx.db, id)!);
 
@@ -102,22 +121,31 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
   };
   let refused: string | null = null;
 
+  const onDay = (label: string, isinsOnly: boolean) => (day: number, outcome: DayOutcome | "failed") => {
+    done += 1;
+    if (outcome === "failed") failed += 1;
+    else if (isinsOnly) counts.isins += outcome === "ok" ? 1 : 0;
+    else if (outcome !== "not_yet") counts[outcome] += 1;
+    updateJob(ctx.db, id, { done, failed, message: `${label} ${isoDay(day)}: ${tally(counts)}${failed ? `, ${failed} failed` : ""}…` }, ctx.clock());
+    onProgress?.(getJob(ctx.db, id)!);
+  };
+
   outer: for (let year = new Date(to).getUTCFullYear(); year >= new Date(from).getUTCFullYear(); year -= 1) {
+    const yearFrom = Math.max(from, Date.UTC(year, 0, 1));
+    const yearTo = Math.min(to, Date.UTC(year, 11, 31));
     for (const dataset of datasets) {
-      const days = historyDays(ctx.db, dataset, Math.max(from, Date.UTC(year, 0, 1)), Math.min(to, Date.UTC(year, 11, 31)));
-      if (!days.length) continue;
-      const onDay = (day: number, outcome: DayOutcome | "failed") => {
-        done += 1;
-        if (outcome === "failed") failed += 1;
-        else if (outcome !== "not_yet") counts[outcome] += 1;
-        updateJob(ctx.db, id, { done, failed, message: `${HISTORY_LABEL[dataset]} ${isoDay(day)}: ${tally(counts)}${failed ? `, ${failed} failed` : ""}…` }, ctx.clock());
-        onProgress?.(getJob(ctx.db, id)!);
-      };
-      const result = await syncDays(ctx, dataset, days, shouldStop, onDay, { record: false, extend: false });
-      if (halt) break outer;
-      if (result.stopped) {
-        refused = result.stopped;
-        break outer;
+      const passes = [{ label: HISTORY_LABEL[dataset], isinsOnly: false, days: () => historyDays(ctx.db, dataset, yearFrom, yearTo) }];
+      // After the year's cash files: stored days whose ISINs weren't read yet (those just downloaded were).
+      if (dataset === "cash_bhav") passes.push({ label: "ISINs", isinsOnly: true, days: () => isinDays(ctx.db, yearFrom, yearTo) });
+      for (const pass of passes) {
+        const days = pass.days();
+        if (!days.length) continue;
+        const result = await syncDays(ctx, dataset, days, shouldStop, onDay(pass.label, pass.isinsOnly), { record: false, extend: false, isinsOnly: pass.isinsOnly });
+        if (halt) break outer;
+        if (result.stopped) {
+          refused = result.stopped;
+          break outer;
+        }
       }
     }
   }

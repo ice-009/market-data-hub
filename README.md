@@ -318,6 +318,8 @@ Errors always look like this and never echo your headers or the hub's configurat
 | `GET /v1/lots` | history | ✅ | Futures lot sizes. |
 | `GET /v1/results-calendar` | history | ✅ | Upcoming and recent results dates. |
 | `GET /v1/market/regime` | history | ✅ | NIFTY vs its 50- and 200-day averages, breadth. |
+| `GET /v1/symbols/history?symbol=INFY[&date=…]` | history | ✅ | A company's tickers over time (INFOSYSTCH → INFY), point in time: the ticker as it was on `date`, and the cash history stored under each name. |
+| `GET /v1/symbols/changes[?symbol][&from&to]` | history | ✅ | Every ticker rename: NSE's `symbolchange.csv` plus renames seen in the bhavcopies' ISINs. |
 | `GET /v1/quotes?symbols=SBIN,TCS` | live | ✅ | Last price, change, OHLC, volume, with `ageMs`, `source` and `stale`. From the live feed when fresh, else one batched broker call (cached 3 s), else the last stored quote — never an error because the broker is down. |
 | `GET /v1/stream?symbols=SBIN,TCS` | live | ✅ | Server-Sent Events: `status`, a `snapshot` of last quotes, a `bars` replay of 1-minute bars (resumes from `Last-Event-ID`), then `tick` events from one shared broker socket. |
 | `POST` / `DELETE /v1/live/pin` | admin | ✅ | Add or remove symbols kept subscribed across restarts (on top of `HUB_LIVE_SYMBOLS`). |
@@ -463,7 +465,10 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 - **Decades of history:** the broker serves 5 years of daily candles; NSE's archive goes back to
   1994. `npm run hub -- data nse-history` downloads it (raw daily prices of every stock, delisted
   ones included, delivery % since 2002, F&O since 2001, results dates since 2010) in about nine hours, pausing in market
-  hours — details in [docs/api.md](docs/api.md#data-nse-history).
+  hours — details in [docs/api.md](docs/api.md#data-nse-history). Renamed tickers (TELCO →
+  TATAMOTORS → TMPV) are joined from NSE's `symbolchange.csv` and the files' ISINs:
+  `GET /v1/symbols/history`, and `npm run hub -- data symbols` checks every F&O stock's stored history
+  runs on across its renames.
 - **Updating:** `git pull && npm install && npm run build` (or `docker compose up -d --build`).
   Database migrations run automatically at start-up.
 - **Status at a glance:** `npm run hub -- data status` (or `GET /v1/status`) shows the health check, the broker
@@ -609,7 +614,7 @@ F&O open interest and membership.
 | **H3** | TypeScript client package; a `hub` data source in Tradex | 🚧 |
 | **H4** | Backups (online, rotated, nightly), health in `/v1/status` for uptime checks, [Oracle Cloud guide](docs/oracle.md), [importing Tradex's stored data](docs/migrate-tradex.md) | ✅ done |
 | **H5** | Endpoints for Tradex to drop its own broker and NSE fetching: batch daily candles, one day's OI across stocks, F&O membership over a range, futures contracts as symbols, 1-minute candles | ✅ done |
-| **H6** | 30 years of daily history from NSE's archive: download (cash since 1994, F&O since 2001) ✅; split/bonus adjustment and renamed tickers; serving it through `/v1/candles` | 🚧 |
+| **H6** | 30 years of daily history from NSE's archive: download (cash since 1994, F&O since 2001) ✅; renamed tickers joined, point in time (`/v1/symbols`) ✅; split/bonus adjustment; serving it through `/v1/candles` | 🚧 |
 
 Design details: [docs/plan.md](docs/plan.md).
 
