@@ -413,11 +413,11 @@ consecutive sessions of a ticker gets a factor from the first of these that appl
 
 | `source` | When | Factor |
 |---|---|---|
-| `prev_close` | the file's `PREV_CLOSE` differs from the previous close by over 1.5%, and the open bears it out | `PREV_CLOSE / close(d−1)` (NSE's own adjustment) |
+| `prev_close` | the file's `PREV_CLOSE` differs from the previous close by over 1.5%, the open bears it out, and the sessions are at most 15 days apart | `PREV_CLOSE / close(d−1)` (NSE's own adjustment) |
 | `corporate_action` | NSE's corporate-actions file (the PR zip's `bc` file, from 2010) lists, for that ticker and ex-date, a bonus, split or consolidation | its ratio (`BONUS 1:1` → 0.5, `FV SPLIT RS.10 TO RE.1` → 0.1), when the opening gap bears it out |
 | | … a `DEMERGER` | the opening gap `open(d) / close(d−1)` (NSE prices what is left in a special pre-open session) |
 | | … a rights issue with its price (`RIGHTS 3:25@PRM RS 1799`) | the theoretical ex-rights price over the last close |
-| `price_gap` | no `bc` file was read for the week before (before 2010, or PR zips not downloaded), and the opening gap is within 6% of a standard ratio (1/10, 1/5, 1/4, 1/3, 2/5, 1/2, 2/3, 3/4, 2, 5, 10) with the close within 20% of it | that ratio |
+| `price_gap` | no `bc` file was read for the week before (before 2010, or PR zips not downloaded), and the opening gap is nearest a standard ratio (1/10, 1/6, 1/5, 1/4, 1/3, 2/5, 1/2, 2/3, 3/4, 2, 5, 10): within 12% of it with the close within 25% for a halving or more (or a doubling) — no market move — and within 6% / 20% for 2/3 and 3/4 | that ratio |
 
 Sessions are consecutive only when every trading day between them was checked (stored or a known
 holiday). Where a `bc` file was read and lists nothing, a gap is a gap (no guess); rights
