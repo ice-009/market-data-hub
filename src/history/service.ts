@@ -1,6 +1,6 @@
 import type { Priority } from "../broker/budget.js";
 import { BrokerError } from "../broker/errors.js";
-import { isFuture } from "../broker/symbols.js";
+import { isFuture, isNseOnly } from "../broker/symbols.js";
 import type { Bar, HistoryResult, Resolution } from "../broker/fyers.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
@@ -163,6 +163,11 @@ export class HistoryService {
   }
 
   private async syncNow(symbol: string, base: BaseTf, want: Range, priority: Priority): Promise<void> {
+    // NSE-file-only indices and synthetic baskets: what is stored is all there is.
+    if (isNseOnly(symbol)) {
+      if (BASE[base].daily) return;
+      throw new BrokerError(`${symbol} has daily history only (from NSE's files); the broker isn't asked for it.`, "bad_symbol");
+    }
     for (let pass = 0; ; pass += 1) {
       const now = this.clock();
       const meta = readSeries(this.deps.db, symbol, base);

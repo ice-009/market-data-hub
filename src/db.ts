@@ -13,6 +13,7 @@ import Database from "better-sqlite3";
 //   3  hub state               kv (broker budget), jobs (queued backfills)
 //   4  live prices             live_quotes, live_bars_1m, live_subscriptions; see src/live/store.ts
 //   5  ticker renames          symbol_changes, isin_symbols, isin_days; see src/reference/renames.ts
+//   6  index closes            index_closes (NSE's ind_close_all); see src/nse/store.ts
 
 export type Db = Database.Database;
 
@@ -181,6 +182,23 @@ const MIGRATIONS: string[] = [
    ) without rowid;
    create index isin_symbols_symbol on isin_symbols (symbol);
    create table isin_days (day integer primary key, isins integer not null);`,
+  // NSE's daily index file, every row as printed (name as NSE spelled it that
+  // day). symbol is the hub ticker the name maps to (src/reference/indices.ts),
+  // null for indices the hub doesn't serve; re-mapped when the list changes.
+  `create table index_closes (
+     day integer not null,
+     name text not null,
+     symbol text,
+     o real, h real, l real,
+     c real not null,
+     points_change real,
+     change_pct real,
+     volume real,
+     turnover_cr real,
+     pe real, pb real, div_yield real,
+     primary key (day, name)
+   ) without rowid;
+   create index index_closes_symbol on index_closes (symbol, day);`,
 ];
 
 /** Small JSON values the hub keeps between restarts (e.g. the broker budget). */

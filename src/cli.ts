@@ -25,7 +25,7 @@ import { DAY_MS, isoDay, istParts, parseIsoDay } from "./time.js";
 //   npm run hub -- keys list
 //   npm run hub -- keys revoke key_1a2b3c4d5e6f
 //   npm run hub -- data backfill --tf 1d --years 5 [--symbols SBIN,INFY]
-//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr]
+//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr|indices]
 //   npm run hub -- data status
 //   npm run hub -- data symbols [INFY TMPV …] [--date 2005-01-03] [--refresh]
 //   npm run hub -- data cancel <job id>
@@ -41,7 +41,7 @@ const USAGE = `Usage:
   hub keys list
   hub keys revoke <id>
   hub data backfill --tf 1d|15m|5m [--years N] [--symbols SBIN,INFY,…]
-  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo|pr]
+  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo|pr|indices]
   hub data status
   hub data symbols [SYMBOL …] [--date YYYY-MM-DD] [--refresh]
   hub data cancel <job id>
@@ -142,7 +142,7 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
 
   if (action === "nse-history") {
     const only = flag(rest, "--only");
-    const ONLY: Record<string, NseHistoryParams["datasets"]> = { cash: ["cash_bhav"], fo: ["fo_bhav"], pr: ["pr"] };
+    const ONLY: Record<string, NseHistoryParams["datasets"]> = { cash: ["cash_bhav"], fo: ["fo_bhav"], pr: ["pr"], indices: ["index_close"] };
     const datasets: NseHistoryParams["datasets"] = only === undefined ? [...HISTORY_DATASETS] : (ONLY[only] ?? []);
     const params: NseHistoryParams = { from: flag(rest, "--from") ?? isoDay(ARCHIVE_FROM.cash_bhav), to: flag(rest, "--to") ?? isoDay(lastHistoryDay(Date.now())), datasets };
     const invalid = validateNseHistory(params, istParts().day);

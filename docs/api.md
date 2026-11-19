@@ -26,6 +26,7 @@ symbols).
 | `GET /v1/lots[?symbol]` | history | NSE `fo_mktlots.csv` (fallback: F&O bhavcopy lots) |
 | `GET /v1/results-calendar?from&to[&symbol]` | history | board meetings from NSE's daily PR zip |
 | `GET /v1/market/regime[?universe]` | history | stored daily candles + cash bhavcopy |
+| `GET /v1/indices` | history | NSE index file (`ind_close_all`); synthetic baskets from the cash bhavcopy |
 | `GET /v1/symbols/history?symbol[&date]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
 | `GET /v1/symbols/changes[?symbol][&from&to]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
 | `GET /v1/quotes?symbols` | live | live feed; broker quotes; last stored quote |
@@ -41,8 +42,10 @@ Common error codes: `bad_request` (400), `unauthorized` (401), `forbidden` (403,
 ## GET /v1/candles
 
 `symbol` is a plain NSE ticker (`SBIN`, `BAJAJ-AUTO`, `M%26M` for M&M), an index (`NIFTY`,
-`BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTYNXT50`, `NIFTYIT`, `INDIAVIX`) or a futures contract
-(below). `tf` is `1d` (default), `1w`, `1h`, `15m`, `5m` or `1m`. Defaults: `to` = now; `from` =
+`BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTYNXT50`, `NIFTYIT`, `INDIAVIX`; daily only: `NIFTY500`,
+`NIFTYAUTO` and the other indices in [`/v1/indices`](#get-v1indices)), a synthetic basket (`EW-IT`…,
+daily only, below) or a futures contract (below). Index and basket answers carry `synthetic`
+(`false` for an NSE index, `true` for a basket). `tf` is `1d` (default), `1w`, `1h`, `15m`, `5m` or `1m`. Defaults: `to` = now; `from` =
 1 year (1d), 5 years (1w), 90 days (1h), 30 days (15m), 7 days (5m), 5 days (1m) before `to`.
 
 - Served from the store. Only ranges the store doesn't cover are fetched from the broker, at
@@ -294,6 +297,55 @@ cash bhavcopy closes and stored daily candles). `healthy` / `caution` / `risk-of
 ```
 
 `counted` is how many members had 50 sessions of stored closes; breadth is `null` until some do.
+NIFTY's daily candles come from NSE's index file when it is stored (below), so the regime needs no
+broker.
+
+## GET /v1/indices
+
+Every index and synthetic basket with daily candles, how far back each one's stored history
+reaches, and the NIFTY 500 industries mapped to sector indices and baskets.
+
+**Indices** come from NSE's daily index file, `content/indices/ind_close_all_DDMMYYYY.csv`: every
+index NSE computes, with open/high/low/close, volume, P/E, P/B and dividend yield (stored as
+printed in `index_closes`). The archive has it from **late Feb 2012** (15 Feb 2012: no file; 1 Mar
+2012: there). The evening run fetches it after 18:00 IST and extends the index candles;
+`hub data nse-history` downloads the archive. NSE renamed the indices over the years ("S&P CNX
+Nifty" until 2013, "CNX Nifty" until Nov 2015, then "Nifty 50"; "CNX IT" → "Nifty IT"); each symbol
+knows every name it has had (`src/reference/indices.ts`). A symbol's coverage is the unbroken run of
+sessions ending at its newest day, so an index's history starts where NSE first printed it (sector
+indices launched recently — Capital Goods, Chemicals, Power… — start then). `NIFTY`, `BANKNIFTY`,
+`FINNIFTY`, `MIDCPNIFTY`, `NIFTYNXT50`, `NIFTYIT` and `INDIAVIX` are also served by the broker
+(`intraday: true`: intraday candles, live quotes); the others are daily-only from NSE's file, never
+asked of the broker (`15m` etc. answer `404 unknown_symbol`).
+
+**Synthetic baskets** (`EW-NIFTY50`, `EW-NIFTY500`, and one per NIFTY 500 industry: `EW-IT`,
+`EW-AUTO`, `EW-FINANCIAL`…) stand in where no NSE index history exists: before 2012, and before a
+sector index launched. **They are not NSE indices**: each is the equal-weight average of today's
+members' daily moves (close / NSE's `PREV_CLOSE` − 1, so splits and bonuses don't show), chained
+from 1000 on the first session with at least 3 members priced. Members are today's (the NIFTY 500
+snapshot), so older history has **survivorship bias**. They are rebuilt from the cash bhavcopy —
+back to 1994 once `hub data nse-history` has run — and every answer labels them `synthetic: true`.
+Volume is 0.
+
+Before 2012 no other source was found reliable enough to import unattended: niftyindices.com
+(NSE's index arm) has older index history, but only through a Cloudflare-protected web form, not
+an archive file.
+
+```json
+{ "indices": [ { "symbol": "NIFTY", "name": "Nifty 50", "synthetic": false, "source": "nse_index_file", "intraday": true,
+                 "firstSession": "2012-03-01", "lastSession": "2026-11-17", "sessions": 3640,
+                 "coverage": { "from": "2012-03-01", "to": "2026-11-17" } }, … ],
+  "baskets": [ { "symbol": "EW-IT", "name": "Equal-weight Information Technology basket (synthetic)", "synthetic": true,
+                 "source": "equal_weight_basket", "universe": "nifty500", "industry": "Information Technology",
+                 "standsFor": "NIFTYIT", "members": 25, "firstSession": "1994-11-04", … }, … ],
+  "sectors": [ { "industry": "Information Technology", "indices": ["NIFTYIT"], "basket": "EW-IT" }, … ],
+  "basketMethod": "Equal-weight average of today's members' daily moves …",
+  "indexFile": { "firstSession": "2012-03-01", "lastSession": "2026-11-17", "sessions": 3640, "unmappedNames": ["Nifty Alpha 50", …] } }
+```
+
+`sectors[].indices` lists the NSE indices for an industry, best first: use the first whose history
+covers the window, else the basket. `unmappedNames` are indices in NSE's newest file the hub
+stores but doesn't serve as candles.
 
 ## Ticker renames: /v1/symbols
 
@@ -614,8 +666,9 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
 ```bash
 npm run hub -- data backfill --tf 1d --years 5                  # F&O stocks + NIFTY/BANKNIFTY/FINNIFTY
 npm run hub -- data backfill --tf 15m --years 1 --symbols SBIN,INFY
-npm run hub -- data nse-history                                 # NSE's archive since 1994 (cash), 2001 (F&O), 2010 (PR zip)
+npm run hub -- data nse-history                                 # NSE's archive since 1994 (cash), 2001 (F&O), 2010 (PR zip), 2012 (indices)
 npm run hub -- data nse-history --from 2015-01-01 --only cash
+npm run hub -- data nse-history --only indices                  # just the index file (~3,900 requests, 70 minutes)
 npm run hub -- data status
 npm run hub -- data symbols                                     # every F&O stock's history across its renames
 npm run hub -- data symbols INFY TMPV [--date 2005-01-03] [--refresh]
@@ -645,11 +698,14 @@ npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tr
 Downloads NSE's archive files for every session in a range into the same tables the evening run
 fills: the cash bhavcopy (`cash_bhav`) back to NSE's first session on **3 Nov 1994**, with delivery %
 from **2002**, the F&O bhavcopy (`fo_futures`, so `/v1/fo/members` and `/v1/fo/oi`) back to the
-first stock futures on **9 Nov 2001**, and the PR zip's board meetings (`results_events`, so past
-results dates in `/v1/results-calendar`) back to **2010** (2008 and 2009 answer 404). No broker calls.
+first stock futures on **9 Nov 2001**, the PR zip's board meetings (`results_events`, so past
+results dates in `/v1/results-calendar`) back to **2010** (2008 and 2009 answer 404), and NSE's
+index file (`index_closes`, so index candles — [`/v1/indices`](#get-v1indices)) back to its start
+in **Feb 2012**. No broker calls. When a run stops, the index candles and the synthetic baskets
+are rebuilt from what is stored.
 
-- `--from` defaults to 1994-11-03, `--to` to yesterday (IST); `--only cash`, `--only fo` or
-  `--only pr` for one dataset. Days already checked (`nse_days`) are never asked for again, so a later run only fills
+- `--from` defaults to 1994-11-03, `--to` to yesterday (IST); `--only cash`, `--only fo`,
+  `--only pr` or `--only indices` for one dataset. Days already checked (`nse_days`) are never asked for again, so a later run only fills
   what's missing: run it once for the whole archive, then again whenever you like.
 - NSE changed formats on **8 Jul 2024**. Before that the hub reads the old files:
   `cmDDMONYYYYbhav.csv.zip` + `MTO_DDMMYYYY.DAT` (delivery %) for cash, `foDDMONYYYYbhav.csv.zip`
@@ -665,10 +721,10 @@ results dates in `/v1/results-calendar`) back to **2010** (2008 and 2009 answer 
   them — have just their cash file read again, once, whenever the cash market is included: about 3,400
   requests (an hour) for 2011 to 5 Jul 2024. Prices and delivery % already stored are left alone.
 - Every weekend day is asked for in the cash market: NSE held Budget-day, Muhurat and special
-  sessions on weekends (e.g. 1 Feb 2020, 12 Nov 2023, 20 Jan 2024). F&O and the PR zip are asked
-  for the weekend days the cash market traded.
-- One request per 1.1 s, like every NSE request: the whole archive is about 28,000 requests,
-  **eight to ten hours** (PR zips are 0.3–0.7 MB each; only their results rows are kept), and about
+  sessions on weekends (e.g. 1 Feb 2020, 12 Nov 2023, 20 Jan 2024). F&O, the PR zip and the index
+  file are asked for the weekend days the cash market traded.
+- One request per 1.1 s, like every NSE request: the whole archive is about 32,000 requests,
+  **nine to ten hours** (PR zips are 0.3–0.7 MB each; only their results rows are kept), and about
   **1.5 GB** in `hub.db` (~0.5 GB per gzipped backup; [Disk space](#disk-space)). Years go newest
   first.
 - Same rules as backfills: queued for the server when one is running, run here otherwise (Ctrl-C

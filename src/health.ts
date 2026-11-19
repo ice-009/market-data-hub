@@ -47,7 +47,7 @@ export interface HealthInput {
   /** Evidence that today was a trading day (live minutes or a stored daily bar for today). */
   sessionToday: boolean;
   jobsEnabled: boolean;
-  nse: Record<DayDataset, NseDayState>;
+  nse: Record<"cash_bhav" | "fo_bhav" | "pr", NseDayState> & { index_close?: NseDayState };
   /** Last successful refresh of the daily reference files. */
   refreshed: { lots: number | null; fo_ban: number | null };
   broker: { configured: boolean; owner: boolean; loginFailing: string | null; stoppedForToday: boolean; coolingDown: boolean };
@@ -64,7 +64,7 @@ export interface Health {
   warnings: string[];
 }
 
-const LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip (results calendar)" };
+const LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip (results calendar)", index_close: "Index file" };
 const REFRESHED_LABEL = { lots: "Lot sizes", fo_ban: "F&O ban list" } as const;
 const age = (ms: number) => (ms >= 2 * DAY_MS ? `${Math.floor(ms / DAY_MS)} days` : `${Math.max(1, Math.round(ms / 3_600_000))} hours`);
 
@@ -75,10 +75,13 @@ export function assessHealth(input: HealthInput): Health {
   const warnings: string[] = [];
   const today = istParts(now).day;
 
-  for (const dataset of ["cash_bhav", "fo_bhav", "pr"] as const) {
+  for (const dataset of ["cash_bhav", "fo_bhav", "pr", "index_close"] as const) {
     const state = input.nse[dataset];
+    // The index file is newer to the hub: a hub that has never stored one only gets a warning.
+    if (!state) continue;
     if (state.lastOk === null) {
-      problems.push(`${LABEL[dataset]}: nothing stored yet.`);
+      if (dataset === "index_close") warnings.push(`${LABEL[dataset]}: nothing stored yet (index candles come from the broker only).`);
+      else problems.push(`${LABEL[dataset]}: nothing stored yet.`);
       continue;
     }
     const missing = missingSessions(now, state.lastOk, state.checked);
@@ -155,7 +158,7 @@ export function hubHealth(hub: Pick<Hub, "db" | "config" | "owner" | "auth" | "g
     now,
     sessionToday: sessionToday(db, now),
     jobsEnabled: hub.config.jobsEnabled,
-    nse: { cash_bhav: nse("cash_bhav"), fo_bhav: nse("fo_bhav"), pr: nse("pr") },
+    nse: { cash_bhav: nse("cash_bhav"), fo_bhav: nse("fo_bhav"), pr: nse("pr"), index_close: nse("index_close") },
     refreshed: { lots: success("lots"), fo_ban: success("fo_ban") },
     broker: {
       configured: auth?.configured ?? false,

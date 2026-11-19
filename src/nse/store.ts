@@ -1,11 +1,13 @@
 import type { Db } from "../db.js";
 import type { CashBhavRow } from "./parsers/cashBhav.js";
+import { indexSymbolForName } from "../reference/indices.js";
 import type { FoDayRecord, FoLeg } from "./parsers/foBhav.js";
+import type { IndexCloseRow } from "./parsers/indexClose.js";
 import type { ResultsEvent } from "./parsers/results.js";
 import type { SymbolChangeRow } from "./parsers/symbolChange.js";
 
-// Storage for NSE's daily files (migration 2). Day-by-day datasets (cash and
-// F&O bhavcopy, the PR zip) record every weekday checked in `nse_days`:
+// Storage for NSE's daily files (migrations 2 and 5). Day-by-day datasets (cash
+// and F&O bhavcopy, the PR zip, the index file) record every weekday checked in `nse_days`:
 //   ok        file read and stored
 //   holiday   NSE has no file for that day
 //   mismatch  NSE served a file for another date (treated as no data, re-checked
@@ -14,8 +16,8 @@ import type { SymbolChangeRow } from "./parsers/symbolChange.js";
 // F&O membership is "has a fo_futures row that day". (F&O tables ported from
 // Tradex's foBhavStore, MIT.)
 
-/** `pr` is the daily PR zip (its board meetings fill the results calendar). */
-export type DayDataset = "cash_bhav" | "fo_bhav" | "pr";
+/** `pr` is the daily PR zip (its board meetings fill the results calendar); `index_close` NSE's index file. */
+export type DayDataset = "cash_bhav" | "fo_bhav" | "pr" | "index_close";
 export type DayStatus = "ok" | "holiday" | "mismatch";
 export type DatasetName = DayDataset | "lots" | "fo_ban" | "symbol_changes";
 
@@ -78,6 +80,54 @@ export function cashCloses(db: Db, symbols: string[], from: number, to: number):
     out.set(symbol, new Map(rows.map((row) => [row.day, row.c])));
   }
   return out;
+}
+
+// ------------------------------------------------------------------ index closes
+
+/** Replace one trade day's index rows and mark the day "ok". */
+export function writeIndexDay(db: Db, day: number, rows: IndexCloseRow[], checkedAt: number) {
+  const insert = db.prepare(
+    `insert or replace into index_closes (day, name, symbol, o, h, l, c, points_change, change_pct, volume, turnover_cr, pe, pb, div_yield)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  db.transaction(() => {
+    db.prepare("delete from index_closes where day = ?").run(day);
+    for (const row of rows) insert.run(day, row.name, indexSymbolForName(row.name), row.open, row.high, row.low, row.close, row.pointsChange, row.changePct, row.volume, row.turnoverCr, row.pe, row.pb, row.divYield);
+    markDay(db, "index_close", day, "ok", rows.length, checkedAt);
+  })();
+}
+
+/** Re-map stored names to hub symbols (after src/reference/indices.ts gains an alias). Returns the rows changed. */
+export function remapIndexNames(db: Db): number {
+  const stale = (db.prepare("select distinct name, symbol from index_closes").all() as Array<{ name: string; symbol: string | null }>).filter((row) => indexSymbolForName(row.name) !== row.symbol);
+  const update = db.prepare("update index_closes set symbol = ? where name = ?");
+  let changed = 0;
+  db.transaction(() => {
+    for (const row of stale) changed += update.run(indexSymbolForName(row.name), row.name).changes;
+  })();
+  return changed;
+}
+
+export interface IndexCloseDay {
+  day: number;
+  name: string;
+  o: number | null;
+  h: number | null;
+  l: number | null;
+  c: number;
+  volume: number | null;
+}
+
+/** One hub symbol's stored rows with day >= from, oldest first (one per day). */
+export function readIndexCloses(db: Db, symbol: string, from = Number.MIN_SAFE_INTEGER): IndexCloseDay[] {
+  return db.prepare("select day, min(name) as name, o, h, l, c, volume from index_closes where symbol = ? and day >= ? group by day order by day").all(symbol, from) as IndexCloseDay[];
+}
+
+/** Names in the newest stored index file that the hub doesn't map to a symbol. */
+export function unmappedIndexNames(db: Db): string[] {
+  const last = lastOkDay(db, "index_close");
+  if (last === null) return [];
+  return (db.prepare("select name from index_closes where day = ? and symbol is null order by name").all(last) as Array<{ name: string }>).map((row) => row.name);
 }
 
 // ------------------------------------------------------------------ F&O bhavcopy
