@@ -1,5 +1,6 @@
 import path from "node:path";
 import { backupDb } from "./backup.js";
+import { gb, shortOfSpace } from "./disk.js";
 import { createKey, listKeys, parseScopes, revokeKey } from "./auth/keys.js";
 import { loadConfig, secretValues } from "./config.js";
 import { openDb, type Db } from "./db.js";
@@ -11,10 +12,12 @@ import { DEFAULT_INDICES, cancelJob, enqueueBackfill, enqueueJob, listJobs, maxY
 import { HISTORY_DATASETS, HISTORY_LABEL, lastHistoryDay, runNseHistory, validateNseHistory } from "./jobs/nseHistory.js";
 import { createLogger } from "./log.js";
 import { acquireOwner, ownerPid } from "./owner.js";
+import { listingOf, loadRenames, storedListing } from "./reference/renames.js";
 import { getUniverse } from "./reference/universe.js";
-import { brokerStatus, dataFreshness } from "./status.js";
-import { ARCHIVE_FROM } from "./nse/datasets.js";
-import { DAY_MS, isoDay, istParts } from "./time.js";
+import { brokerStatus, dataFreshness, diskStatus } from "./status.js";
+import { ARCHIVE_FROM, refreshSymbolChanges } from "./nse/datasets.js";
+import { readRuns } from "./nse/store.js";
+import { DAY_MS, isoDay, istParts, parseIsoDay } from "./time.js";
 
 // Admin CLI, run on the machine that hosts the hub (it opens the database
 // directly; there is no remote admin API).
@@ -24,6 +27,7 @@ import { DAY_MS, isoDay, istParts } from "./time.js";
 //   npm run hub -- data backfill --tf 1d --years 5 [--symbols SBIN,INFY]
 //   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr|indices]
 //   npm run hub -- data status
+//   npm run hub -- data symbols [INFY TMPV …] [--date 2005-01-03] [--refresh]
 //   npm run hub -- data cancel <job id>
 //   npm run hub -- data backup [--to ./backups] [--keep 7]
 //   npm run hub -- data import-tradex --db ../tradex/.cache/market.db [--screener ../tradex/.cache/screener] [--dry-run]
@@ -39,6 +43,7 @@ const USAGE = `Usage:
   hub data backfill --tf 1d|15m|5m [--years N] [--symbols SBIN,INFY,…]
   hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo|pr|indices]
   hub data status
+  hub data symbols [SYMBOL …] [--date YYYY-MM-DD] [--refresh]
   hub data cancel <job id>
   hub data backup [--to <dir>] [--keep N]
   hub data import-tradex --db <market.db> [--screener <dir>] [--dry-run]`;
@@ -145,6 +150,12 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
       console.error(invalid);
       return 1;
     }
+    // The whole archive adds about 1.5 GB to hub.db (docs/api.md#disk-space); it pauses at the floor anyway.
+    const short = shortOfSpace({ dir: config.dataDir, minFreeBytes: config.diskMinBytes });
+    if (short) {
+      console.error(`Not starting NSE history: ${short.message}. Free some space and run it again.`);
+      return 1;
+    }
     const release = acquireOwner(config.dataDir);
     if (!release) {
       const queued = enqueueJob(db, "nse_history", params);
@@ -188,6 +199,9 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     for (const warning of health.warnings) console.log(`  ! ${warning}`);
     console.log("");
     console.log(`Owner process: ${pid ? `pid ${pid}` : "none (no hub server running)"}`);
+    const disk = diskStatus(config);
+    for (const volume of disk.volumes) console.log(`Disk: ${volume.freeBytes === null ? "free space unknown" : `${gb(volume.freeBytes)} free`} for ${volume.holds} (warning under ${gb(disk.warnBelowBytes)}; NSE history and backups stop under ${gb(disk.minFreeBytes)})`);
+    if (disk.backups) console.log(`Backups: ${disk.backups.count}, ${gb(disk.backups.bytes)} in all${disk.backups.newestBytes === null ? "" : `, newest ${gb(disk.backups.newestBytes)}`}`);
     console.log(`Broker: ${broker.configured ? "configured" : "not configured"}, ${broker.connected ? "token valid" : "no valid token"}, last login ${fmt(broker.lastLoginAt)}${broker.lastLoginError ? `, last error: ${broker.lastLoginError}` : ""}`);
     if (broker.budget) console.log(`Budget today: ${broker.budget.usedToday} calls (user ${broker.budget.byPriority.user}, background ${broker.budget.byPriority.background}), strikes ${broker.budget.strikes}`);
     console.log("\nNSE datasets:");
@@ -199,6 +213,7 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     console.log(`  F&O ban         for ${fresh.foBan.tradeDate ?? "—"}   fetched ${fmt(fresh.foBan.lastSuccessAt)}`);
     console.log(`  results (PR)    last session ${fresh.resultsCalendar.lastSession ?? "—"}   checked ${fmt(fresh.resultsCalendar.lastAttemptAt)}${fresh.resultsCalendar.lastError ? `   error: ${fresh.resultsCalendar.lastError}` : ""}`);
     console.log(`                  ${fresh.resultsCalendar.upcoming} upcoming events; ${fresh.resultsCalendar.sessions} sessions stored, from ${fresh.resultsCalendar.firstSession ?? "—"}`);
+    console.log(`  symbol changes  ${fresh.symbolChanges.count} renames   fetched ${fmt(fresh.symbolChanges.lastSuccessAt)}   ISINs read for ${fresh.symbolChanges.isins.days} days`);
     console.log("\nCandles:");
     if (!fresh.candles.length) console.log("  none stored yet");
     for (const row of fresh.candles) console.log(`  ${row.tf.padEnd(4)} ${String(row.series).padStart(5)} series ${String(row.candles).padStart(9)} candles   newest ${row.lastSession ?? "—"}`);
@@ -222,6 +237,55 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     return 0;
   }
 
+  if (action === "symbols") {
+    if (rest.includes("--refresh")) {
+      const release = acquireOwner(config.dataDir);
+      if (!release) console.log(`The running hub (pid ${ownerPid(config.dataDir) ?? "?"}) owns the NSE connection and refreshes NSE's list each evening; showing what is stored.`);
+      else {
+        try {
+          const hub = createHub({ config, db, log, owner: true });
+          const ok = await refreshSymbolChanges(hub.nse);
+          const run = readRuns(db).get("symbol_changes");
+          console.log(ok ? `Downloaded NSE's symbol changes: ${String(run?.info?.count ?? 0)} renames.` : `Couldn't download NSE's symbol changes: ${run?.lastError ?? "unknown error"}`);
+          if (!ok) return 1;
+        } finally {
+          release();
+        }
+      }
+    }
+    if (!readRuns(db).get("symbol_changes")?.lastSuccessAt) {
+      console.error("NSE's list of ticker changes isn't stored yet: run `hub data symbols --refresh` (or start the hub, which fetches it).");
+      return 1;
+    }
+    const dateRaw = flag(rest, "--date");
+    const day = dateRaw === undefined ? istParts().day : parseIsoDay(dateRaw);
+    if (day === null) {
+      console.error("--date must be a date like 2005-01-03.");
+      return 1;
+    }
+    const named = rest.filter((arg, i) => !arg.startsWith("--") && rest[i - 1] !== "--date").map((arg) => arg.trim().toUpperCase());
+    const renames = loadRenames(db);
+    const describe = (symbol: string) => {
+      const listing = listingOf(db, symbol, day, renames);
+      const stored = storedListing(db, listing);
+      const names = stored.names.map((name) => `${name.symbol} (${name.from === null ? "…" : isoDay(name.from)} → ${name.until === null ? "…" : isoDay(name.until - DAY_MS)}; ${name.stored ? `stored ${isoDay(name.stored.first)}–${isoDay(name.stored.last)}, ${name.stored.sessions} sessions` : "nothing stored"})`);
+      const joins = stored.continuous.map((continuous, i) => `${listing.changes[i].oldSymbol} → ${listing.changes[i].newSymbol} ${isoDay(listing.changes[i].day)} [${listing.changes[i].source}]: ${continuous === null ? "not stored on both sides" : continuous ? "continuous" : "GAP"}`);
+      return { listing, stored, lines: [`${symbol}${listing.match === "exact" ? "" : ` (${listing.match})`} → ${listing.current}`, ...names.map((line) => `    ${line}`), ...joins.map((line) => `    ${line}`)] };
+    };
+    if (named.length) {
+      for (const symbol of named) for (const line of describe(symbol).lines) console.log(line);
+      return 0;
+    }
+    // No tickers given: every current F&O stock's history across its renames (ice-009/tradex-public#16).
+    const members = getUniverse(db, "fno").members.map((member) => member.symbol);
+    const renamed = members.map(describe).filter((entry) => entry.listing.changes.length);
+    const gaps = renamed.filter((entry) => entry.stored.continuous.includes(false));
+    const unknown = renamed.filter((entry) => entry.stored.continuous.includes(null));
+    console.log(`F&O stocks: ${members.length}; ${renamed.length} renamed at least once (${renames.changes.length} renames known). Continuous across every rename: ${renamed.length - gaps.length - unknown.length}; with a gap: ${gaps.length}; not stored on both sides: ${unknown.length}.`);
+    for (const entry of renamed) for (const line of entry.lines) console.log(line);
+    return gaps.length ? 1 : 0;
+  }
+
   if (action === "backup") {
     // Safe while the server runs: SQLite's online backup copies a consistent snapshot.
     const dir = path.resolve(flag(rest, "--to") ?? config.backupDir ?? "backups");
@@ -231,9 +295,9 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
       console.error("--keep must be a whole number of at least 1.");
       return 1;
     }
-    const result = await backupDb(db, dir, keep);
-    console.log(`Backed up to ${result.file} (${(result.bytes / 1e6).toFixed(1)} MB, checked).${result.removed.length ? ` Removed ${result.removed.length} older backup(s); keeping ${keep}.` : ""}`);
-    console.log("Restore: stop the hub, copy the file over hub.db in HUB_DATA_DIR, delete hub.db-wal and hub.db-shm, start the hub.");
+    const result = await backupDb(db, dir, keep, Date.now(), { minFreeBytes: config.diskMinBytes });
+    console.log(`Backed up to ${result.file} (${(result.bytes / 1e6).toFixed(1)} MB gzipped from ${(result.dbBytes / 1e6).toFixed(1)} MB, checked).${result.removed.length ? ` Removed ${result.removed.length} older backup(s); keeping ${keep}.` : ""}`);
+    console.log(`Restore: stop the hub, \`gunzip -c ${result.file} > ${path.join(config.dataDir, "hub.db")}\`, delete hub.db-wal and hub.db-shm next to it, start the hub.`);
     return 0;
   }
 

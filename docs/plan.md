@@ -190,11 +190,13 @@ Nov 2023; Budget days 28 Feb 2015 and 1 Feb 2020; special sessions 20 Jan, 2 Mar
 
 1. **Download** ✅ (`hub data nse-history`, `src/jobs/nseHistory.ts`): every session into
    `cash_bhav` / `fo_futures` — old formats up to 5 Jul 2024, current ones after — resumable through
-   `nse_days`, pausing in market hours, ~24,000 requests (7–8 hours), an estimated 1–1.5 GB.
+   `nse_days`, pausing in market hours and at the disk floor, ~24,000 requests (7–8 hours), ~1.5 GB (measured on a
+   synthetic database; ~0.5 GB per gzipped backup — [api.md](api.md#disk-space)).
 2. **Adjustment:** split/bonus factors from the bhavcopy itself — NSE's `PREVCLOSE` on an ex-date
    is the previous close adjusted, so `prev_close(d) / close(d−1)` is the day's factor (1 on normal
    days) — checked against the broker's adjusted 5 years where they overlap; renamed tickers joined
-   with NSE's `symbolchange.csv` (and ISINs, in files from 2011 on). Index history (NIFTY,
+   with NSE's `symbolchange.csv` (and ISINs, in files from 2011 on) ✅ (`src/reference/renames.ts`,
+   `/v1/symbols`, `hub data symbols`). Index history (NIFTY,
    sectors) needs another source: it isn't in these files.
 3. **Serving:** `/v1/candles?tf=1d` with `from` before the broker's window answers from the
    adjusted NSE series; Tradex's backtests and evidence check use the full range.

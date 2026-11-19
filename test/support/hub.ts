@@ -33,7 +33,9 @@ export interface MakeHubOptions {
 
 export function makeHub(options: MakeHubOptions = {}): TestHub {
   const dir = options.dir ?? mkdtempSync(path.join(tmpdir(), "hub-test-"));
-  const config = loadConfig({ HUB_DATA_DIR: dir, HUB_JOBS: "off", HUB_FETCH_WAIT_MS: "5000", ...options.env });
+  // No disk thresholds unless a test sets them: results mustn't depend on the machine's free space.
+  const diskOff = options.env?.HUB_DISK_MIN_GB === undefined && options.env?.HUB_DISK_WARN_GB === undefined ? { HUB_DISK_MIN_GB: "0", HUB_DISK_WARN_GB: "0" } : {};
+  const config = loadConfig({ HUB_DATA_DIR: dir, HUB_JOBS: "off", HUB_FETCH_WAIT_MS: "5000", ...diskOff, ...options.env });
   const lines: string[] = [];
   const log = createLogger({ level: "debug", secrets: secretValues(config.secrets), write: (line) => lines.push(line) });
   const db = openDb(dir);

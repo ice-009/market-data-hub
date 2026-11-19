@@ -1,9 +1,10 @@
 import { backupDb, backupDue, listBackups } from "../backup.js";
+import { DiskSpaceError } from "../disk.js";
 import type { Db } from "../db.js";
 import { refreshBaskets } from "../history/baskets.js";
 import { syncIndexSeries } from "../history/fromIndices.js";
 import type { Logger } from "../log.js";
-import { recentDays, refreshBan, refreshLots, syncDays, type NseContext } from "../nse/datasets.js";
+import { recentDays, refreshBan, refreshLots, refreshSymbolChanges, syncDays, type NseContext } from "../nse/datasets.js";
 import { latestBan, readRuns, type DatasetName, type DatasetRun } from "../nse/store.js";
 import { DAY_MS, MINUTE_MS, istDayStart, istParts, isWeekday } from "../time.js";
 import { nextRunnableJob, recoverJobs, runBackfill, type BackfillDeps } from "./backfill.js";
@@ -18,8 +19,9 @@ import { runNseHistory } from "./nseHistory.js";
 //     synthetic baskets (src/history/baskets.ts); index days extend the index
 //     candles. The PR zip, whose board meetings make the
 //     results calendar, likewise for the last RESULTS_LOOKBACK_DAYS (meetings
-//     are announced up to weeks ahead, one day's announcements per file). Lots
-//     and the F&O ban list are refreshed once each evening (and on start when stale).
+//     are announced up to weeks ahead, one day's announcements per file). Lots,
+//     the F&O ban list and NSE's ticker renames (symbolchange.csv) are refreshed
+//     once each evening (and on start when stale).
 //   - queued jobs, one at a time: broker backfills (`hub data backfill`) and
 //     NSE history downloads (`hub data nse-history`).
 //   - a nightly database backup when HUB_BACKUP_DIR is set (src/backup.ts).
@@ -31,6 +33,8 @@ export const RECENT_DAYS = 10;
 export const RESULTS_LOOKBACK_DAYS = 60;
 export const RETRY_MS = 30 * MINUTE_MS;
 export const TICK_MS = MINUTE_MS;
+/** After a nightly backup fails (or is refused for lack of disk), wait this long before trying again. */
+export const BACKUP_RETRY_MS = 60 * MINUTE_MS;
 /** The evening window for once-a-day refreshes (minutes after IST midnight). */
 export const EVENING_FROM_MIN = 18 * 60 + 30;
 export const EVENING_TO_MIN = 23 * 60 + 30;
@@ -80,6 +84,7 @@ export function dueTasks(input: ScheduleInput): Task[] {
   if (daily("lots") && rested("lots")) due.push("lots");
   if ((input.banTradeDate === null || input.banTradeDate < banTarget(now)) && minutes >= 7 * 60 && minutes < EVENING_TO_MIN && rested("fo_ban")) due.push("fo_ban");
   if (input.missing.pr > 0 && rested("pr")) due.push("pr");
+  if (daily("symbol_changes") && rested("symbol_changes")) due.push("symbol_changes");
   return due;
 }
 
@@ -87,8 +92,8 @@ export interface SchedulerDeps {
   nse: NseContext;
   backfill: BackfillDeps;
   log: Logger;
-  /** Nightly backups; absent when HUB_BACKUP_DIR isn't set. */
-  backup?: { db: Db; dir: string; keep: number };
+  /** Nightly backups; absent when HUB_BACKUP_DIR isn't set. `minFreeBytes`: HUB_DISK_MIN_GB. */
+  backup?: { db: Db; dir: string; keep: number; minFreeBytes: number; free?: (dir: string) => number | null };
 }
 
 export class Scheduler {
@@ -96,6 +101,7 @@ export class Scheduler {
   private nseBusy = false;
   private jobBusy = false;
   private backupBusy = false;
+  private backupRetryAt = 0;
   private stopping = false;
   private derivedChecked = false;
 
@@ -122,13 +128,16 @@ export class Scheduler {
     const backup = this.deps.backup;
     if (!backup || this.backupBusy || this.stopping) return;
     const now = this.deps.nse.clock();
-    if (!backupDue(now, listBackups(backup.dir)[0]?.at ?? null)) return;
+    if (now < this.backupRetryAt || !backupDue(now, listBackups(backup.dir)[0]?.at ?? null)) return;
     this.backupBusy = true;
     try {
-      const result = await backupDb(backup.db, backup.dir, backup.keep, now);
-      this.deps.log.info("database backed up", { file: result.file, bytes: result.bytes, removed: result.removed.length });
+      const result = await backupDb(backup.db, backup.dir, backup.keep, now, { minFreeBytes: backup.minFreeBytes, free: backup.free });
+      this.deps.log.info("database backed up", { file: result.file, bytes: result.bytes, dbBytes: result.dbBytes, removed: result.removed.length });
     } catch (error) {
-      this.deps.log.error("database backup failed", { error });
+      this.backupRetryAt = now + BACKUP_RETRY_MS;
+      // Low disk is reported by /v1/status too; say it once an hour, not every minute.
+      if (error instanceof DiskSpaceError) this.deps.log.warn("nightly backup skipped: low disk space", { reason: error.message, freeBytes: error.free, needBytes: error.need });
+      else this.deps.log.error("database backup failed", { error });
     } finally {
       this.backupBusy = false;
     }
@@ -159,7 +168,8 @@ export class Scheduler {
         else if (task === "index_close") await syncDays(ctx, "index_close", indices, () => this.stopping);
         else if (task === "lots") await refreshLots(ctx);
         else if (task === "fo_ban") await refreshBan(ctx);
-        else await syncDays(ctx, "pr", pr, () => this.stopping);
+        else if (task === "pr") await syncDays(ctx, "pr", pr, () => this.stopping);
+        else await refreshSymbolChanges(ctx);
       }
     } catch (error) {
       this.deps.log.error("scheduled NSE refresh failed", { error });

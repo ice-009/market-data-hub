@@ -59,12 +59,12 @@ const secFull = (day: number, close: number) =>
   `SYMBOL, SERIES, DATE1, PREV_CLOSE, OPEN_PRICE, HIGH_PRICE, LOW_PRICE, LAST_PRICE, CLOSE_PRICE, AVG_PRICE, TTL_TRD_QNTY, TURNOVER_LACS, NO_OF_TRADES, DELIV_QTY, DELIV_PER\nSBIN, EQ, ${nseDate(day)}, ${close - 1}, ${close}, ${close}, ${close}, ${close}, ${close}, ${close}, 1000, 1, 1, 500, 50.00\n`;
 
 describe("NSE's old formats (pure)", () => {
-  it("reads the old cash bhavcopy into the current rows, without delivery %", () => {
+  it("reads the old cash bhavcopy into the current rows, without delivery % (and with the ISIN where the file has one)", () => {
     const parsed = parseCmBhav(cmCsv(d("1994-11-03"), [["ACC", "EQ", 4636.75, 0], ["ACC", "BE", 1, 1], ["XYZ", "BE", 10, 9], ["SRERAYHY+H", "EQ", 8.5, 8.85], ["NCD1", "N1", 100, 100]], false));
     expect(parsed.tradeDate).toBe(d("1994-11-03"));
     expect(parsed.badRows).toBe(0);
     expect(parsed.rows.map((row) => `${row.symbol}/${row.series}`)).toEqual(["ACC/EQ", "XYZ/BE", "SRERAYHY+H/EQ"]); // EQ wins; debt series skipped
-    expect(parsed.rows[0]).toEqual({ symbol: "ACC", series: "EQ", prevClose: 0, open: 4636.75, high: 4637.75, low: 4635.75, close: 4636.75, volume: 1000, deliveryPct: null });
+    expect(parsed.rows[0]).toEqual({ symbol: "ACC", series: "EQ", prevClose: 0, open: 4636.75, high: 4637.75, low: 4635.75, close: 4636.75, volume: 1000, deliveryPct: null, isin: "INE000000000" });
     expect(parseCmBhav(`${cmCsv(d("2010-01-04"), [["SBIN", "EQ", 1, 1]])}\nINFY,EQ,1,1,1,1,1,1,1,1,05-JAN-2010,`).mixedDates).toBe(true);
     expect(parseCmBhav("garbage\n1,2").rows).toEqual([]);
   });
@@ -236,6 +236,30 @@ describe("NSE history", () => {
     expect(refused.message).toMatch(/3 days in a row/);
     expect(refused.resumeAfter).toBe(ctx.clock() + 15 * 60_000);
     expect(checkedDays(ctx.db, "cash_bhav").size).toBe(0);
+  });
+
+  it("doesn't start, and pauses, while free disk is under the floor; resumes once there's room", async () => {
+    const { ctx, calls } = context(routesFor(), ist(2026, 11, 16, 20));
+    let free = 1.5e9;
+    ctx.disk = { dir: t.dir, minFreeBytes: 2e9, free: () => free };
+    const job = enqueueJob(ctx.db, "nse_history", RANGE);
+    const refused = await runNseHistory(ctx, job.id);
+    expect(refused.state).toBe("paused");
+    expect(refused.message).toBe("Paused: only 1.5 GB free on the disk, under the 2.0 GB kept free (HUB_DISK_MIN_GB). Free some space; the hub server retries every 30 minutes (or run the command again).");
+    expect(refused.resumeAfter).toBe(ctx.clock() + 30 * 60_000);
+    expect(calls).toHaveLength(0);
+
+    // Room again: it runs, until the disk fills up after two cash days.
+    free = 50e9;
+    const paused = await runNseHistory(ctx, job.id, (progress) => {
+      if (progress.done === 2) free = 1.9e9;
+    });
+    expect(paused.state).toBe("paused");
+    expect(paused.message).toMatch(/^Paused after 2 sessions stored, 0 days without a file: only 1.9 GB free on the disk/);
+    expect(statuses(ctx, "cash_bhav")).toEqual(["2024-07-04 ok", "2024-07-05 ok"]);
+    free = 50e9;
+    expect((await runNseHistory(ctx, job.id)).state).toBe("done");
+    expect(statuses(ctx, "cash_bhav")).toHaveLength(6);
   });
 
   it("stops after the current day when cancelled", async () => {

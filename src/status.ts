@@ -1,9 +1,12 @@
+import { listBackups } from "./backup.js";
 import { savedBudget } from "./broker/gate.js";
+import type { Config } from "./config.js";
 import type { Db } from "./db.js";
+import { hubVolumes } from "./disk.js";
 import { candleStats } from "./history/store.js";
 import type { Hub } from "./hub.js";
 import { listJobs } from "./jobs/backfill.js";
-import { countResults, lastOkDay, latestBan, readRuns, storedDays, unmappedIndexNames, type DayDataset } from "./nse/store.js";
+import { countResults, isinStats, lastOkDay, latestBan, readRuns, storedDays, unmappedIndexNames, type DayDataset } from "./nse/store.js";
 import { isoDay, istParts } from "./time.js";
 
 // What /v1/status and `hub data status` report: data freshness per dataset,
@@ -24,6 +27,7 @@ export function dataFreshness(db: Db) {
   };
   const ban = latestBan(db);
   const lots = runs.get("lots")?.info;
+  const renames = runs.get("symbol_changes")?.info;
   return {
     cashBhav: { lastSession: day(lastOkDay(db, "cash_bhav")), ...archive("cash_bhav"), ...run("cash_bhav") },
     foBhav: { lastSession: day(lastOkDay(db, "fo_bhav")), ...archive("fo_bhav"), ...run("fo_bhav") },
@@ -32,7 +36,22 @@ export function dataFreshness(db: Db) {
     foBan: { tradeDate: ban ? isoDay(ban.tradeDate) : null, ...run("fo_ban") },
     // From the PR zip's board meetings: `upcoming` counts events dated today or later.
     resultsCalendar: { upcoming: countResults(db, istParts().day), lastSession: day(lastOkDay(db, "pr")), ...archive("pr"), ...run("pr") },
+    symbolChanges: { count: (renames?.count as number | undefined) ?? 0, isins: isinStats(db), ...run("symbol_changes") },
     candles: candleStats(db).map((row) => ({ tf: row.tf, series: row.series, candles: row.candles, lastSession: row.lastT === null ? null : row.tf === "1d" ? isoDay(row.lastT) : new Date(row.lastT).toISOString() })),
+  };
+}
+
+/**
+ * Free disk and what backups take: `volumes` (one per disk — the database's, and
+ * the backups' when on another disk), the thresholds, and the backups' count and bytes.
+ */
+export function diskStatus(config: Pick<Config, "dataDir" | "backupDir" | "diskWarnBytes" | "diskMinBytes">) {
+  const backups = config.backupDir ? listBackups(config.backupDir) : null;
+  return {
+    volumes: hubVolumes(config.dataDir, config.backupDir),
+    warnBelowBytes: config.diskWarnBytes,
+    minFreeBytes: config.diskMinBytes,
+    backups: backups && { count: backups.length, bytes: backups.reduce((sum, backup) => sum + backup.bytes, 0), newestBytes: backups[0]?.bytes ?? null },
   };
 }
 

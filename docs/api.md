@@ -8,7 +8,7 @@ date** (so `new Date(t).toISOString().slice(0, 10)` is the trade date); intraday
 instant they start. Query dates are `YYYY-MM-DD` (IST) or epoch ms. For intraday data `from` means
 the start of that IST day and `to` its end.
 
-**Scopes.** `history`: candles, universes, lots, results calendar, regime. `fo`: everything under
+**Scopes.** `history`: candles, universes, lots, results calendar, regime, ticker renames. `fo`: everything under
 `/v1/fo`. `live`: quotes and the price stream. `admin` holds every scope (and alone may pin live
 symbols).
 
@@ -27,6 +27,8 @@ symbols).
 | `GET /v1/results-calendar?from&to[&symbol]` | history | board meetings from NSE's daily PR zip |
 | `GET /v1/market/regime[?universe]` | history | stored daily candles + cash bhavcopy |
 | `GET /v1/indices` | history | NSE index file (`ind_close_all`); synthetic baskets from the cash bhavcopy |
+| `GET /v1/symbols/history?symbol[&date]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
+| `GET /v1/symbols/changes[?symbol][&from&to]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
 | `GET /v1/quotes?symbols` | live | live feed; broker quotes; last stored quote |
 | `GET /v1/stream?symbols[&since]` | live | Server-Sent Events: stored snapshot + minute-bar replay, then live ticks |
 | `POST` / `DELETE /v1/live/pin` | admin | the persistent live symbol set |
@@ -345,6 +347,70 @@ an archive file.
 covers the window, else the basket. `unmappedNames` are indices in NSE's newest file the hub
 stores but doesn't serve as candles.
 
+## Ticker renames: /v1/symbols
+
+NSE renames a company's ticker now and then (TELCO → TATAMOTORS on 26 Dec 2003 → TMPV on 24 Oct
+2025; INFOSYSTCH → INFY on 29 Jun 2011), and its files are written under whatever the ticker was
+that day. The hub joins the names from two sources:
+
+- **NSE's `content/equities/symbolchange.csv`** (on the archive): every rename since 1999 with its
+  effective date — the first session under the new ticker (INFOSYSTCH's last bhavcopy row is 28 Jun
+  2011, INFY's first 29 Jun). Downloaded on start and once each evening, replacing the stored list
+  (a file with under 100 rows is refused and the stored list kept).
+- **ISINs** in NSE's old-format cash bhavcopy (the column exists from 2011 to 5 Jul 2024): one ISIN
+  traded under ticker A, then, after A's last day, under B, is a rename too. These add renames NSE's
+  list lacks; where the list has the same change (the same pair, or the same old or new ticker within
+  31 days) NSE's row wins. `hub data nse-history` records ISINs as it stores those days, and reads
+  them once from days stored before the hub kept them.
+
+A **listing** is one company's names, oldest first. Lookups are **point in time**: `symbol` is a
+ticker as it was on `date` (default today), so `INFOSYSTCH` on 2005-01-03 and `INFY` today are the
+same listing, and a ticker renamed away and later taken by another company resolves by date.
+Renames chained on one day (GBNOV23 → SBNOV23 → SGBNOV23) count as one.
+
+### GET /v1/symbols/history?symbol=INFY[&date=YYYY-MM-DD]
+
+```json
+GET /v1/symbols/history?symbol=INFOSYSTCH&date=2005-01-03
+{ "symbol": "INFOSYSTCH", "date": "2005-01-03", "match": "exact", "onDate": "INFOSYSTCH", "current": "INFY",
+  "names": [
+    { "symbol": "INFOSYSTCH", "from": null, "to": "2011-06-28", "stored": { "first": "2011-06-28", "last": "2011-06-28", "sessions": 1 } },
+    { "symbol": "INFY", "from": "2011-06-29", "to": null, "stored": { "first": "2011-06-29", "last": "2011-06-29", "sessions": 1 } } ],
+  "changes": [ { "date": "2011-06-29", "day": 1309305600000, "oldSymbol": "INFOSYSTCH", "newSymbol": "INFY",
+      "company": "Infosys Limited", "source": "nse", "isin": null, "continuous": true } ],
+  "fetchedAt": 1795010799626 }
+```
+
+(From NSE's real `symbolchange.csv` and the 28/29 Jun 2011 bhavcopies.)
+
+- `names[]`: each ticker with the days it was in use, inclusive (`from: null` — since before any
+  record; `to: null` — still in use), and `stored`: the cash-bhavcopy sessions stored under it in that
+  span (`null` when none). `current` is the last name; `onDate` the name on `date`.
+- `match`: `exact` — the listing had `symbol` on `date`; `later` — nobody had it on `date` (and no row
+  is stored under it then), so this is the listing that took it later (`INFY` asked for 2005);
+  `earlier` — it had been renamed away by `date` and nothing has traded under it since, so this is
+  the listing that last had it (`INFOSYSTCH` asked for today). A ticker with no renames is its own
+  listing (`names` is one entry with `from` and `to` null).
+- `changes[i]` took `names[i]` to `names[i + 1]`; `source` is `nse` or `isin` (with the ISIN).
+  `continuous`: the old ticker's last stored session and the new one's first are consecutive stored
+  sessions — the history runs on across the rename; `false` shows a gap (a session missing on both
+  sides: a suspension, or NSE's effective date off from the files); `null` when either side has
+  nothing stored.
+- `503 not_ready` until NSE's list has been downloaded once; `400` for a missing or malformed
+  `symbol` (old tickers may contain `+` and `.`) or a bad `date`.
+
+### GET /v1/symbols/changes[?symbol=…][&from=…&to=…]
+
+Every known rename, oldest first, optionally those with an effective date in `from`..`to` and those
+whose old or new ticker is `symbol`. `from`/`to` are `null` in the answer when not given.
+
+```json
+GET /v1/symbols/changes?symbol=TMPV
+{ "from": null, "to": null, "fetchedAt": 1795010799626, "count": 1, "changes": [
+    { "date": "2025-10-24", "day": 1761264000000, "oldSymbol": "TATAMOTORS", "newSymbol": "TMPV",
+      "company": "Tata Motors Passenger Vehicles Limited", "source": "nse", "isin": null } ] }
+```
+
 ## Live prices
 
 One broker socket feeds every client. Symbols are hub tickers as for candles (`SBIN`, `M%26M`,
@@ -511,8 +577,14 @@ code. A problem is raised when:
 | Broker | configured, and the login is failing (in its retry wait), or calls are stopped for today (budget spent / strikes). Cooling down after a rate-limit warning, or another process owning the connection, is a warning |
 | Live feed | during market hours (09:15–15:30 IST, weekdays) the feed isn't running or is `down` (no socket, no polling). Socket down but polling is a warning |
 | Backups | `HUB_BACKUP_DIR` is set and it holds no backup, or the newest is over 2 days old |
+| Disk | free space where the database (or, on another disk, the backups) lives is under `HUB_DISK_MIN_GB` (default 2 GB) — NSE history and backups have stopped by then, and SQLite writes are next. Under `HUB_DISK_WARN_GB` (default 5 GB) is a warning |
 
 `HUB_JOBS=off` adds a warning (NSE files then go stale by design).
+
+`disk`: `volumes` (one entry per disk: `holds` is `the database`, `backups` or `the database and
+backups`, `freeBytes` null when it can't be read), the thresholds `warnBelowBytes` and
+`minFreeBytes`, and `backups` (`count`, total `bytes`, `newestBytes`; null without
+`HUB_BACKUP_DIR`). No paths. Expected sizes: [Disk space](#disk-space).
 
 ```bash
 # An uptime checker (Uptime Kuma, Healthchecks, a cron + curl) with a key of its own:
@@ -539,7 +611,10 @@ the last tick and heartbeat the previous run left, which is where restart recove
     "foBhav": { "lastSession": "2026-11-05", "firstSession": "2001-11-09", "sessions": …, … }, "lots": { "count": 224, "source": "nse_mktlots", … },
     "foBan": { "tradeDate": "2026-11-06", … },
     "resultsCalendar": { "upcoming": 41, "lastSession": "2026-11-05", "firstSession": "2026-09-08", "sessions": 42, "lastSuccessAt": …, "lastAttemptAt": …, "lastError": null },
+    "symbolChanges": { "count": 1071, "isins": { "pairs": 1484, "days": 2 }, "lastSuccessAt": …, … },
     "candles": [ { "tf": "1d", "series": 2, "candles": 310, "lastSession": "2026-11-06" } ] },
+  "disk": { "volumes": [ { "holds": "the database and backups", "freeBytes": 41870000000 } ], "warnBelowBytes": 5000000000, "minFreeBytes": 2000000000,
+    "backups": { "count": 7, "bytes": 2650000000, "newestBytes": 380000000 } },
   "jobs": [],
   "live": { "enabled": true, "running": true,
     "feed": { "mode": "socket", "socket": "connected", "socketSymbols": 3, "polledSymbols": 0, "capacity": 100, "lastTickAt": 1794200401230, "reconnects": 0, "pollingStopped": null },
@@ -566,11 +641,12 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
 ## Background jobs (in the server)
 
 - **NSE files**, in the evening IST: cash bhavcopy (after 17:30) and F&O bhavcopy (after 18:00)
-  for any of the last 10 trading days not stored yet — on start that is the catch-up — then lots
-  and the ban list (from 18:00 the next session's) once each evening (and on start when never
-  fetched or over two days old), then the PR zip (after 17:30) for any of the last **60** days not
-  stored yet: its board meetings are the results calendar, and meetings are announced weeks ahead
-  (a new hub reads ~40 zips once, about a minute). Each dataset is retried at most every 30 minutes.
+  for any of the last 10 trading days not stored yet — on start that is the catch-up — then lots,
+  the ban list (from 18:00 the next session's) and NSE's ticker renames (`symbolchange.csv`) once
+  each evening (and on start when never fetched or over two days old), then the PR zip (after 17:30)
+  for any of the last **60** days not stored yet: its board meetings are the results calendar, and
+  meetings are announced weeks ahead (a new hub reads ~40 zips once, about a minute). Each dataset
+  is retried at most every 30 minutes.
   All NSE requests share one client: at most one per 1.1 s, browser headers, back-off on 403/429.
   Everything comes from NSE's archive host (`nsearchives.nseindia.com`); nothing from
   `www.nseindia.com`, whose JSON API hangs behind bot protection.
@@ -579,7 +655,9 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
   evening (the PR zip: within the last 10 days).
 - **Queued jobs** from the CLI, one at a time: broker backfills and NSE history downloads.
 - **Nightly backup** when `HUB_BACKUP_DIR` is set: once a day (at least 22 hours apart), never
-  between 08:45 and 16:00 IST on weekdays, keeping the newest `HUB_BACKUP_KEEP` (default 7).
+  between 08:45 and 16:00 IST on weekdays, keeping the newest `HUB_BACKUP_KEEP` (default 7). Without
+  the disk space for it ([data backup](#data-backup)) it is skipped with one warning in the log and
+  tried again an hour later.
 
 `HUB_JOBS=off` disables all three.
 
@@ -592,6 +670,8 @@ npm run hub -- data nse-history                                 # NSE's archive 
 npm run hub -- data nse-history --from 2015-01-01 --only cash
 npm run hub -- data nse-history --only indices                  # just the index file (~3,900 requests, 70 minutes)
 npm run hub -- data status
+npm run hub -- data symbols                                     # every F&O stock's history across its renames
+npm run hub -- data symbols INFY TMPV [--date 2005-01-03] [--refresh]
 npm run hub -- data cancel <job id>
 npm run hub -- data backup [--to ./backups] [--keep 7]
 npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tradex .cache/screener>] [--dry-run]
@@ -634,28 +714,64 @@ are rebuilt from what is stored.
 - **Raw prices.** Bhavcopy prices are as traded: a split or bonus shows as a gap. `prev_close` is
   NSE's, adjusted on the ex-date, which is what an adjustment step can be built on. Delisted stocks
   are included (nothing is filtered to today's list). Old tickers stay as NSE wrote them
-  (`INFOSYSTCH` before 2011, `TELCO` before 2004) — `/v1/candles` doesn't serve these rows yet.
+  (`INFOSYSTCH` before 2011, `TELCO` before 2004); `/v1/symbols/history` joins them to today's
+  ticker. `/v1/candles` doesn't serve these rows yet.
+- **ISINs.** Old-format cash days from 2011 carry each security's ISIN, recorded as the day is stored
+  (`isin_symbols`, for renames). Stored days whose ISINs weren't read — downloaded before the hub kept
+  them — have just their cash file read again, once, whenever the cash market is included: about 3,400
+  requests (an hour) for 2011 to 5 Jul 2024. Prices and delivery % already stored are left alone.
 - Every weekend day is asked for in the cash market: NSE held Budget-day, Muhurat and special
   sessions on weekends (e.g. 1 Feb 2020, 12 Nov 2023, 20 Jan 2024). F&O, the PR zip and the index
   file are asked for the weekend days the cash market traded.
 - One request per 1.1 s, like every NSE request: the whole archive is about 32,000 requests,
-  **nine to ten hours** (PR zips are 0.3–0.7 MB each; only their results rows are kept), and an
-  estimated **1–1.5 GB** in `hub.db` (a backup copies all of it). Years go newest first.
+  **nine to ten hours** (PR zips are 0.3–0.7 MB each; only their results rows are kept), and about
+  **1.5 GB** in `hub.db` (~0.5 GB per gzipped backup; [Disk space](#disk-space)). Years go newest
+  first.
 - Same rules as backfills: queued for the server when one is running, run here otherwise (Ctrl-C
   stops it); **pauses in market hours** and for 15 minutes after NSE refuses three days in a row;
   resumes on its own. History runs aren't recorded as the evening run's attempts, so they never
   delay it.
+- **Disk:** the CLI refuses to start (or queue) it while free space on the database's disk is under
+  `HUB_DISK_MIN_GB` (default 2 GB), and a running job checks before every file and **pauses** below
+  it with a message saying so; the server retries every 30 minutes, so it carries on once space is
+  freed. Leave room for what it adds ([Disk space](#disk-space)).
+
+### data symbols
+
+Ticker renames from the store (see [/v1/symbols](#ticker-renames-v1symbols)). With tickers, each
+one's listing as of `--date` (default today): its names, the stored cash sessions under each, and
+whether the history runs on across each rename. Without, the same for **every current F&O stock that
+was ever renamed**, with a count of those continuous across every rename, with a gap, and not stored
+on both sides; it exits 1 when any has a gap. `--refresh` downloads NSE's `symbolchange.csv` first
+(when no hub server owns the NSE connection; the server refreshes it each evening). Read-only
+otherwise, so it may run alongside the server.
 
 ### data backup
 
-A consistent snapshot through SQLite's online backup API — **safe while the server runs**. Written
-as `hub-YYYYMMDD-HHMMSS.db` (UTC) under a temporary name, switched to a single self-contained file
-(no `-wal`/`-shm`), checked with `quick_check`, then renamed into place; older ones beyond `--keep`
-(default `HUB_BACKUP_KEEP`, 7) are deleted. `--to` defaults to `HUB_BACKUP_DIR`, else `./backups`.
+A consistent snapshot through SQLite's online backup API — **safe while the server runs**. The copy
+is written under a temporary name, switched to a single self-contained file (no `-wal`/`-shm`),
+checked with `quick_check`, **gzipped** to `hub-YYYYMMDD-HHMMSS.db.gz` (UTC), read back (gzip's
+checksum, and the size must match), and only then renamed into place; the uncompressed copy is
+deleted. Older ones beyond `--keep` (default `HUB_BACKUP_KEEP`, 7) are deleted — uncompressed
+`hub-*.db` backups from before compression count and rotate out the same way. `--to` defaults to
+`HUB_BACKUP_DIR`, else `./backups`.
 
-**Restore:** stop the hub; copy the backup over `hub.db` in `HUB_DATA_DIR`; delete `hub.db-wal` and
-`hub.db-shm` next to it; start the hub. (The broker token file isn't in the backup; the hub logs
-in again.) Keep a copy off the machine too — see [oracle.md](oracle.md#backups).
+Only compressed backups are kept: an uncompressed newest copy would save one `gunzip` at restore
+time (a couple of seconds per GB) at the cost of the whole database's size again on disk.
+
+- **Disk:** while it runs a backup needs room for the uncompressed copy next to the gzip. It
+  doesn't start unless about **1.5 × the database** plus `HUB_DISK_MIN_GB` is free on the backup
+  disk, and it stops and removes its files if free space falls under `HUB_DISK_MIN_GB` while it
+  writes (checked every 64 MB). Leftovers of a backup that died (`*.partial`, over 6 hours old) are
+  removed by the next one.
+- Time: about 40 s for a 1.5 GB database on a laptop (copy, check, gzip, read-back); the nightly
+  one runs outside market hours and never blocks requests.
+
+**Restore:** stop the hub; unzip the backup over `hub.db` in `HUB_DATA_DIR`
+(`gunzip -c backups/hub-20261109-183000.db.gz > data/hub.db`); delete `hub.db-wal` and `hub.db-shm`
+next to it; start the hub. An older uncompressed `hub-*.db` is copied over as it is. (The broker
+token file isn't in the backup; the hub logs in again.) Keep a copy off the machine too — see
+[oracle.md](oracle.md#backups).
 
 ### data import-tradex
 
@@ -686,6 +802,42 @@ Brings a Tradex install's stored data into the hub, without broker or NSE calls.
 - Each series and day is its own transaction; anything already in the hub is left alone, so a
   second run changes nothing and an interrupted run can simply be run again.
 
+## Disk space
+
+Measured on a synthetic database shaped like the real thing (`hub.db` page sizes from SQLite's
+`dbstat`, backups made with the hub's own `backupDb`): random-walk prices on NSE's 0.05 tick, so
+they compress *less* than real prices — treat the backup sizes as an upper bound.
+
+| What | Rows | In `hub.db` | One backup (gzipped) |
+|---|---|---|---|
+| Empty hub, keys, reference files, a few weeks of evening runs | — | a few MB | under 1 MB |
+| NSE history, cash bhavcopy (`cash_bhav` + its day index), 3 Nov 1994 → Nov 2026 | 12.1 M (7,809 sessions, ~800 → ~2,300 a day) | 1.35 GB | |
+| NSE history, F&O futures (`fo_futures` + index), 9 Nov 2001 → Nov 2026 | 0.78 M (~40 → ~215 underlyings a day) | 0.14 GB | |
+| **NSE history, both** (`hub data nse-history`) | | **1.49 GB** | **0.52 GB** (2.9×) |
+| Broker candles for the F&O universe + indices (230 series: 1d × 5 y, 15m × 1 y, 5m × 1 y) | 6.3 M | 0.44 GB | 0.12 GB (3.7×) |
+| Live 1-minute bars (`HUB_LIVE_RETENTION_DAYS` 30: ~21 sessions × 375 minutes per symbol) | ~7,900 per symbol | ~0.7 MB per symbol kept live (estimate, not measured) | |
+| Each further year of evening runs (cash ~2,300 + F&O ~215 rows a session) | ~0.6 M | ~75 MB | ~25 MB |
+
+**A full history run plus a week of backups**, with broker candles too (~1.9 GB database, ~0.64 GB
+per backup):
+
+| | Space |
+|---|---|
+| `hub.db` (plus a WAL of up to a few MB) | 1.9 GB |
+| 7 nightly backups (`HUB_BACKUP_KEEP=7`) | 4.5 GB |
+| While a backup runs: the uncompressed copy + the new gzip (before the oldest rotates out) | +2.6 GB |
+| **Peak** | **≈ 9 GB**, plus `HUB_DISK_MIN_GB` (2 GB) kept free → **plan for 11–12 GB** |
+
+Before compression the same week needed ~17 GB (eight full copies at the peak). NSE history alone
+(no broker candles): ~1.5 GB database, ~0.52 GB per backup, ~7 GB at the peak.
+
+How the hub protects the disk: `/v1/status` **warns** under `HUB_DISK_WARN_GB` (5 GB) and reports a
+**problem** under `HUB_DISK_MIN_GB` (2 GB) free, for the database's disk and the backups' (if
+separate); `hub data nse-history` won't start below the floor and a running one pauses there;
+a backup won't start without ~1.5 × the database plus the floor free, and stops (removing its files)
+if it drops under the floor. `HUB_DISK_MIN_GB=0` turns the floor off. `hub data status` prints the
+free space and what the backups take.
+
 ## Schema (SQLite, `data/hub.db`)
 
 | Table | Contents |
@@ -699,6 +851,9 @@ Brings a Tradex install's stored data into the hub, without broker or NSE calls.
 | `lot_sizes` | symbol → lot |
 | `fo_ban` | trade date → symbols |
 | `results_events` | (symbol, meeting date) → company, purpose; from the PR zips' board meetings |
+| `symbol_changes` | NSE's `symbolchange.csv`: (old symbol, effective date) → new symbol, company |
+| `isin_symbols` | (ISIN, symbol) → first and last stored day it traded under that ticker (old-format cash files, 2011–2024) |
+| `isin_days` | old-format cash days whose ISINs were read, with how many |
 | `datasets` | per dataset: last attempt, last success, last error, info |
 | `kv` | small hub state: the broker budget (today's counts, strikes, cooldown), the live heartbeat (`live.heartbeat`: when the last run was known alive) and the gap-repair queue (`live.recovery`) |
 | `jobs` | queued jobs (`backfill`, `nse_history`): params, state, progress, resume time |

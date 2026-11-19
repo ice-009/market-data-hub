@@ -4,6 +4,7 @@ import { indexSymbolForName } from "../reference/indices.js";
 import type { FoDayRecord, FoLeg } from "./parsers/foBhav.js";
 import type { IndexCloseRow } from "./parsers/indexClose.js";
 import type { ResultsEvent } from "./parsers/results.js";
+import type { SymbolChangeRow } from "./parsers/symbolChange.js";
 
 // Storage for NSE's daily files (migrations 2 and 5). Day-by-day datasets (cash
 // and F&O bhavcopy, the PR zip, the index file) record every weekday checked in `nse_days`:
@@ -18,7 +19,7 @@ import type { ResultsEvent } from "./parsers/results.js";
 /** `pr` is the daily PR zip (its board meetings fill the results calendar); `index_close` NSE's index file. */
 export type DayDataset = "cash_bhav" | "fo_bhav" | "pr" | "index_close";
 export type DayStatus = "ok" | "holiday" | "mismatch";
-export type DatasetName = DayDataset | "lots" | "fo_ban";
+export type DatasetName = DayDataset | "lots" | "fo_ban" | "symbol_changes";
 
 export function checkedDays(db: Db, dataset: DayDataset, from = Number.MIN_SAFE_INTEGER): Map<number, DayStatus> {
   const rows = db.prepare("select day, status from nse_days where dataset = ? and day >= ?").all(dataset, from) as Array<{ day: number; status: DayStatus }>;
@@ -318,6 +319,84 @@ export function readResults(db: Db, from: number, to: number, symbol?: string): 
     ? db.prepare("select * from results_events where date between ? and ? and symbol = ? order by date, symbol").all(from, to, symbol)
     : db.prepare("select * from results_events where date between ? and ? order by date, symbol").all(from, to);
   return rows as ResultsEvent[];
+}
+
+// ------------------------------------------------------------------ ticker renames (migration 5)
+
+/** Replace the stored list with NSE's symbolchange.csv as just downloaded. */
+export function writeSymbolChanges(db: Db, rows: SymbolChangeRow[]) {
+  const insert = db.prepare("insert or ignore into symbol_changes (old_symbol, new_symbol, day, company) values (?, ?, ?, ?)");
+  db.transaction(() => {
+    db.prepare("delete from symbol_changes").run();
+    for (const row of rows) insert.run(row.oldSymbol, row.newSymbol, row.day, row.company);
+  })();
+}
+
+export function readSymbolChanges(db: Db): SymbolChangeRow[] {
+  const rows = db.prepare("select old_symbol, new_symbol, day, company from symbol_changes order by day, old_symbol").all() as Array<{ old_symbol: string; new_symbol: string; day: number; company: string }>;
+  return rows.map((row) => ({ oldSymbol: row.old_symbol, newSymbol: row.new_symbol, day: row.day, company: row.company }));
+}
+
+/**
+ * Record which ticker each ISIN traded under on `day` (an old-format cash day),
+ * widening each (ISIN, ticker) pair's first/last day, and mark the day read.
+ * Idempotent: reading a day twice changes nothing.
+ */
+export function writeIsins(db: Db, day: number, rows: ReadonlyArray<{ symbol: string; isin?: string }>) {
+  const upsert = db.prepare(
+    `insert into isin_symbols (isin, symbol, first_day, last_day) values (?, ?, ?, ?)
+     on conflict(isin, symbol) do update set first_day = min(first_day, excluded.first_day), last_day = max(last_day, excluded.last_day)`,
+  );
+  let isins = 0;
+  db.transaction(() => {
+    for (const row of rows) {
+      if (!row.isin) continue;
+      upsert.run(row.isin, row.symbol, day, day);
+      isins += 1;
+    }
+    db.prepare("insert or replace into isin_days (day, isins) values (?, ?)").run(day, isins);
+  })();
+}
+
+/** Old-format cash days whose ISINs have been read, from `from` on. */
+export function isinDaysRead(db: Db, from = Number.MIN_SAFE_INTEGER): Set<number> {
+  return new Set((db.prepare("select day from isin_days where day >= ?").all(from) as Array<{ day: number }>).map((row) => row.day));
+}
+
+export interface IsinUse {
+  isin: string;
+  symbol: string;
+  firstDay: number;
+  lastDay: number;
+}
+
+/** Every ISIN seen under more than one ticker, with each ticker's first and last stored day; by ISIN, oldest use first. */
+export function sharedIsins(db: Db): IsinUse[] {
+  const rows = db
+    .prepare(
+      `select isin, symbol, first_day, last_day from isin_symbols
+       where isin in (select isin from isin_symbols group by isin having count(*) > 1)
+       order by isin, first_day, symbol`,
+    )
+    .all() as Array<{ isin: string; symbol: string; first_day: number; last_day: number }>;
+  return rows.map((row) => ({ isin: row.isin, symbol: row.symbol, firstDay: row.first_day, lastDay: row.last_day }));
+}
+
+export function isinStats(db: Db): { pairs: number; days: number } {
+  const pairs = (db.prepare("select count(*) as n from isin_symbols").get() as { n: number }).n;
+  const days = (db.prepare("select count(*) as n from isin_days where isins > 0").get() as { n: number }).n;
+  return { pairs, days };
+}
+
+/** A ticker's stored cash-bhavcopy sessions with from <= day < until (null = open-ended). */
+export function cashSpan(db: Db, symbol: string, from: number | null, until: number | null): { first: number; last: number; sessions: number } | null {
+  const row = db.prepare("select min(day) as first, max(day) as last, count(*) as sessions from cash_bhav where symbol = ? and day >= ? and day < ?").get(symbol, from ?? Number.MIN_SAFE_INTEGER, until ?? Number.MAX_SAFE_INTEGER) as { first: number | null; last: number | null; sessions: number };
+  return row.first === null || row.last === null ? null : { first: row.first, last: row.last, sessions: row.sessions };
+}
+
+/** Stored cash sessions strictly between two days. */
+export function cashSessionsBetween(db: Db, after: number, before: number): number {
+  return (db.prepare("select count(*) as n from nse_days where dataset = 'cash_bhav' and status = 'ok' and day > ? and day < ?").get(after, before) as { n: number }).n;
 }
 
 // ------------------------------------------------------------------ run bookkeeping

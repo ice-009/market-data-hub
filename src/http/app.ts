@@ -6,11 +6,12 @@ import type { Db } from "../db.js";
 import { hubHealth } from "../health.js";
 import type { Hub } from "../hub.js";
 import type { Logger } from "../log.js";
-import { brokerStatus, dataFreshness, recentJobs } from "../status.js";
+import { brokerStatus, dataFreshness, diskStatus, recentJobs } from "../status.js";
 import { errorBody, type HubEnv } from "./common.js";
 import { candleRoutes } from "./routes/candles.js";
 import { liveRoutes, liveStatus, type LiveDeps } from "./routes/live.js";
 import { referenceRoutes } from "./routes/reference.js";
+import { symbolRoutes } from "./routes/symbols.js";
 
 export { errorBody, requireScope, type HubEnv } from "./common.js";
 
@@ -72,6 +73,7 @@ export function createApp(deps: AppDeps) {
       key: { name: c.get("apiKey").name, scopes: c.get("apiKey").scopes },
       broker: brokerStatus(deps.hub),
       data: { dbBytes, ...dataFreshness(deps.db) },
+      disk: diskStatus(deps.hub.config),
       jobs: recentJobs(deps.db),
       live: { ...liveNow, ...deps.hub.live.status() },
     }, strict && !health.healthy ? 503 : 200);
@@ -79,6 +81,7 @@ export function createApp(deps: AppDeps) {
 
   candleRoutes(app, deps.hub);
   referenceRoutes(app, deps.hub);
+  symbolRoutes(app, deps.hub);
   // The live routes share one fan-out per hub (keyed on hub.live.deps); the hub closes their streams at shutdown.
   deps.hub.live.attach(liveRoutes(app, live));
 
