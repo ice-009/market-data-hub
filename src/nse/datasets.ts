@@ -1,5 +1,6 @@
 import type { Db } from "../db.js";
 import type { DiskFloor } from "../disk.js";
+import { deriveFactors } from "../history/adjustments.js";
 import { applyCashBhav } from "../history/fromBhav.js";
 import { syncIndexSeries } from "../history/fromIndices.js";
 import type { Logger } from "../log.js";
@@ -7,6 +8,7 @@ import { DAY_MS, isoDay, istParts } from "../time.js";
 import { NseError, type NseClient } from "./client.js";
 import { parseCashBhav, type CashBhavParse } from "./parsers/cashBhav.js";
 import { parseCmBhav } from "./parsers/cmBhav.js";
+import { corporateActionsFileDay, parseCorporateActions, type CorporateActionRow } from "./parsers/corporateActions.js";
 import { aggregateStockFutures, parseFoBhav, parseFoBhavLegacy } from "./parsers/foBhav.js";
 import { parseIndexClose } from "./parsers/indexClose.js";
 import { mtoKey, parseMto } from "./parsers/mto.js";
@@ -14,7 +16,7 @@ import { parseFnoBan } from "./parsers/ban.js";
 import { parseNseLots } from "./parsers/lots.js";
 import { boardMeetingsFileDay, parseBoardMeetings, resultsEvents } from "./parsers/results.js";
 import { parseSymbolChanges } from "./parsers/symbolChange.js";
-import { dayStatuses, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeFoDay, writeIndexDay, writeIsins, writeLots, writePrDay, writeSymbolChanges, type DayDataset, type DayStatus } from "./store.js";
+import { dayStatuses, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeCorporateActions, writeFoDay, writeIndexDay, writeIsins, writeLots, writePrDay, writeSymbolChanges, type DayDataset, type DayStatus } from "./store.js";
 import { ZipError, isZip, unzipFile, unzipSingle } from "./unzip.js";
 
 // NSE's daily files, downloaded from its free public archive — no broker calls:
@@ -25,7 +27,8 @@ import { ZipError, isZip, unzipFile, unzipSingle } from "./unzip.js";
 //   lots       fo_mktlots.csv (fallback: the lot column of the latest F&O bhavcopy)
 //   fo_ban     fo_secban.csv
 //   pr         PRDDMMYY.zip, the daily "PR" bundle (since 2010): its board-meetings file
-//              bmDDMMYYYY.txt fills the results calendar
+//              bmDDMMYYYY.txt fills the results calendar, its corporate-actions file
+//              bcDDMMYYYY.csv the corporate actions (bonus, split, dividend… with ex-dates)
 //   symbol_changes  content/equities/symbolchange.csv: every ticker rename since 1999
 // Nothing comes from www.nseindia.com: its JSON API (the event calendar the
 // results used to come from) hangs behind bot protection since Nov 2026.
@@ -45,6 +48,8 @@ export interface NseContext {
   clock: () => number;
   /** The free space NSE history downloads leave on the database's disk (HUB_DISK_MIN_GB); absent = no check. */
   disk?: DiskFloor;
+  /** No broker: stored daily series are built from the archive and its adjustment factors (dropped when those change). */
+  endOfDay?: boolean;
 }
 
 /** Don't ask for today's file before this (minutes after IST midnight). */
@@ -178,7 +183,12 @@ export function readCashFile(ctx: NseContext, day: number, body: Buffer, options
     store: () => {
       writeCashDay(ctx.db, day, rows, ctx.clock());
       if (isLegacyDay(day)) writeIsins(ctx.db, day, rows);
-      if (extend) applyCashBhav(ctx.db, day, rows, ctx.log);
+      // The evening's day (and any stored after it): its ex-dates, before the stored series are extended.
+      // A history download derives everything once at the end of its run instead.
+      if (extend) {
+        deriveFactors(ctx.db, { from: day });
+        applyCashBhav(ctx.db, day, rows, ctx.log);
+      }
       return rows.length;
     },
   };
@@ -238,8 +248,9 @@ export function readIndexFile(ctx: NseContext, day: number, body: Buffer, option
 }
 
 /**
- * Read the results calendar's share of a PR zip for `day`: the financial-results
- * meetings in its board-meetings file. The date in that file's name must be `day`.
+ * Read a PR zip for `day`: the financial-results meetings in its board-meetings
+ * file (the results calendar) and the rows of its corporate-actions file. The
+ * date in the board-meetings file's name must be `day`.
  */
 export function readPrFile(ctx: NseContext, day: number, body: Buffer): DayParse {
   const file = fromZip(body, () => unzipFile(body, (name) => boardMeetingsFileDay(name) !== null));
@@ -248,14 +259,52 @@ export function readPrFile(ctx: NseContext, day: number, body: Buffer): DayParse
   if (wrong) return { kind: "mismatch", note: wrong };
   const parsed = parseBoardMeetings(file.data.toString("utf8"));
   const events = resultsEvents(parsed.meetings);
+  const actions = readCorporateActionsFile(ctx, day, body);
   return {
     kind: "ok",
-    badRows: parsed.badRows,
+    badRows: parsed.badRows + (actions?.badRows ?? 0),
     store: () => {
       writePrDay(ctx.db, day, events, ctx.clock());
+      if (actions) writeCorporateActions(ctx.db, day, actions.rows);
       return events.length;
     },
   };
+}
+
+/**
+ * The equity rows of a PR zip's corporate-actions file (bcDDMMYYYY.csv), or
+ * null when the zip has none or it's for another date (logged).
+ */
+function readCorporateActionsFile(ctx: NseContext, day: number, body: Buffer): { rows: CorporateActionRow[]; badRows: number } | null {
+  const file = fromZip(body, () => unzipFile(body, (name) => corporateActionsFileDay(name.split("/").pop()!) !== null));
+  if (!file) {
+    ctx.log.warn("no corporate-actions file in the PR zip", { day: isoDay(day) });
+    return null;
+  }
+  const fileDay = corporateActionsFileDay(file.name.split("/").pop()!);
+  if (fileDay !== day) {
+    ctx.log.warn("the PR zip's corporate-actions file is for another date; not read", { day: isoDay(day), fileDate: fileDay === null ? null : isoDay(fileDay) });
+    return null;
+  }
+  const parsed = parseCorporateActions(file.data.toString("utf8"));
+  return { rows: parsed.rows, badRows: parsed.badRows };
+}
+
+/**
+ * Read only the corporate actions of a stored PR day (one downloaded before the
+ * hub kept them): the results events and nse_days aren't touched. A day without
+ * a usable bc file is recorded as read, with no rows, so it isn't asked for
+ * again. Throws NseError when NSE won't serve it.
+ */
+export async function importCorporateActions(ctx: NseContext, day: number): Promise<DayOutcome> {
+  const response = await ctx.nse.get(prUrl(ctx.urls.archiveUrl, day));
+  if (response.status === 404) {
+    writeCorporateActions(ctx.db, day, []);
+    return "holiday";
+  }
+  const actions = readCorporateActionsFile(ctx, day, response.body);
+  writeCorporateActions(ctx.db, day, actions?.rows ?? []);
+  return actions ? "ok" : "mismatch";
 }
 
 const DAY_URL: Record<DayDataset, (archiveUrl: string, day: number) => string> = { cash_bhav: cashBhavUrl, fo_bhav: foBhavUrl, pr: prUrl, index_close: indexCloseUrl };
@@ -332,6 +381,8 @@ export interface SyncOptions extends ImportOptions {
   record?: boolean;
   /** Read only the ISINs of stored old-format cash days (importIsins). */
   isinsOnly?: boolean;
+  /** Read only the corporate actions of stored PR days (importCorporateActions). */
+  actionsOnly?: boolean;
 }
 
 /**
@@ -339,7 +390,7 @@ export interface SyncOptions extends ImportOptions {
  * order). Stops after MAX_CONSECUTIVE_FAILURES hard failures in a row.
  */
 export async function syncDays(ctx: NseContext, dataset: DayDataset, days: number[], shouldStop: () => boolean = () => false, onDay?: (day: number, outcome: DayOutcome | "failed") => void, options: SyncOptions = {}): Promise<SyncResult> {
-  const { record = true, isinsOnly = false, ...importOptions } = options;
+  const { record = true, isinsOnly = false, actionsOnly = false, ...importOptions } = options;
   const result: SyncResult = { stored: 0, failed: 0, stopped: null };
   let consecutive = 0;
   let lastError = "";
@@ -349,7 +400,7 @@ export async function syncDays(ctx: NseContext, dataset: DayDataset, days: numbe
       break;
     }
     try {
-      const outcome = isinsOnly ? await importIsins(ctx, day) : await importDay(ctx, dataset, day, importOptions);
+      const outcome = isinsOnly ? await importIsins(ctx, day) : actionsOnly ? await importCorporateActions(ctx, day) : await importDay(ctx, dataset, day, importOptions);
       if (outcome === "ok") result.stored += 1;
       consecutive = 0;
       onDay?.(day, outcome);

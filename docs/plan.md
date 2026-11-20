@@ -192,14 +192,21 @@ Nov 2023; Budget days 28 Feb 2015 and 1 Feb 2020; special sessions 20 Jan, 2 Mar
    `cash_bhav` / `fo_futures` — old formats up to 5 Jul 2024, current ones after — resumable through
    `nse_days`, pausing in market hours and at the disk floor, ~24,000 requests (7–8 hours), ~1.5 GB (measured on a
    synthetic database; ~0.5 GB per gzipped backup — [api.md](api.md#disk-space)).
-2. **Adjustment:** split/bonus factors from the bhavcopy itself — NSE's `PREVCLOSE` on an ex-date
-   is the previous close adjusted, so `prev_close(d) / close(d−1)` is the day's factor (1 on normal
-   days) — checked against the broker's adjusted 5 years where they overlap; renamed tickers joined
-   with NSE's `symbolchange.csv` (and ISINs, in files from 2011 on) ✅ (`src/reference/renames.ts`,
-   `/v1/symbols`, `hub data symbols`). Index history (NIFTY,
-   sectors) needs another source: it isn't in these files.
-3. **Serving:** `/v1/candles?tf=1d` with `from` before the broker's window answers from the
-   adjusted NSE series; Tradex's backtests and evidence check use the full range.
+2. **Adjustment** ✅ (`src/history/adjustments.ts`, `adjustment_factors`, `/v1/adjustments`,
+   `hub data adjustments --check`): one factor per ex-date, kept apart from the raw prices. The
+   plan was NSE's `PREVCLOSE` (adjusted on an ex-date, so `prev_close(d) / close(d−1)` would be the
+   factor) — but checked on real files it isn't adjusted for ordinary splits and bonuses (TATASTEEL
+   2022 in the old format, ANGELONE and CUB 2026 in the new ones): it is the previous close. So the
+   factors come from `PREVCLOSE` where NSE did adjust it, else NSE's corporate-actions file (the PR
+   zip's `bc` file, from 2010: ratios, demergers, rights prices; `/v1/corporate-actions`), else a
+   standard-ratio price gap where no `bc` file covers the day — checked against the broker's
+   adjusted 5 years where they overlap. Renamed tickers joined with NSE's `symbolchange.csv` (and
+   ISINs, in files from 2011 on) ✅ (`src/reference/renames.ts`, `/v1/symbols`, `hub data symbols`);
+   factors follow a company across them. Index history (NIFTY, sectors) needs another source: it
+   isn't in these files.
+3. **Serving:** `/v1/candles?adjust=none` serves the raw NSE series and end-of-day mode the adjusted
+   one ✅; `/v1/candles?tf=1d` with `from` before the broker's window answering from the adjusted NSE
+   series is #22; Tradex's backtests and evidence check use the full range.
 
 Total ≈ 2 weeks. Tests: unit tests for parsers, budget and auth; an end-to-end test with a mock
 broker server (Tradex already supports overriding Fyers endpoints for this).

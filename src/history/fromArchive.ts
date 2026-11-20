@@ -2,10 +2,9 @@ import { BrokerError } from "../broker/errors.js";
 import type { Bar, HistoryResult, Resolution } from "../broker/fyers.js";
 import { isFuture, isIndex } from "../broker/symbols.js";
 import type { Db } from "../db.js";
-import { WEEKEND_SESSIONS } from "../nse/datasets.js";
 import { dayStatuses, lastOkDay } from "../nse/store.js";
-import { DAY_MS, isWeekday } from "../time.js";
-import { SPLIT_TOLERANCE } from "./fromBhav.js";
+import { DAY_MS } from "../time.js";
+import { cumulative, isSessionDay, listingFactors } from "./adjustments.js";
 import type { HistoryBroker } from "./service.js";
 
 // End-of-day mode (no broker configured): daily candles for stocks come from
@@ -19,13 +18,14 @@ import type { HistoryBroker } from "./service.js";
 // known holiday). Older days the archive doesn't hold yet are left uncovered,
 // so a later nse-history run fills them on the next request.
 //
-// Prices are adjusted for splits and bonuses the way NSE itself does it: on an
-// ex-date the file's PREV_CLOSE is already adjusted, so
-// prev_close(d) / close(d−1) is the factor for every bar before d (volumes get
-// the inverse). It's the same signal src/history/fromBhav.ts uses to notice a
-// corporate action; a new ex-date makes that code drop the stored series and
-// the next request rebuilds it here, adjusted again. (Store and serve raw and
-// adjusted prices separately: market-data-hub#20.)
+// Prices are adjusted for splits and bonuses with the factors in
+// adjustment_factors (src/history/adjustments.ts: NSE's PREV_CLOSE where NSE
+// adjusted it, the PR zip's corporate actions, or a standard-ratio price gap):
+// each bar × the product of the factors with a later ex-date, volumes ÷ it —
+// the listing's factors, so they follow the company across renames. Raw prices
+// stay in cash_bhav (served with /v1/candles?adjust=none). A new ex-date makes
+// src/history/fromBhav.ts drop the stored series, and the next request rebuilds
+// it here, adjusted again.
 //
 // Indices and futures contracts aren't in the cash file, and intraday bars
 // don't exist in end-of-day data: those answer `not_configured`.
@@ -34,9 +34,8 @@ export const EOD_INTRADAY_MESSAGE = "Intraday candles need a broker: this hub ha
 export const EOD_INDEX_MESSAGE = "Index candles beyond NSE's index file (stored daily from Feb 2012) need a broker.";
 export const EOD_FUTURE_MESSAGE = "Futures-contract candles need a broker: this hub has none configured and serves NSE end-of-day data only.";
 
-interface CashRow {
+export interface CashRow {
   day: number;
-  prev_close: number;
   o: number;
   h: number;
   l: number;
@@ -44,15 +43,15 @@ interface CashRow {
   v: number;
 }
 
-const isSessionDay = (day: number) => isWeekday(day) || WEEKEND_SESSIONS.includes(day);
 const round2 = (value: number) => Math.round(value * 100) / 100;
 
 /**
  * Daily bars of one stock from the stored cash bhavcopies, fromDay..toDay
- * (day keys), adjusted for splits and bonuses. Throws BrokerError: `bad_symbol`
- * for a ticker no stored file has ever listed, `upstream` before any file is stored.
+ * (day keys), adjusted for splits and bonuses (`adjusted: false`: as traded).
+ * Throws BrokerError: `bad_symbol` for a ticker no stored file has ever listed,
+ * `upstream` before any file is stored.
  */
-export function archiveDaily(db: Db, symbol: string, fromDay: number, toDay: number): HistoryResult & { coveredToDay: number } {
+export function archiveDaily(db: Db, symbol: string, fromDay: number, toDay: number, options: { adjusted?: boolean } = {}): HistoryResult & { coveredToDay: number } {
   const newest = lastOkDay(db, "cash_bhav", toDay + 1);
   if (newest === null) {
     if (lastOkDay(db, "cash_bhav") === null) throw new BrokerError("No NSE end-of-day files are stored yet; the hub downloads them on start and every evening.", "upstream");
@@ -69,26 +68,22 @@ export function archiveDaily(db: Db, symbol: string, fromDay: number, toDay: num
   for (let day = newest - DAY_MS; day >= fromDay && checked(day); day -= DAY_MS) coveredFrom = day;
   let coveredTo = newest;
   for (let day = newest + DAY_MS; day <= toDay && checked(day) && statuses.get(day) !== "ok"; day += DAY_MS) coveredTo = day;
-  // Rows after toDay are read too: their ex-dates adjust the bars served.
-  const rows = db.prepare("select day, prev_close, o, h, l, c, v from cash_bhav where symbol = ? and day >= ? order by day").all(symbol, coveredFrom) as CashRow[];
-
-  // Walk newest → oldest, carrying the product of the factors of the ex-dates passed.
-  const bars: Bar[] = [];
-  let factor = 1;
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (row.day <= toDay && row.c > 0) {
-      bars.push({ t: row.day, o: round2(row.o * factor), h: round2(row.h * factor), l: round2(row.l * factor), c: round2(row.c * factor), v: Math.round(row.v / factor) });
-    }
-    const previous = rows[index - 1];
-    if (previous && previous.c > 0 && row.prev_close > 0) {
-      const ratio = row.prev_close / previous.c;
-      if (Math.abs(ratio - 1) > SPLIT_TOLERANCE) factor *= ratio;
-    }
-  }
-  bars.reverse();
-  return { bars, coveredFromDay: coveredFrom, coveredToDay: coveredTo, complete: true };
+  const rows = db.prepare("select day, o, h, l, c, v from cash_bhav where symbol = ? and day between ? and ? order by day").all(symbol, coveredFrom, toDay) as CashRow[];
+  const factorAt = options.adjusted === false ? () => 1 : cumulative(listingFactors(db, symbol, newest).factors);
+  return { bars: adjustRows(rows, factorAt), coveredFromDay: coveredFrom, coveredToDay: coveredTo, complete: true };
 }
+
+/** Raw rows → bars, each × factorAt(its day) (volumes ÷). Pure. */
+export function adjustRows(rows: readonly CashRow[], factorAt: (day: number) => number): Bar[] {
+  const bars: Bar[] = [];
+  for (const row of rows) {
+    if (!(row.c > 0)) continue;
+    const factor = factorAt(row.day);
+    bars.push(factor === 1 ? { t: row.day, o: row.o, h: row.h, l: row.l, c: row.c, v: row.v } : { t: row.day, o: round2(row.o * factor), h: round2(row.h * factor), l: round2(row.l * factor), c: round2(row.c * factor), v: Math.round(row.v / factor) });
+  }
+  return bars;
+}
+
 
 /** The HistoryBroker the hub uses when no broker is configured. */
 export class ArchiveHistory implements HistoryBroker {

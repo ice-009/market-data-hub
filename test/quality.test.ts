@@ -189,10 +189,9 @@ describe("data quality: findings storage", () => {
     expect(readFindings(t.db)).toHaveLength(2);
   });
 
-  it("skips a migration number held for work in review", () => {
+  it("comes after the adjustment tables (migrations 7 and 8)", () => {
     const ids = (t.db.prepare("select id from _migrations order by id").all() as Array<{ id: number }>).map((row) => row.id);
-    expect(ids).not.toContain(7);
-    expect(ids).toContain(8);
+    expect(ids).toEqual(expect.arrayContaining([7, 8]));
     migrate(t.db); // idempotent
   });
 });
@@ -237,6 +236,16 @@ describe("data quality: the runner", () => {
     expect(evening.checkedDays).toBe(2);
     // The lot change is recorded, and it explains SBIN's halving: no outlier.
     expect(evening.fresh.map((f) => [f.check, f.subject])).toEqual([["lot_change", "fo"]]);
+  });
+
+  it("leaves alone a move on a stored split/bonus ex-date", () => {
+    seed();
+    t.db.prepare("delete from fo_futures where symbol = 'SBIN' and lot = 1500").run(); // no lot change to explain it
+    const last = DAYS[DAYS.length - 1];
+    t.db
+      .prepare("insert into adjustment_factors (symbol, day, factor, source, prev_day, prev_c, prev_close, o, c) values ('SBIN', ?, 0.5, 'corporate_action', ?, 100, 100, 50, 50)")
+      .run(last, DAYS[DAYS.length - 2]);
+    expect(runQuality(t.db, { clock: () => 1_000 }).fresh.map((f) => [f.check, f.subject])).toEqual([["fo_list_change", "fo"]]);
   });
 
   it("flags an unexplained halving, and checks again with --full", () => {

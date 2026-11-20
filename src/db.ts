@@ -14,7 +14,7 @@ import Database from "better-sqlite3";
 //   4  live prices             live_quotes, live_bars_1m, live_subscriptions; see src/live/store.ts
 //   5  ticker renames          symbol_changes, isin_symbols, isin_days; see src/reference/renames.ts
 //   6  index closes            index_closes (NSE's ind_close_all); see src/nse/store.ts
-//   7  (reserved)              split/bonus adjustment factors (market-data-hub#20)
+//   7  adjustments             corporate_actions, corporate_action_days, adjustment_factors; see src/history/adjustments.ts
 //   8  data quality            quality_findings, quality_checked; datasets.failures; see src/quality/store.ts
 
 export type Db = Database.Database;
@@ -203,8 +203,43 @@ const MIGRATIONS: Array<string | undefined> = [
      primary key (day, name)
    ) without rowid;
    create index index_closes_symbol on index_closes (symbol, day);`,
-  // 7: reserved for the split/bonus adjustment factors (market-data-hub#20).
-  undefined,
+  // Split and bonus adjustment. corporate_actions: the PR zip's bc file, every
+  // equity row as NSE wrote it (symbol = the ticker that day), with what the
+  // purpose means for prices; first_day/last_day = the PR days that listed it.
+  // corporate_action_days: PR days whose bc file was read. adjustment_factors:
+  // one row per ex-date found in the cash bhavcopies — prices before `day`
+  // times `factor` (volumes divided) give prices comparable with `day` on;
+  // raw prices stay as they are in cash_bhav.
+  `create table corporate_actions (
+     symbol text not null,
+     ex_day integer not null,
+     purpose text not null,
+     series text not null,
+     company text not null,
+     record_day integer,
+     kinds text not null,
+     ratio real,
+     first_day integer not null,
+     last_day integer not null,
+     primary key (symbol, ex_day, purpose)
+   ) without rowid;
+   create index corporate_actions_ex on corporate_actions (ex_day);
+   create table corporate_action_days (day integer primary key, rows integer not null);
+   create table adjustment_factors (
+     symbol text not null,
+     day integer not null,
+     factor real not null,
+     source text not null,
+     prev_day integer not null,
+     prev_c real not null,
+     prev_close real not null,
+     o real not null,
+     c real not null,
+     action text,
+     renamed_from text,
+     primary key (symbol, day)
+   ) without rowid;
+   create index adjustment_factors_day on adjustment_factors (day);`,
   // Data-quality checks (src/quality): one row per finding, keyed by what it's
   // about (check, trade day, subject: a dataset, a symbol, or "fo"), kept after
   // it's resolved (resolved_at). quality_checked: the trade days each per-day

@@ -26,7 +26,7 @@ import { checkedQualityDays, forgetQualityDays, markQualityDays, saveFindings, t
 // `hub data quality --full` forgets what was checked and checks everything again.
 
 export interface QualityHooks {
-  /** Known corporate actions; the adjustment table (market-data-hub#20) plugs in here. */
+  /** Known corporate actions. Default: the stored split/bonus factors (adjustment_factors, src/history/adjustments.ts). */
   corporateAction?: CorporateActionHook;
   /** Adjustment factors for the raw archive's closes, for comparing them with the broker's adjusted history. */
   adjust?: PriceAdjuster;
@@ -207,12 +207,18 @@ function candleChecks(db: Db, adjust: PriceAdjuster | undefined, cash: ReadonlyM
   return { broker, gaps };
 }
 
+/** A move on a stored ex-date (adjustment_factors, keyed by the ticker that day) is a corporate action, not an outlier. */
+export function storedFactors(db: Db): CorporateActionHook {
+  const lookup = db.prepare("select factor, source from adjustment_factors where symbol = ? and day = ?");
+  return (symbol, day) => (lookup.get(symbol, day) as { factor: number; source: string } | undefined) ?? null;
+}
+
 /** Run the checks that are due (see the top of this file). Never throws for bad data; SQLite errors propagate. */
 export function runQuality(db: Db, options: QualityOptions = {}): QualityResult {
   const clock = options.clock ?? Date.now;
   const started = clock();
   const budget = options.budgetMs ?? Number.POSITIVE_INFINITY;
-  const hooks = options.hooks ?? {};
+  const hooks = { corporateAction: storedFactors(db), ...options.hooks };
   const state = options.full ? {} : readQualityState(db);
   if (options.full) forgetQualityDays(db);
   const fresh: Finding[] = [];

@@ -176,8 +176,8 @@ No Fyers account? Start the hub without any `FYERS_*` settings and it runs in **
 on NSE's free daily files — nothing else to configure:
 
 - **Daily and weekly candles** for every NSE stock, built from the cash bhavcopies the hub stores
-  (each evening's file, plus NSE's archive), adjusted for splits and bonuses with NSE's own
-  `PREV_CLOSE`, with delivery %. On first start the hub downloads the last
+  (each evening's file, plus NSE's archive), adjusted for splits and bonuses with factors derived
+  from NSE's own files (raw prices too, with `adjust=none`), with delivery %. On first start the hub downloads the last
   `HUB_EOD_HISTORY_YEARS` years (default 2) from the archive by itself (stock, F&O and index files)
   — about 45 minutes at NSE's pace, paused in market hours; the last two weeks arrive within a minute.
   NIFTY and the sector indices (and so the market regime) come from NSE's index file.
@@ -335,7 +335,7 @@ Errors always look like this and never echo your headers or the hub's configurat
 |---|---|---|---|
 | `GET /healthz` | — | ✅ | Plain-text `ok` if the process is up. No key needed; says nothing else. |
 | `GET /v1/status` | any | ✅ | Version, uptime, the calling key, the broker connection and today's budget, data freshness, recent jobs, and a `live` section (feed mode, persistent symbols, streams, gap repair). |
-| `GET /v1/candles?symbol=SBIN&tf=1d&from=…&to=…` | history | ✅ | OHLCV bars. `tf`: `1d`, `1w`, `1h`, `15m`, `5m`, `1m` (the last 30 days). Daily bars include delivery %. Served from the store; missing ranges are fetched from the broker; the newest bar is brought up to the minute from live prices (`liveThrough`). Stocks, indices and futures contracts (`SBIN26NOVFUT`). |
+| `GET /v1/candles?symbol=SBIN&tf=1d&from=…&to=…` | history | ✅ | OHLCV bars. `tf`: `1d`, `1w`, `1h`, `15m`, `5m`, `1m` (the last 30 days). Daily bars include delivery %. Served from the store; missing ranges are fetched from the broker; the newest bar is brought up to the minute from live prices (`liveThrough`). Stocks, indices and futures contracts (`SBIN26NOVFUT`). Stock prices adjusted for splits and bonuses; `adjust=none` for daily bars as traded (NSE's bhavcopies). |
 | `GET /v1/candles/batch?symbols=SBIN,INFY,…&tf=1d` | history | ✅ | Daily or weekly bars for up to 300 symbols at once, from the store without waiting; what isn't stored is queued for a background download (`queued`) and served on a later request. |
 | `GET /v1/universe/{fno\|nifty50\|nifty100\|nifty200\|nifty500}` | history | ✅ | Symbols with names and sectors. |
 | `GET /v1/fo/oi?symbol=SBIN&from=…&to=…` | fo | ✅ | Near/next-month futures, combined open interest and its change, buildup class. |
@@ -347,6 +347,8 @@ Errors always look like this and never echo your headers or the hub's configurat
 | `GET /v1/results-calendar` | history | ✅ | Upcoming and recent results dates. |
 | `GET /v1/market/regime` | history | ✅ | NIFTY vs its 50- and 200-day averages, breadth. |
 | `GET /v1/indices` | history | ✅ | NIFTY, NIFTY 500 and the sector indices with daily history from NSE's index file (since 2012), synthetic equal-weight sector baskets (labelled `synthetic`) for earlier years, and the industry → sector-index map. |
+| `GET /v1/adjustments?symbol=INFY[&from&to]` | history | ✅ | A company's split/bonus adjustment factors (ex-dates), across its renames, with where each came from. |
+| `GET /v1/corporate-actions?[symbol&]from&to` | history | ✅ | NSE's corporate actions (bonus, split, rights, dividend, demerger… with ex-dates) from the PR zips. |
 | `GET /v1/symbols/history?symbol=INFY[&date=…]` | history | ✅ | A company's tickers over time (INFOSYSTCH → INFY), point in time: the ticker as it was on `date`, and the cash history stored under each name. |
 | `GET /v1/symbols/changes[?symbol][&from&to]` | history | ✅ | Every ticker rename: NSE's `symbolchange.csv` plus renames seen in the bhavcopies' ISINs. |
 | `GET /v1/quality` | history | ✅ | Data-quality findings, checked after every evening import and archive download: missing sessions, files for the wrong date, price outliers no corporate action explains, stored candles vs the bhavcopy, lot-size and F&O-list changes. |
@@ -648,7 +650,7 @@ F&O open interest and membership.
 | **H3** | TypeScript client package; a `hub` data source in Tradex | 🚧 |
 | **H4** | Backups (online, rotated, nightly), health in `/v1/status` for uptime checks, [Oracle Cloud guide](docs/oracle.md), [importing Tradex's stored data](docs/migrate-tradex.md) | ✅ done |
 | **H5** | Endpoints for Tradex to drop its own broker and NSE fetching: batch daily candles, one day's OI across stocks, F&O membership over a range, futures contracts as symbols, 1-minute candles | ✅ done |
-| **H6** | 30 years of daily history from NSE's archive: download (cash since 1994, F&O since 2001) ✅; renamed tickers joined, point in time (`/v1/symbols`) ✅; split/bonus adjustment; serving it through `/v1/candles` | 🚧 |
+| **H6** | 30 years of daily history from NSE's archive: download (cash since 1994, F&O since 2001) ✅; renamed tickers joined, point in time (`/v1/symbols`) ✅; split/bonus adjustment, raw and adjusted (`/v1/adjustments`, `?adjust=none`) ✅; serving it through `/v1/candles` before the broker's window | 🚧 |
 
 Design details: [docs/plan.md](docs/plan.md).
 
