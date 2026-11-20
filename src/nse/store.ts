@@ -3,6 +3,7 @@ import type { CashBhavRow } from "./parsers/cashBhav.js";
 import { indexSymbolForName } from "../reference/indices.js";
 import type { FoDayRecord, FoLeg } from "./parsers/foBhav.js";
 import type { IndexCloseRow } from "./parsers/indexClose.js";
+import { classifyPurpose, type ActionKind, type CorporateActionRow } from "./parsers/corporateActions.js";
 import type { ResultsEvent } from "./parsers/results.js";
 import type { SymbolChangeRow } from "./parsers/symbolChange.js";
 
@@ -319,6 +320,85 @@ export function readResults(db: Db, from: number, to: number, symbol?: string): 
     ? db.prepare("select * from results_events where date between ? and ? and symbol = ? order by date, symbol").all(from, to, symbol)
     : db.prepare("select * from results_events where date between ? and ? order by date, symbol").all(from, to);
   return rows as ResultsEvent[];
+}
+
+// ------------------------------------------------------------------ corporate actions (migration 7)
+
+/**
+ * Add one PR zip's corporate actions (its bc file) and mark the day read. Each
+ * file lists the actions near their ex-date, so the same action comes in on
+ * several days: it is kept once, with the first and last PR day that listed it.
+ * Nothing is deleted. Idempotent.
+ */
+export function writeCorporateActions(db: Db, day: number, rows: readonly CorporateActionRow[]) {
+  const upsert = db.prepare(
+    `insert into corporate_actions (symbol, ex_day, purpose, series, company, record_day, kinds, ratio, first_day, last_day)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     on conflict(symbol, ex_day, purpose) do update set
+       record_day = coalesce(excluded.record_day, corporate_actions.record_day),
+       first_day = min(corporate_actions.first_day, excluded.first_day),
+       last_day = max(corporate_actions.last_day, excluded.last_day)`,
+  );
+  db.transaction(() => {
+    for (const row of rows) {
+      const meaning = classifyPurpose(row.purpose);
+      upsert.run(row.symbol, row.exDay, row.purpose, row.series, row.company, row.recordDay, meaning.kinds.join(","), meaning.ratio, day, day);
+    }
+    db.prepare("insert or replace into corporate_action_days (day, rows) values (?, ?)").run(day, rows.length);
+  })();
+}
+
+/** PR days whose corporate-actions file has been read, from `from` on. */
+export function corporateActionDaysRead(db: Db, from = Number.MIN_SAFE_INTEGER): Set<number> {
+  return new Set((db.prepare("select day from corporate_action_days where day >= ?").all(from) as Array<{ day: number }>).map((row) => row.day));
+}
+
+export interface StoredCorporateAction {
+  symbol: string;
+  exDay: number;
+  purpose: string;
+  series: string;
+  company: string;
+  recordDay: number | null;
+  kinds: ActionKind[];
+  ratio: number | null;
+  firstDay: number;
+  lastDay: number;
+}
+
+interface CorporateActionDbRow {
+  symbol: string;
+  ex_day: number;
+  purpose: string;
+  series: string;
+  company: string;
+  record_day: number | null;
+  kinds: string;
+  ratio: number | null;
+  first_day: number;
+  last_day: number;
+}
+
+const toAction = (row: CorporateActionDbRow): StoredCorporateAction => ({
+  symbol: row.symbol,
+  exDay: row.ex_day,
+  purpose: row.purpose,
+  series: row.series,
+  company: row.company,
+  recordDay: row.record_day,
+  kinds: row.kinds.split(",") as ActionKind[],
+  ratio: row.ratio,
+  firstDay: row.first_day,
+  lastDay: row.last_day,
+});
+
+/** Stored corporate actions with from <= ex-date <= to, for `symbols` (all when absent); by ex-date. */
+export function readCorporateActions(db: Db, from: number, to: number, symbols?: readonly string[]): StoredCorporateAction[] {
+  if (symbols && !symbols.length) return [];
+  const rows = symbols
+    ? (db.prepare(`select * from corporate_actions where ex_day between ? and ? and symbol in (${symbols.map(() => "?").join(",")}) order by ex_day, symbol, purpose`).all(from, to, ...symbols) as CorporateActionDbRow[])
+    : (db.prepare("select * from corporate_actions where ex_day between ? and ? order by ex_day, symbol, purpose").all(from, to) as CorporateActionDbRow[]);
+  return rows.map(toAction);
 }
 
 // ------------------------------------------------------------------ ticker renames (migration 5)

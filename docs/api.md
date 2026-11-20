@@ -56,7 +56,7 @@ the top:
 
 | Endpoint | In end-of-day mode |
 |---|---|
-| `/v1/candles?tf=1d\|1w`, `/v1/candles/batch` | Stocks, from the stored NSE cash bhavcopies (the evening files plus the archive), adjusted for splits and bonuses with NSE's own `PREV_CLOSE`; delivery % as usual. The batch endpoint fills each stock in place (nothing is `queued`). Days the archive doesn't hold yet are simply missing (`complete: false`, still `200`). |
+| `/v1/candles?tf=1d\|1w`, `/v1/candles/batch` | Stocks, from the stored NSE cash bhavcopies (the evening files plus the archive), adjusted for splits and bonuses with the hub's factors ([Split and bonus adjustment](#split-and-bonus-adjustment)), or as traded with `adjust=none`; delivery % as usual. The batch endpoint fills each stock in place (nothing is `queued`). Days the archive doesn't hold yet are simply missing (`complete: false`, still `200`). |
 | `/v1/candles?tf=1d\|1w` for indices | From NSE's index file (`ind_close_all`, stored from Feb 2012; downloaded with the archive in this mode). Earlier days, or none stored yet: `503 not_configured` with whatever is stored. |
 | `/v1/candles` for futures contracts | `503 not_configured` (with whatever is stored): they aren't in NSE's cash file. |
 | `/v1/candles?tf=1h\|15m\|5m\|1m` | `503 not_configured`. |
@@ -70,7 +70,7 @@ the top:
 ```
 
 On start, an end-of-day server queues an NSE history job for the last `HUB_EOD_HISTORY_YEARS`
-years (default 2; `0` = none; cash, F&O and index files) unless every day of that window was already
+years (default 2; `0` = none; cash, F&O, PR zip — its corporate actions give the split factors — and index files) unless every day of that window was already
 asked for, so daily candles reach back that far within about 45 minutes (one file per 1.1 s, paused
 in market hours).
 `hub data nse-history --from …` downloads more. `hub data backfill` (a broker download) refuses to
@@ -90,6 +90,13 @@ daily only, below) or a futures contract (below). Index and basket answers carry
 - `1w` is resampled from `1d` (weeks start Monday, stamped with Monday's date); `1h` from `15m`
   (or `5m` when only that is stored), in session hours 09:15, 10:15 … 15:15 IST.
 - Daily bars carry `dp`, the delivery % from NSE's bhavcopy (`null` when not stored).
+- **`adjust`**: `split` (default) — stock prices adjusted for splits, bonuses and the like (the
+  broker's adjusted history; in end-of-day mode NSE's files × the hub's
+  [factors](#split-and-bonus-adjustment)); `none` — a stock's daily or weekly bars **as traded**,
+  straight from NSE's stored cash bhavcopies (the archive back to 1994 where downloaded), in either
+  mode, never fetched from the broker (`complete` says whether every session of the range is
+  stored). Index and futures prices are never adjusted, so both give the same bars; `adjust=none`
+  with an intraday `tf` is `400`. The answer says which it is (`"adjust": "split"`).
 - The broker serves about 5 years of daily and 1 year of intraday history; earlier `from` values
   are clamped. `complete` says every final bar of the (clamped) range is stored.
 - **Current to the minute.** The newest candle is brought up to date from the hub's 1-minute live
@@ -99,8 +106,9 @@ daily only, below) or a futures contract (below). Index and basket answers carry
   newest minute used (`null` when none). This needs live prices for the symbol (a pinned symbol, or
   one a client is streaming); the 503 answer below gets it too.
 - Stored daily series move forward from NSE's cash bhavcopy each evening without broker calls.
-  When a split or bonus is detected (NSE's `PREV_CLOSE`, or the broker's history changing), the
-  symbol's stored series are dropped and downloaded again, adjusted. (Stocks and indices only:
+  When the evening's session is an ex-date (a [factor](#split-and-bonus-adjustment) that day, an
+  adjusted `PREV_CLOSE`, or the broker's history changing), the symbol's stored series are dropped
+  and downloaded again, adjusted. (Stocks and indices only:
   futures contracts are neither extended from the cash file nor reset.)
 - **`1m`** comes from broker 1-minute history (resolution `1`), stored like the other timeframes,
   plus the hub's own 1-minute live bars after the newest stored minute (`liveThrough`). Only the
@@ -123,7 +131,7 @@ was stored stays.
 GET /v1/candles?symbol=SBIN&tf=1d&from=2026-11-04&to=2026-11-05
 200
 {
-  "symbol": "SBIN", "tf": "1d", "from": 1793750400000, "to": 1793836800000, "complete": true,
+  "symbol": "SBIN", "tf": "1d", "adjust": "split", "from": 1793750400000, "to": 1793836800000, "complete": true,
   "coverage": { "from": 1792972800000, "to": 1793923200000 }, "liveThrough": null,
   "candles": [
     { "t": 1793750400000, "o": 348.9, "h": 351.9, "l": 347.9, "c": 349.9, "v": 1000, "dp": null },
@@ -173,13 +181,15 @@ days (1d) or 5 years (1w) before it.
   with `HUB_JOBS=off` this exception is off.)
 - When the broker can't be used (not configured, another process owns it, today's budget spent)
   nothing is queued and the answer — still `200` — adds `warning` and `reason` (as `/v1/quotes`).
+- `adjust` as for `/v1/candles`: with `adjust=none` stocks are answered as traded from NSE's
+  stored bhavcopies and never queued (a ticker no stored file lists is in `unknown`).
 - `400 too_many_symbols` over 300 symbols; `400 bad_request` for an empty list, a `tf` other than
-  `1d`/`1w`, or bad dates.
+  `1d`/`1w`, an `adjust` other than `split`/`none`, or bad dates.
 
 ```json
 GET /v1/candles/batch?symbols=SBIN,INFY,NEWCO,bad$&tf=1d&from=2026-11-04&to=2026-11-05
 200
-{ "tf": "1d", "from": 1793750400000, "to": 1793836800000,
+{ "tf": "1d", "adjust": "split", "from": 1793750400000, "to": 1793836800000,
   "series": {
     "SBIN": { "complete": true, "coverage": { "from": 1762128000000, "to": 1793923200000 },
       "candles": [ { "t": 1793750400000, "o": 1001, "h": 1012, "l": 998.5, "c": 1006.6, "v": 11873400, "dp": 52.3 },
@@ -383,6 +393,79 @@ an archive file.
 `sectors[].indices` lists the NSE indices for an industry, best first: use the first whose history
 covers the window, else the basket. `unmappedNames` are indices in NSE's newest file the hub
 stores but doesn't serve as candles.
+
+## Split and bonus adjustment
+
+NSE's files carry prices **as traded**: a 1:10 split looks like a 90% crash. The hub keeps them so
+(`cash_bhav`) and derives, separately, one **adjustment factor** per ex-date
+(`adjustment_factors`; `src/history/adjustments.ts`): prices before the ex-date × `factor`
+(volumes ÷ `factor`) are comparable with prices from it on. Both are served: adjusted daily candles
+by default, raw with [`/v1/candles?adjust=none`](#get-v1candles), the factors with
+`/v1/adjustments` and NSE's corporate actions with `/v1/corporate-actions`.
+
+**NSE's `PREV_CLOSE` is not adjusted for splits and bonuses.** On an ordinary ex-date it is just the
+previous close: TATASTEEL's 1:10 split (28 Jul 2022, old cash file: `PREVCLOSE` 959.4, open 98.1),
+ANGELONE's (26 Feb 2026, in `sec_bhavdata_full` and the UDiFF bhavcopy alike: 2489.9, open 251), CUB's
+1:3 bonus (12 Jun 2026: 256.8, open 197.4). Of 587,000 consecutive pairs in 2026's files, one had
+`PREV_CLOSE` ≠ the previous close. NSE adjusts it only now and then — some rights issues
+(WANBURY, TAKE in 2025), a consolidation after a suspension (CCAVENUE, Oct 2026). So each pair of
+consecutive sessions of a ticker gets a factor from the first of these that applies:
+
+| `source` | When | Factor |
+|---|---|---|
+| `prev_close` | the file's `PREV_CLOSE` differs from the previous close by over 1.5%, the open bears it out, and the sessions are at most 15 days apart | `PREV_CLOSE / close(d−1)` (NSE's own adjustment) |
+| `corporate_action` | NSE's corporate-actions file (the PR zip's `bc` file, from 2010) lists, for that ticker and ex-date, a bonus, split or consolidation | its ratio (`BONUS 1:1` → 0.5, `FV SPLIT RS.10 TO RE.1` → 0.1), when the opening gap bears it out |
+| | … a `DEMERGER` | the opening gap `open(d) / close(d−1)` (NSE prices what is left in a special pre-open session) |
+| | … a rights issue with its price (`RIGHTS 3:25@PRM RS 1799`) | the theoretical ex-rights price over the last close |
+| `price_gap` | no `bc` file was read for the week before (before 2010, or PR zips not downloaded), and the opening gap is nearest a standard ratio (1/10, 1/6, 1/5, 1/4, 1/3, 2/5, 1/2, 2/3, 3/4, 2, 5, 10): within 12% of it with the close within 25% for a halving or more (or a doubling) — no market move — and within 6% / 20% for 2/3 and 3/4 | that ratio |
+
+Sessions are consecutive only when every trading day between them was checked (stored or a known
+holiday). Where a `bc` file was read and lists nothing, a gap is a gap (no guess); rights
+entitlements (`-RE`) and prices under ₹2 are never guessed at. **Renames** (`/v1/symbols`): no pair
+is formed across a rename of its ticker (it may have passed to another company); the last session
+under the old name and the first under the new one form a pair of their own, kept under the new
+ticker with `renamedFrom`, that only `prev_close` and `corporate_action` can turn into a factor — the
+change of name is no action. Factors are read per listing, so they **follow the company across its
+names** (INFY's include INFOSYSTCH's).
+
+Factors are derived on start (once, and again after the derivation changes), for each evening's
+cash file before it extends stored series (an ex-date that evening drops the symbol's stored series,
+as before — now caught from the factors, which `PREV_CLOSE` alone missed), and for everything when a
+[`data nse-history`](#data-nse-history) run stops. In end-of-day mode, stored daily series of tickers
+whose factors changed are dropped and rebuilt on the next request. `hub data adjustments --check`
+compares them with the broker's adjusted daily history ([below](#data-adjustments)).
+
+### GET /v1/adjustments?symbol=INFY[&from&to]
+
+A listing's factors, oldest first. `cumulative` is what a bar on the session before the ex-date is
+multiplied by (this factor and every later one); `symbol` is the ticker that day.
+
+```json
+GET /v1/adjustments?symbol=KOTAKBANK
+{ "symbol": "KOTAKBANK", "current": "KOTAKBANK", "names": [ { "symbol": "KOTAKBANK", "from": null, "until": null } ],
+  "derivedAt": 1795100000000,
+  "factors": [ { "date": "2026-01-14", "day": 1768348800000, "symbol": "KOTAKBANK", "factor": 0.2, "cumulative": 0.2,
+      "source": "price_gap", "prevDate": "2026-01-13", "prevClose": 2132.6, "filePrevClose": 2132.6,
+      "open": 426, "close": 421, "action": null, "renamedFrom": null } ] }
+```
+
+### GET /v1/corporate-actions?[symbol=…&]from&to
+
+NSE's corporate actions as its PR zips list them (the `bc` file: bonus, split, rights, dividend,
+demerger, buy-back… with record and ex-dates), equity rows only. With `symbol`, every one of the
+listing's names (default range: all); without, every ticker, at most 400 days (default: 30 days
+either side of today). `kinds` and `ratio` are what the hub reads from `purpose` (`ratio`: the price
+factor of a bonus, split or consolidation, else `null`). `asOf` is the newest PR day whose `bc` file
+was read; `503 not_ready` before the first. Each day's file lists the actions near their ex-date, so
+the calendar is the union of the files read — every evening's, and back to 2010 with
+`data nse-history`.
+
+```json
+GET /v1/corporate-actions?symbol=SIEMENS&from=2025-04-01&to=2025-04-30
+{ "symbol": "SIEMENS", "names": [ … ], "asOf": "2026-11-18",
+  "actions": [ { "symbol": "SIEMENS", "exDate": "2025-04-07", "exDay": 1743984000000, "recordDate": "2025-04-07",
+      "purpose": "DEMERGER", "kinds": ["demerger"], "ratio": null, "series": "EQ", "company": "Siemens Ltd" } ] }
+```
 
 ## Ticker renames: /v1/symbols
 
@@ -686,7 +769,8 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
   the ban list (from 18:00 the next session's) and NSE's ticker renames (`symbolchange.csv`) once
   each evening (and on start when never fetched or over two days old), then the PR zip (after 17:30)
   for any of the last **60** days not stored yet: its board meetings are the results calendar, and
-  meetings are announced weeks ahead (a new hub reads ~40 zips once, about a minute). Each dataset
+  meetings are announced weeks ahead (a new hub reads ~40 zips once, about a minute); its
+  corporate-actions file adds to `/v1/corporate-actions` and the split factors. Each dataset
   is retried at most every 30 minutes.
   All NSE requests share one client: at most one per 1.1 s, browser headers, back-off on 403/429.
   Everything comes from NSE's archive host (`nsearchives.nseindia.com`); nothing from
@@ -713,6 +797,8 @@ npm run hub -- data nse-history --only indices                  # just the index
 npm run hub -- data status
 npm run hub -- data symbols                                     # every F&O stock's history across its renames
 npm run hub -- data symbols INFY TMPV [--date 2005-01-03] [--refresh]
+npm run hub -- data adjustments [INFY …]                       # split/bonus factors: counts, or a listing's
+npm run hub -- data adjustments --check [--symbols A,B] [--tolerance 0.005] [--json] [--rebuild]
 npm run hub -- data cancel <job id>
 npm run hub -- data backup [--to ./backups] [--keep 7]
 npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tradex .cache/screener>] [--dry-run]
@@ -740,10 +826,11 @@ Downloads NSE's archive files for every session in a range into the same tables 
 fills: the cash bhavcopy (`cash_bhav`) back to NSE's first session on **3 Nov 1994**, with delivery %
 from **2002**, the F&O bhavcopy (`fo_futures`, so `/v1/fo/members` and `/v1/fo/oi`) back to the
 first stock futures on **9 Nov 2001**, the PR zip's board meetings (`results_events`, so past
-results dates in `/v1/results-calendar`) back to **2010** (2008 and 2009 answer 404), and NSE's
-index file (`index_closes`, so index candles — [`/v1/indices`](#get-v1indices)) back to its start
-in **Feb 2012**. No broker calls. When a run stops, the index candles and the synthetic baskets
-are rebuilt from what is stored.
+results dates in `/v1/results-calendar`) and corporate actions (`corporate_actions`) back to
+**2010** (2008 and 2009 answer 404), and NSE's index file (`index_closes`, so index candles —
+[`/v1/indices`](#get-v1indices)) back to its start in **Feb 2012**. No broker calls. When a run
+stops, the index candles and the synthetic baskets are rebuilt from what is stored, and every
+[split and bonus factor](#split-and-bonus-adjustment) is derived again.
 
 - `--from` defaults to 1994-11-03, `--to` to yesterday (IST); `--only cash`, `--only fo`,
   `--only pr` or `--only indices` for one dataset. Days already checked (`nse_days`) are never asked for again, so a later run only fills
@@ -752,15 +839,19 @@ are rebuilt from what is stored.
   `cmDDMONYYYYbhav.csv.zip` + `MTO_DDMMYYYY.DAT` (delivery %) for cash, `foDDMONYYYYbhav.csv.zip`
   for F&O. The old F&O file has no previous close, lot or underlying price: those days' records
   have `prevClose` 0, `lot` and `underlying` null, and no OI buildup class.
-- **Raw prices.** Bhavcopy prices are as traded: a split or bonus shows as a gap. `prev_close` is
-  NSE's, adjusted on the ex-date, which is what an adjustment step can be built on. Delisted stocks
-  are included (nothing is filtered to today's list). Old tickers stay as NSE wrote them
-  (`INFOSYSTCH` before 2011, `TELCO` before 2004); `/v1/symbols/history` joins them to today's
-  ticker. `/v1/candles` doesn't serve these rows yet.
+- **Raw prices.** Bhavcopy prices are as traded: a split or bonus shows as a gap, and NSE's
+  `prev_close` on the ex-date is usually just the previous close (not adjusted); the factors are kept
+  apart ([Split and bonus adjustment](#split-and-bonus-adjustment)). Delisted stocks are included
+  (nothing is filtered to today's list). Old tickers stay as NSE wrote them (`INFOSYSTCH` before
+  2011, `TELCO` before 2004); `/v1/symbols/history` joins them to today's ticker. `/v1/candles`
+  serves these rows with `adjust=none` (one ticker at a time), and in end-of-day mode adjusted.
 - **ISINs.** Old-format cash days from 2011 carry each security's ISIN, recorded as the day is stored
   (`isin_symbols`, for renames). Stored days whose ISINs weren't read — downloaded before the hub kept
   them — have just their cash file read again, once, whenever the cash market is included: about 3,400
   requests (an hour) for 2011 to 5 Jul 2024. Prices and delivery % already stored are left alone.
+- **Corporate actions.** Likewise stored PR days whose `bc` file wasn't read (downloaded before the
+  hub kept it) have their PR zip read again, once, whenever the PR zip is included: about 4,200
+  requests (1.3 hours) for 2010 on. Results already stored are left alone.
 - Every weekend day is asked for in the cash market: NSE held Budget-day, Muhurat and special
   sessions on weekends (e.g. 1 Feb 2020, 12 Nov 2023, 20 Jan 2024). F&O, the PR zip and the index
   file are asked for the weekend days the cash market traded.
@@ -786,6 +877,36 @@ was ever renamed**, with a count of those continuous across every rename, with a
 on both sides; it exits 1 when any has a gap. `--refresh` downloads NSE's `symbolchange.csv` first
 (when no hub server owns the NSE connection; the server refreshes it each evening). Read-only
 otherwise, so it may run alongside the server.
+
+### data adjustments
+
+The [split and bonus factors](#split-and-bonus-adjustment). Without arguments: how many, by source,
+for how many tickers, and how many corporate actions are stored. With tickers: each one's listing and
+its factors (date, ticker that day, factor, source, the closes and `PREV_CLOSE` behind it, NSE's
+purpose). `--rebuild` derives every factor again first (in end-of-day mode it drops the stored daily
+series whose factors changed).
+
+`--check` compares them with the **broker's adjusted daily history** — every stored daily stock
+series (Fyers adjusts its ~5 years for splits, bonuses, demergers and rights issues), joined to NSE's
+raw closes across renames. For consecutive overlapping sessions the broker's factor is
+`(B(t1)/R(t1)) / (B(t2)/R(t2))` (B its close, R NSE's) and ours the product of the factors between;
+every step where they differ by more than `--tolerance` (default 0.005 = 0.5%) is listed with a
+reason, from the corporate actions within 5 days:
+
+| Reason | Meaning |
+|---|---|
+| `data_error` | one bar differs and the next session agrees again (a bad bar on one side) |
+| `broker_stale` | the stored broker series was downloaded before the ex-date and extended from the bhavcopy since, so never adjusted |
+| `dividend` | only a dividend near the date (the broker adjusted for it; split factors don't) |
+| `rights` | a rights issue whose price NSE doesn't give (`RIGHTS 5:9`) or that one side doesn't adjust for |
+| `demerger` | a demerger or scheme of arrangement |
+| `unexplained` | none of these (often: no `bc` file stored for those days) |
+
+It also reports how many overlapping sessions' adjusted closes match the broker's (relative to the
+newest one) and how many ex-dates agree. Exit code 1 when anything is `unexplained`. `--json` prints
+the whole report. In end-of-day mode the stored series are built from the factors themselves, so the
+check says so; it is meant for a hub with a broker. Read-only (unless `--rebuild`), so it may run
+alongside the server.
 
 ### data backup
 
@@ -892,6 +1013,9 @@ free space and what the backups take.
 | `lot_sizes` | symbol → lot |
 | `fo_ban` | trade date → symbols |
 | `results_events` | (symbol, meeting date) → company, purpose; from the PR zips' board meetings |
+| `corporate_actions` | (symbol, ex-date, purpose) → series, company, record date, kinds, price ratio, first/last PR day that listed it; from the PR zips' `bc` files |
+| `corporate_action_days` | PR days whose `bc` file was read, with how many rows |
+| `adjustment_factors` | (symbol, ex-date) → factor, source (`prev_close` / `corporate_action` / `price_gap`), the previous session, its close, the file's `PREV_CLOSE`, open, close, NSE's purpose, `renamed_from` |
 | `symbol_changes` | NSE's `symbolchange.csv`: (old symbol, effective date) → new symbol, company |
 | `isin_symbols` | (ISIN, symbol) → first and last stored day it traded under that ticker (old-format cash files, 2011–2024) |
 | `isin_days` | old-format cash days whose ISINs were read, with how many |

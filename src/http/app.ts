@@ -8,6 +8,7 @@ import type { Hub } from "../hub.js";
 import type { Logger } from "../log.js";
 import { brokerStatus, dataFreshness, dataMode, diskStatus, recentJobs } from "../status.js";
 import { errorBody, type HubEnv } from "./common.js";
+import { adjustmentRoutes } from "./routes/adjustments.js";
 import { candleRoutes } from "./routes/candles.js";
 import { liveRoutes, liveStatus, type LiveDeps } from "./routes/live.js";
 import { referenceRoutes } from "./routes/reference.js";
@@ -90,6 +91,7 @@ export function createApp(deps: AppDeps) {
   }
 
   candleRoutes(app, deps.hub);
+  adjustmentRoutes(app, deps.hub);
   referenceRoutes(app, deps.hub);
   symbolRoutes(app, deps.hub);
   // The live routes share one fan-out per hub (keyed on hub.live.deps); the hub closes their streams at shutdown.
