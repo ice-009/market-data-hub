@@ -813,8 +813,8 @@ missing or wrong: worth an alert), `warning` (worth a look) or `info` (a change 
 
 | Check | Finds | Severity |
 |---|---|---|
-| `missing_session` | a session (another NSE file of that day is stored: cash, F&O or index) whose file NSE answered with 404 or another day's file. The hub has no holiday list ([#17](https://github.com/ice-009/market-data-hub/issues/17)): a day with any of those files stored is a session | problem |
-| `unlisted_session` | a weekend session (cash/F&O files stored) that `WEEKEND_SESSIONS` doesn't list, so the evening run won't ask for its files (seen: Sun 8 Nov 2026 Muhurat, Sat 1 Feb 2025 Budget) | warning (info over a year back) |
+| `missing_session` | a session (another NSE file of that day is stored: cash, F&O or index) whose file NSE answered with 404 or another day's file. The hub has no holiday list ([#17](https://github.com/ice-009/market-data-hub/issues/17)): a day with any of those files stored is a session. A known gap in NSE's archive (`ARCHIVE_GAPS` in `src/nse/datasets.ts`: the F&O bhavcopy of 30 Mar 2021) is info | problem (info for a known gap) |
+| `unlisted_session` | a weekend session (cash/F&O files stored) that `WEEKEND_SESSIONS` doesn't list, so the evening run won't ask for its files and the next session's cash file extends stored daily series past it (add it to the list; the next `hub data nse-history` run fills the skipped bars from the stored bhavcopy) | warning (info over a year back) |
 | `wrong_date` | NSE served another day's file for a weekday and no other dataset confirms a holiday (resolved once one does) | warning |
 | `repeated_file` | a cash bhavcopy whose OHLCV repeats the previous session's for half or more of the stocks the two share (at least 50): the previous file under a new date | problem |
 | `candle_gap` | stored daily candles (broker history) lacking sessions the stock traded inside their coverage; one finding per symbol | warning |
@@ -870,7 +870,8 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
   `www.nseindia.com`, whose JSON API hangs behind bot protection.
   The trade date inside each file (for the PR zip, in its board-meetings file's name) must match the
   day asked for; a file for another date is recorded as `mismatch` and asked for again in the
-  evening (the PR zip: within the last 10 days).
+  evening (the PR zip: within the last 10 days). Some index files print their date month first
+  (6 Apr 2023 as `04-06-2023`); a date that reads as the day asked for either way is that day.
 - **Queued jobs** from the CLI, one at a time: broker backfills and NSE history downloads.
 - **Data-quality checks** every minute and right after the evening import or an NSE history run: whatever changed
   since the last round (see [GET /v1/quality](#get-v1quality)), within 1.5 s a round (0.25 s in market hours); new

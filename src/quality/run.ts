@@ -1,6 +1,6 @@
 import { isFuture } from "../broker/symbols.js";
 import { readKv, writeKv, type Db } from "../db.js";
-import { ARCHIVE_FROM, WEEKEND_SESSIONS } from "../nse/datasets.js";
+import { ARCHIVE_FROM, ARCHIVE_GAPS, WEEKEND_SESSIONS } from "../nse/datasets.js";
 import { lastOkDay, readLots, readRuns, type DayDataset } from "../nse/store.js";
 import type { Logger } from "../log.js";
 import { DAY_MS, MINUTE_MS, isoDay, isWeekday, istParts } from "../time.js";
@@ -79,6 +79,8 @@ export const RECENT_GAP_DAYS = 14;
 const UNLISTED_RECENT_DAYS = 365;
 
 const DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close"];
+/** The hub's own calendar: a change (a weekend session or archive gap added) recomputes the calendar findings. */
+const CALENDAR_VERSION = [WEEKEND_SESSIONS.join(","), ...Object.entries(ARCHIVE_GAPS).map(([dataset, days]) => `${dataset}:${days.join(",")}`)].join("|");
 
 export function readQualityState(db: Db): QualityState {
   return readKv<QualityState>(db, STATE_KEY) ?? {};
@@ -227,11 +229,12 @@ export function runQuality(db: Db, options: QualityOptions = {}): QualityResult 
   const { records, signature } = readRecords(db);
   const today = istParts(started).day;
 
-  // The session calendar: cheap, recomputed whenever nse_days changes.
-  if (state.calendar !== signature) {
-    const findings = calendarFindings({ days: records, weekendSessions: WEEKEND_SESSIONS, recentFrom: today - UNLISTED_RECENT_DAYS * DAY_MS });
+  // The session calendar: cheap, recomputed whenever nse_days (or the hub's own calendar) changes.
+  const calendarSignature = `${signature}|${CALENDAR_VERSION}`;
+  if (state.calendar !== calendarSignature) {
+    const findings = calendarFindings({ days: records, weekendSessions: WEEKEND_SESSIONS, recentFrom: today - UNLISTED_RECENT_DAYS * DAY_MS, archiveGaps: ARCHIVE_GAPS });
     for (const check of ["missing_session", "unlisted_session", "wrong_date"] as const) save(check, null, findings);
-    state.calendar = signature;
+    state.calendar = calendarSignature;
   }
 
   // NSE's lot file against the newest F&O bhavcopy.

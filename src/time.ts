@@ -66,13 +66,18 @@ export function parseIsoDay(value: string): number | null {
 
 const MONTHS: Record<string, number> = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
 
-/** "04-Nov-2026" / "4-NOV-2026" → day key, or null. */
+/**
+ * "04-Nov-2026" / "4-NOV-2026" → day key, or null. A two-digit year ("13-Jul-20",
+ * in NSE's cash bhavcopy of 13 Jul 2020) is 2000–2069 below 70, else 1970–1999:
+ * NSE's archive starts in 1994.
+ */
 export function parseDmyDay(value: string): number | null {
-  const match = /^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/.exec(value.trim());
+  const match = /^(\d{1,2})-([A-Za-z]{3})-(\d{4}|\d{2})$/.exec(value.trim());
   if (!match) return null;
   const month = MONTHS[match[2].toUpperCase()];
   if (month === undefined) return null;
-  const t = Date.UTC(Number(match[3]), month, Number(match[1]));
+  const year = match[3].length === 2 ? Number(match[3]) + (Number(match[3]) < 70 ? 2000 : 1900) : Number(match[3]);
+  const t = Date.UTC(year, month, Number(match[1]));
   return new Date(t).getUTCDate() === Number(match[1]) ? t : null;
 }
 
