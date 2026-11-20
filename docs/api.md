@@ -57,7 +57,7 @@ the top:
 
 | Endpoint | In end-of-day mode |
 |---|---|
-| `/v1/candles?tf=1d\|1w`, `/v1/candles/batch` | Stocks, from the stored NSE cash bhavcopies (the evening files plus the archive), adjusted for splits and bonuses with the hub's factors ([Split and bonus adjustment](#split-and-bonus-adjustment)), or as traded with `adjust=none`; delivery % as usual. The batch endpoint fills each stock in place (nothing is `queued`). Days the archive doesn't hold yet are simply missing (`complete: false`, still `200`). |
+| `/v1/candles?tf=1d\|1w`, `/v1/candles/batch` | Stocks, from the stored NSE cash bhavcopies (the evening files plus the archive), adjusted for splits and bonuses with the hub's factors ([Split and bonus adjustment](#split-and-bonus-adjustment)), or as traded with `adjust=none`; delivery % as usual, renamed tickers joined, back to 1994 ([Before the broker's window](#before-the-brokers-window); `sources` say `archive` throughout). The batch endpoint fills each stock in place (nothing is `queued`). Days the archive doesn't hold yet are simply missing (`complete: false`, still `200`). |
 | `/v1/candles?tf=1d\|1w` for indices | From NSE's index file (`ind_close_all`, stored from Feb 2012; downloaded with the archive in this mode). Earlier days, or none stored yet: `503 not_configured` with whatever is stored. |
 | `/v1/candles` for futures contracts | `503 not_configured` (with whatever is stored): they aren't in NSE's cash file. |
 | `/v1/candles?tf=1h\|15m\|5m\|1m` | `503 not_configured`. |
@@ -98,8 +98,15 @@ daily only, below) or a futures contract (below). Index and basket answers carry
   mode, never fetched from the broker (`complete` says whether every session of the range is
   stored). Index and futures prices are never adjusted, so both give the same bars; `adjust=none`
   with an intraday `tf` is `400`. The answer says which it is (`"adjust": "split"`).
-- The broker serves about 5 years of daily and 1 year of intraday history; earlier `from` values
-  are clamped. `complete` says every final bar of the (clamped) range is stored.
+- The broker serves about 5 years of daily and 1 year of intraday history. Intraday `from` values
+  earlier than that are clamped. **Daily and weekly history reaches back to 1994** — see
+  [Before the broker's window](#before-the-brokers-window) below. `complete` says every final bar
+  of the range is stored (for a stock before the window: every session is in the archive or a
+  holiday).
+- `sources` (daily and weekly) says where each stretch of bars came from, oldest first:
+  `{ "source": "archive" | "broker" | "index_file" | "basket", "from", "to" }` (`from`/`to` are
+  the first and last bar's `t`); archive stretches add `names` (the tickers read, more than one
+  across a rename) and, when the archive was lined up with the broker's level, `scale`.
 - **Current to the minute.** The newest candle is brought up to date from the hub's 1-minute live
   bars (built from ticks, or downloaded from the broker where a gap was repaired) and later
   buckets — today's daily bar, the hours since the last sync — are built from them; today's daily
@@ -119,6 +126,47 @@ daily only, below) or a futures contract (below). Index and basket answers carry
   history actually reaches hasn't been checked on a live account. While the session is open a `1m`
   request refreshes the stored tail at most once a minute per symbol (as `5m` and `15m` do); to
   follow a chart live, use `/v1/stream` (bars replay, then ticks) rather than polling candles.
+
+### Before the broker's window
+
+A daily or weekly request whose `from` is before the broker's window (today − 1,822 days: about
+five years) is answered in two parts, joined by day (`src/history/longDaily.ts`):
+
+| Days | Stock | Index |
+|---|---|---|
+| before the hand-over | NSE's stored cash bhavcopies (`hub data nse-history`, back to 3 Nov 1994), adjusted with the hub's [factors](#split-and-bonus-adjustment) (`adjust=split`) or as traded (`adjust=none`), with delivery % | NSE's index file (stored from Feb 2012, [/v1/indices](#get-v1indices)); nothing earlier |
+| from the hand-over | as before: the broker's adjusted bars (end-of-day mode: the archive again) | as before |
+
+- **Renamed tickers are joined** ([/v1/symbols](#ticker-renames-v1symbols)): INFY's history includes
+  INFOSYSTCH's before June 2011, COFORGE's NIITTECH's — point in time: `INFOSYSTCH` asked for 2005 is
+  the 2005 ticker, and a ticker later taken by another company is read only for its own listing's
+  days. `adjust=none` joins them too.
+- **The hand-over** is the window's first day, or the broker series' first bar when it starts later
+  (Fyers' ANGELONE begins 29 Nov 2021 although the window starts on the 24th; the archive covers
+  the days between).
+- **No jump at the seam.** The broker adjusts its history its own way — splits and bonuses, but also
+  dividends, and actions the hub's factors miss — so the adjusted archive is **scaled to the
+  broker's level**: the median ratio of the two closes over the first 5 sessions both have from the
+  hand-over on. Within 0.5% the hub's factors are kept as they are (the archive then equals
+  `adjust=none` × the factors); otherwise the archive stretch in `sources` carries `scale`. On the
+  live store (20 Nov 2026, 200 F&O stocks with archive history before the seam): 185 needed no
+  scale; 15 did — dividend-sized (HINDUNILVR ×0.984, UPL ×0.959, VEDL ×0.936…) or a corporate
+  action inside the window that the broker adjusted for and the factors lack (CONCOR ×0.8, PFC ×0.8,
+  KARURVYSYA ×0.833, TMPV ×0.606 for the 2025 demerger). After scaling, the next 20 sessions agree
+  within 0.4% and no step across the seam is above 2.8%. `hub data history --check` reports this.
+- A ticker the broker doesn't know (delisted, renamed away) is served from the archive alone.
+- A hub without the archive's older days answers as before (the window only).
+
+```json
+GET /v1/candles?symbol=CONCOR&tf=1d&from=2021-10-01&to=2022-01-31
+200
+{ "symbol": "CONCOR", "tf": "1d", "adjust": "split", "complete": true,
+  "coverage": { "from": 1633046400000, "to": 1643673600000 },
+  "sources": [
+    { "source": "archive", "from": 1633046400000, "to": 1637625600000, "names": ["CONCOR"], "scale": 0.8 },
+    { "source": "broker", "from": 1637712000000, "to": 1643587200000 } ],
+  "candles": [ … ] }
+```
 
 **Futures contracts.** A stock (or index) future is named as the broker names it without the
 exchange: underlying + 2-digit year + month + `FUT` — `SBIN26NOVFUT`, `M%26M26NOVFUT`,
@@ -184,6 +232,13 @@ days (1d) or 5 years (1w) before it.
   nothing is queued and the answer — still `200` — adds `warning` and `reason` (as `/v1/quotes`).
 - `adjust` as for `/v1/candles`: with `adjust=none` stocks are answered as traded from NSE's
   stored bhavcopies and never queued (a ticker no stored file lists is in `unknown`).
+- **Before the broker's window** each series is joined from the archive exactly as in
+  [`/v1/candles`](#before-the-brokers-window) (renames joined, scaled to the stored broker bars at
+  the seam; only the window's part is ever queued), and carries `sources`. A stock the broker said
+  it doesn't know is then answered from the archive alone instead of being listed in `unknown`. One
+  archive read (day statuses, renames) is shared by the whole request: 218 F&O stocks over the
+  six years the live store held on 20 Nov 2026 took 1.2 s and 27 MB of JSON — ask long ranges in
+  smaller groups of symbols.
 - `400 too_many_symbols` over 300 symbols; `400 bad_request` for an empty list, a `tf` other than
   `1d`/`1w`, an `adjust` other than `split`/`none`, or bad dates.
 
@@ -852,6 +907,7 @@ npm run hub -- data symbols                                     # every F&O stoc
 npm run hub -- data symbols INFY TMPV [--date 2005-01-03] [--refresh]
 npm run hub -- data adjustments [INFY …]                       # split/bonus factors: counts, or a listing's
 npm run hub -- data adjustments --check [--symbols A,B] [--tolerance 0.005] [--json] [--rebuild]
+npm run hub -- data history --check [--symbols A,B] [--tolerance 0.01] [--json]  # archive ↔ broker seam, renames
 npm run hub -- data cancel <job id>
 npm run hub -- data backup [--to ./backups] [--keep 7]
 npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tradex .cache/screener>] [--dry-run]
@@ -873,6 +929,18 @@ npm run hub -- data quality [--full] [--check price_outlier] [--all] [--resolved
   only the server can see), then shows the owner process, broker login and today's budget, each NSE dataset's last
   session, candle counts, how much of the F&O universe is stored per timeframe, live prices (the
   persistent symbols, the last tick, queued or stopped gap repair) and recent jobs.
+
+### data history
+
+`hub data history --check [--symbols A,B,…] [--tolerance 0.01] [--json]`: what
+[`/v1/candles` serves before the broker's window](#before-the-brokers-window), for every current F&O
+stock (or the ones named), checked for the three ways the join can go wrong — **seam** (after
+scaling, the archive's closes over the 20 sessions after the hand-over differ from the stored
+series' by more than the tolerance), **jump** (last archive close → first stored open beyond 35%:
+no market move) and **gap** (a session the listing traded, under the name it had that day, missing
+from what is served: across a rename this is the join failing). Lists the stocks joined across a
+rename or scaled; exits 1 on any problem. Meaningful against a broker's series (in end-of-day mode
+both sides are the archive).
 
 ### data nse-history
 
