@@ -342,12 +342,15 @@ Errors always look like this and never echo your headers or the hub's configurat
 | `GET /v1/fo/oi/day[?date=…]` | fo | ✅ | Every stock's futures OI on one trade day (default: the newest stored). |
 | `GET /v1/fo/members?date=…` or `?from=…&to=…` | fo | ✅ | The F&O list on a past date, or on every trade day of a range (≤ 400 days) — for backtests without survivorship bias. |
 | `GET /v1/fo/contracts?symbol=SBIN` | fo | ✅ | A stock's near- and next-month futures as hub tickers (`SBIN26NOVFUT`), with expiries and the lot size. |
-| `GET /v1/fo/ban` | fo | ✅ | Today's F&O ban list. |
+| `GET /v1/fo/ban[?date=…]` | fo | ✅ | Today's F&O ban list, or a stored trade date's. |
+| `GET /v1/fo/ban/history[?from&to]` | fo | ✅ | Every stored trade date's ban list, and from when the hub has them (`knownFrom`). |
 | `GET /v1/lots` | history | ✅ | Futures lot sizes. |
+| `GET /v1/lots/history[?symbol][&from&to]` | history | ✅ | Lot sizes as they were on each F&O day (from the bhavcopy's lot column, 8 Jul 2024 on), as change points. |
 | `GET /v1/results-calendar` | history | ✅ | Upcoming and recent results dates. |
 | `GET /v1/market/regime` | history | ✅ | NIFTY vs its 50- and 200-day averages, breadth. |
 | `GET /v1/indices` | history | ✅ | NIFTY, NIFTY 500 and the sector indices with daily history from NSE's index file (since 2012), synthetic equal-weight sector baskets (labelled `synthetic`) for earlier years, and the industry → sector-index map. |
 | `GET /v1/adjustments?symbol=INFY[&from&to]` | history | ✅ | A company's split/bonus adjustment factors (ex-dates), across its renames, with where each came from. |
+| `GET /v1/adjustments/batch?symbols=A,B` | history | ✅ | Up to 300 listings' factors in one request. |
 | `GET /v1/corporate-actions?[symbol&]from&to` | history | ✅ | NSE's corporate actions (bonus, split, rights, dividend, demerger… with ex-dates) from the PR zips. |
 | `GET /v1/symbols/history?symbol=INFY[&date=…]` | history | ✅ | A company's tickers over time (INFOSYSTCH → INFY), point in time: the ticker as it was on `date`, and the cash history stored under each name. |
 | `GET /v1/symbols/changes[?symbol][&from&to]` | history | ✅ | Every ticker rename: NSE's `symbolchange.csv` plus renames seen in the bhavcopies' ISINs. |

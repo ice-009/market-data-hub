@@ -354,11 +354,42 @@ GET /v1/fo/contracts?symbol=SBIN
 `current` is false while the stored list is for an earlier session than the one ahead (NSE
 publishes the next session's list in the evening). `503 not_ready` until the first download.
 
+`?date=YYYY-MM-DD` answers exactly that trade date's stored list (same shape), or `404 no_data` with
+`knownFrom` (the first stored trade date) — never a nearby day's list. The hub has each day's list
+from when it started downloading it; older lists aren't in its store.
+
+### GET /v1/fo/ban/history[?from&to]
+
+Every stored trade date's list in the range, oldest first. A trade date that isn't listed is
+unknown (the hub didn't download it), not "nobody banned"; a day with nobody banned has `[]`.
+
+```json
+{ "knownFrom": "2026-11-10", "knownFromDay": 1794268800000,
+  "days": [ { "date": "2026-11-10", "day": 1794268800000, "symbols": ["ABFRL"], "fetchedAt": 1794227000000 } ] }
+```
+
 ## GET /v1/lots
 
 ```json
 GET /v1/lots?symbol=SBIN   →  { "symbol": "SBIN", "lot": 750, "source": "nse_mktlots", "fetchedAt": 1793946083654 }
 GET /v1/lots               →  { "source": "nse_mktlots", "fetchedAt": …, "count": 224, "lots": { "360ONE": 500, "ABB": 125, … } }
+```
+
+### GET /v1/lots/history[?symbol=SBIN][&from&to]
+
+Lot per stock as it was on each stored F&O day, from the F&O bhavcopy's lot column, as change
+points: each stock's first stored day in the range, then every day its lot differs from the day
+before. Lots are as traded that day (not adjusted for later splits). NSE's files have the column
+from 8 Jul 2024 (`knownFrom`); older (old-format) files don't, so earlier lots are unknown and
+nothing is returned for them. `lastDate` is the newest stored F&O day. `503 not_ready` before the
+first F&O file.
+
+```json
+GET /v1/lots/history?symbol=SBIN
+{ "from": null, "to": "2026-11-20", "knownFrom": "2024-07-08", "knownFromDay": 1720396800000,
+  "lastDate": "2026-11-19", "lastDay": 1795046400000,
+  "lots": { "SBIN": [ { "date": "2024-07-08", "day": 1720396800000, "lot": 1500 },
+                      { "date": "2024-12-27", "day": 1735257600000, "lot": 750 } ] } }
 ```
 
 ## GET /v1/results-calendar
@@ -503,6 +534,19 @@ GET /v1/adjustments?symbol=KOTAKBANK
   "factors": [ { "date": "2026-01-14", "day": 1768348800000, "symbol": "KOTAKBANK", "factor": 0.2, "cumulative": 0.2,
       "source": "price_gap", "prevDate": "2026-01-13", "prevClose": 2132.6, "filePrevClose": 2132.6,
       "open": 426, "close": 421, "action": null, "renamedFrom": null } ] }
+```
+
+### GET /v1/adjustments/batch?symbols=INFY,SBIN
+
+Up to 300 listings' factors in one request (for readers that adjust many stocks, e.g. to a past
+day). Per symbol: the listing's ticker today and its factors oldest first, as `/v1/adjustments`
+gives them (`cumulative` included); a stock with no factors has `[]`.
+
+```json
+{ "derivedAt": 1795100000000,
+  "series": { "KOTAKBANK": { "current": "KOTAKBANK", "factors": [ { "date": "2026-01-14", "day": 1768348800000,
+      "symbol": "KOTAKBANK", "factor": 0.2, "cumulative": 0.2, "source": "price_gap", "action": null } ] },
+              "SBIN": { "current": "SBIN", "factors": [] } } }
 ```
 
 ### GET /v1/corporate-actions?[symbol=…&]from&to
