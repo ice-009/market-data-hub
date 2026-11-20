@@ -10,6 +10,7 @@ import { getUniverse, isUniverse, UNIVERSES } from "../../reference/universe.js"
 import { banTarget } from "../../jobs/scheduler.js";
 import { DAY_MS, isoDay, istDayKey } from "../../time.js";
 import { errorBody, requireScope, type HubEnv } from "../common.js";
+import { banHistory, banKnownFrom } from "./pointInTime.js";
 import { ParamError, parseRange, parseTime } from "../params.js";
 
 // Reference data, all from the hub's own store (filled by the NSE jobs):
@@ -19,7 +20,7 @@ import { ParamError, parseRange, parseTime } from "../params.js";
 //   GET /v1/fo/members?date                fo       F&O list on a date (point-in-time)
 //   GET /v1/fo/members?from&to             fo       F&O list on every stored trade day in a range
 //   GET /v1/fo/contracts?symbol            fo       a stock's near/next futures contracts (hub tickers)
-//   GET /v1/fo/ban                         fo       the F&O ban list
+//   GET /v1/fo/ban[?date]                  fo       the F&O ban list (newest, or a stored trade date's)
 //   GET /v1/lots[?symbol]                  history  stock-futures lot sizes
 //   GET /v1/results-calendar?from&to       history  results dates from the PR zip's board meetings
 //   GET /v1/market/regime[?universe]       history  NIFTY trend + breadth
@@ -136,8 +137,21 @@ export function referenceRoutes(app: Hono<HubEnv>, hub: Hub) {
   });
 
   app.get("/v1/fo/ban", requireScope("fo"), (c) => {
+    let date: number | undefined;
+    try {
+      date = parseTime("date", c.req.query("date"), "start", true);
+    } catch (error) {
+      return c.json(bad(error), 400);
+    }
     const ban = latestBan(hub.db);
     if (!ban) return c.json(notReady("The F&O ban list"), 503);
+    if (date !== undefined) {
+      // A past trade date: exactly that day's stored list; never a nearby day's or today's.
+      const stored = banHistory(hub.db, date, date)[0];
+      const knownFrom = banKnownFrom(hub.db);
+      if (!stored) return c.json({ ...errorBody(`No F&O ban list is stored for ${isoDay(date)} (stored from ${knownFrom === null ? "never" : isoDay(knownFrom)}).`, "no_data"), knownFrom: knownFrom === null ? null : isoDay(knownFrom) }, 404);
+      return c.json({ tradeDate: isoDay(stored.tradeDate), symbols: stored.symbols, fetchedAt: stored.fetchedAt, current: stored.tradeDate >= banTarget(Date.now()) });
+    }
     return c.json({ tradeDate: isoDay(ban.tradeDate), symbols: ban.symbols, fetchedAt: ban.fetchedAt, current: ban.tradeDate >= banTarget(Date.now()) });
   });
 

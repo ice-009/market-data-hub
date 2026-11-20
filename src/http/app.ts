@@ -10,6 +10,7 @@ import { brokerStatus, dataFreshness, dataMode, dataQuality, diskStatus, recentJ
 import { errorBody, type HubEnv } from "./common.js";
 import { adjustmentRoutes } from "./routes/adjustments.js";
 import { candleRoutes } from "./routes/candles.js";
+import { pointInTimeRoutes } from "./routes/pointInTime.js";
 import { qualityRoutes } from "./routes/quality.js";
 import { liveRoutes, liveStatus, type LiveDeps } from "./routes/live.js";
 import { referenceRoutes } from "./routes/reference.js";
@@ -93,6 +94,7 @@ export function createApp(deps: AppDeps) {
   }
 
   candleRoutes(app, deps.hub);
+  pointInTimeRoutes(app, deps.hub);
   adjustmentRoutes(app, deps.hub);
   referenceRoutes(app, deps.hub);
   symbolRoutes(app, deps.hub);
