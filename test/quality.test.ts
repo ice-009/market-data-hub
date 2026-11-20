@@ -69,19 +69,19 @@ describe("data quality: the session calendar", () => {
 
 describe("data quality: price outliers and repeated files", () => {
   /** One symbol over `count` sessions; `last` overrides the final session's row. */
-  function feed(count: number, last: (prevClose: number) => Partial<CashRow> & { c: number }, options: ConstructorParameters<typeof CashScanner>[0] = {}) {
-    const scanner = new CashScanner(options);
+  function feed(count: number, last: (prevClose: number) => Partial<CashRow> & { c: number }, options: Omit<ConstructorParameters<typeof CashScanner>[0], "sessions"> = {}) {
     const days = sessions("2026-11-18", count);
-    let findings: Finding[] = [];
+    const scanner = new CashScanner({ sessions: days, ...options });
+    const rows: CashRow[] = [];
     let prev = walk(0);
     days.forEach((day, i) => {
-      const final = i === days.length - 1;
       const base: CashRow = { symbol: "ACME", day, prevClose: prev, o: prev, h: prev * 1.01, l: prev * 0.99, c: walk(i), v: 1000 + i };
-      const row = final ? { ...base, ...last(prev) } : base;
-      findings = scanner.day(day, [row], final);
+      const row = i === days.length - 1 ? { ...base, ...last(prev) } : base;
+      rows.push(row);
       prev = row.c;
     });
-    return findings;
+    // Only the last session is reported; the rest warm up the volatility.
+    return scanner.symbol(rows, (day) => day === days[days.length - 1]);
   }
 
   it("flags a move far beyond the stock's volatility, and says when it looks like a split", () => {
@@ -114,11 +114,12 @@ describe("data quality: price outliers and repeated files", () => {
   });
 
   it("flags a cash file that repeats the previous session's prices", () => {
-    const scanner = new CashScanner();
     const [monday, tuesday] = sessions("2026-11-17", 2);
-    const rows = (day: number) => Array.from({ length: 60 }, (_, i): CashRow => ({ symbol: `S${i}`, day, prevClose: 100, o: 100, h: 102, l: 99, c: 101 + (i % 3), v: 500 + i }));
-    expect(scanner.day(monday, rows(monday), true)).toEqual([]);
-    expect(scanner.day(tuesday, rows(tuesday), true)).toMatchObject([{ check: "repeated_file", subject: "cash_bhav", severity: "problem", detail: { repeated: 60, shared: 60 } }]);
+    const scanner = new CashScanner({ sessions: [monday, tuesday] });
+    const row = (i: number, day: number): CashRow => ({ symbol: `S${i}`, day, prevClose: 100, o: 100, h: 102, l: 99, c: 101 + (i % 3), v: 500 + i });
+    for (let i = 0; i < 60; i += 1) expect(scanner.symbol([row(i, monday), row(i, tuesday)], () => true)).toEqual([]);
+    expect(scanner.repeated([monday])).toEqual([]);
+    expect(scanner.repeated([monday, tuesday])).toMatchObject([{ check: "repeated_file", day: tuesday, subject: "cash_bhav", severity: "problem", detail: { repeated: 60, shared: 60 } }]);
   });
 
   it("matches common corporate-action ratios only", () => {
@@ -141,6 +142,9 @@ describe("data quality: F&O lists, lots and stored candles", () => {
     const before = lots(Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`S${i}`, 100])));
     const after = lots(Object.fromEntries(Array.from({ length: 150 }, (_, i) => [`S${i}`, 100])));
     expect(foFindings({ day: d("2026-10-27"), lots: before }, { day: d("2026-10-28"), lots: after })).toMatchObject([{ check: "fo_list_change", severity: "problem" }]);
+    // Stocks leaving after their last contract expired (NSE's periodic exclusions) are expected.
+    const expired = new Set(Array.from({ length: 50 }, (_, i) => `S${150 + i}`));
+    expect(foFindings({ day: d("2026-10-27"), lots: before, expired }, { day: d("2026-10-28"), lots: after })).toMatchObject([{ check: "fo_list_change", severity: "info" }]);
   });
 
   it("compares NSE's lot file with the newest F&O bhavcopy", () => {

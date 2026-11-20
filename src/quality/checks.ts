@@ -22,7 +22,8 @@ import type { Finding } from "./store.js";
 //                     adjusted for and the raw archive isn't yet            warning / info
 //   lot_change        lot sizes that changed between two F&O sessions       info
 //   fo_list_change    stocks that joined or left the F&O list; a list that
-//                     shrinks by a tenth or more at once (a cut-off file)   info / problem
+//                     loses a tenth or more at once, other than stocks whose
+//                     last contract just expired (a cut-off file)         info / problem
 //   lot_file_mismatch NSE's lot file disagrees with the newest F&O bhavcopy  warning
 
 export const DATASET_LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip", index_close: "Index file" };
@@ -164,10 +165,6 @@ export interface CashRow {
   v: number;
 }
 
-interface SymbolState {
-  last: CashRow;
-  returns: number[];
-}
 
 /**
  * Price ratios of common corporate actions: splits (1:2, 1:5, 1:10, 2:5…), bonuses
@@ -201,93 +198,112 @@ const stdev = (values: readonly number[]) => {
 
 const pct = (ratio: number) => `${ratio >= 1 ? "+" : ""}${((ratio - 1) * 100).toFixed(1)}%`;
 
+/** A price_outlier finding: a warning beyond NSE's widest price band, info within it. */
+function outlier(row: CashRow, prev: CashRow, move: number, sigma: number, sigmas: number, action: { factor: number; source: string } | null, like: string | null): Finding {
+  const band = Math.abs(move - 1) > PRICE_BAND_MAX + BAND_SLACK ? "beyond" : atPriceBand(row) ? "at" : null;
+  const adjusted = action ? `, after a ×${action.factor.toFixed(3)} ${action.source} adjustment` : "";
+  const widest = `NSE's widest price band (${PRICE_BAND_MAX * 100}%)`;
+  const why =
+    band === "beyond" && like
+      ? ` Beyond ${widest} and a ${like} price ratio: most likely a split, bonus or other corporate action not adjusted for yet.`
+      : band === "beyond"
+        ? ` Beyond ${widest}: a corporate action not on record, or a bad price.`
+        : band === "at"
+          ? " It closed at its price band: most likely a real move."
+          : like
+            ? ` A ${like} price ratio: possibly a corporate action not adjusted for yet.`
+            : "";
+  return {
+    check: "price_outlier",
+    day: row.day,
+    subject: row.symbol,
+    severity: band === "beyond" ? "warning" : "info",
+    message: `${row.symbol}: ${pct(move)} close to close on ${dayName(row.day)} (${prev.c} → ${row.c}${adjusted}), ${sigmas.toFixed(0)}× its daily volatility of ${(sigma * 100).toFixed(1)}%${action ? "" : ", with no corporate action on record"}.${why}`,
+    detail: { prevDay: isoDay(prev.day), prevClose: prev.c, close: row.c, nsePrevClose: row.prevClose, move: Number((move - 1).toFixed(4)), sigma: Number(sigma.toFixed(4)), sigmas: Number(sigmas.toFixed(1)), actionLike: like, priceBand: band, adjustedBy: action?.source ?? null },
+  };
+}
+
 /**
- * Reads the cash bhavcopy one session at a time, oldest first, and reports
- * price outliers and repeated files for the sessions it's asked to (`report`);
- * earlier sessions only warm up each stock's volatility. Pure.
+ * Reads the cash bhavcopy one stock at a time (each stock's rows oldest first:
+ * the table's own order, so the database reads it sequentially) and reports
+ * price outliers on the sessions `report` accepts; earlier sessions only warm
+ * up the stock's volatility. Repeated files are counted along the way and
+ * reported by `repeated()` once every stock has been read. Pure.
  */
 export class CashScanner {
-  private readonly symbols = new Map<string, SymbolState>();
-  private previousDay: number | null = null;
+  private readonly counts = new Map<number, { shared: number; repeated: number }>();
+  private readonly previousSession = new Map<number, number>();
 
   constructor(
     private readonly options: {
+      /** The stored cash sessions, oldest first (what "the previous session" means). */
+      sessions: readonly number[];
       /** Known corporate actions (ex-dates); null where none is known. */
       corporateAction?: CorporateActionHook;
       /** F&O lot factors by `${symbol}|${day}` (old lot / new lot) on days the lot changed. */
       lotFactors?: ReadonlyMap<string, number>;
-    } = {},
-  ) {}
+    },
+  ) {
+    options.sessions.forEach((day, i) => {
+      if (i > 0) this.previousSession.set(day, options.sessions[i - 1]);
+    });
+  }
 
-  /** Feed one session's rows; returns its findings when `report`. */
-  day(day: number, rows: readonly CashRow[], report: boolean): Finding[] {
+  /** One stock's rows, oldest first; its outliers on the days `report` accepts. */
+  symbol(rows: readonly CashRow[], report: (day: number) => boolean): Finding[] {
     const out: Finding[] = [];
-    let shared = 0;
-    let repeated = 0;
+    const returns: number[] = [];
+    let prev: CashRow | null = null;
     for (const row of rows) {
-      const state = this.symbols.get(row.symbol);
-      if (!state) {
-        this.symbols.set(row.symbol, { last: row, returns: [] });
-        continue;
+      const last = prev;
+      prev = row;
+      if (!last) continue;
+      const reported = report(row.day);
+      if (reported && last.day === this.previousSession.get(row.day)) {
+        const count = this.counts.get(row.day) ?? { shared: 0, repeated: 0 };
+        count.shared += 1;
+        if (last.o === row.o && last.h === row.h && last.l === row.l && last.c === row.c && last.v === row.v) count.repeated += 1;
+        this.counts.set(row.day, count);
       }
-      const prev = state.last;
-      if (prev.day === this.previousDay) {
-        shared += 1;
-        if (prev.o === row.o && prev.h === row.h && prev.l === row.l && prev.c === row.c && prev.v === row.v) repeated += 1;
-      }
-      state.last = row;
-      if (!(prev.c > 0) || !(row.c > 0)) continue;
-      const raw = row.c / prev.c;
-      const action = this.explain(row, prev, raw);
+      if (!(last.c > 0) || !(row.c > 0)) continue;
+      const raw = row.c / last.c;
+      const action = this.explain(row, last, raw);
       const move = action ? raw / action.factor : raw;
       const logMove = Math.log(move);
       let flagged = false;
-      if (report && state.returns.length >= VOL_MIN_RETURNS && day - prev.day <= MAX_GAP_DAYS * DAY_MS) {
-        const sigma = Math.max(stdev(state.returns), SIGMA_FLOOR);
+      if (reported && returns.length >= VOL_MIN_RETURNS && row.day - last.day <= MAX_GAP_DAYS * DAY_MS) {
+        const sigma = Math.max(stdev(returns), SIGMA_FLOOR);
         const sigmas = Math.abs(logMove) / sigma;
         if (sigmas >= OUTLIER_SIGMAS && Math.abs(move - 1) >= OUTLIER_MIN_MOVE) {
           flagged = true;
-          const like = action ? null : actionLike(raw);
-          const band = Math.abs(move - 1) > PRICE_BAND_MAX + BAND_SLACK ? "beyond" : atPriceBand(row) ? "at" : null;
-          const adjusted = action ? `, after a ×${action.factor.toFixed(3)} ${action.source} adjustment` : "";
-          const widest = `NSE's widest price band (${PRICE_BAND_MAX * 100}%)`;
-          const why =
-            band === "beyond" && like
-              ? ` Beyond ${widest} and a ${like} price ratio: most likely a split, bonus or other corporate action not adjusted for yet.`
-              : band === "beyond"
-                ? ` Beyond ${widest}: a corporate action not on record, or a bad price.`
-                : band === "at"
-                  ? " It closed at its price band: most likely a real move."
-                  : like
-                    ? ` A ${like} price ratio: possibly a corporate action not adjusted for yet.`
-                    : "";
-          out.push({
-            check: "price_outlier",
-            day,
-            subject: row.symbol,
-            severity: band === "beyond" ? "warning" : "info",
-            message: `${row.symbol}: ${pct(move)} close to close on ${dayName(day)} (${prev.c} → ${row.c}${adjusted}), ${sigmas.toFixed(0)}× its daily volatility of ${(sigma * 100).toFixed(1)}%${action ? "" : ", with no corporate action on record"}.${why}`,
-            detail: { prevDay: isoDay(prev.day), prevClose: prev.c, close: row.c, nsePrevClose: row.prevClose, move: Number((move - 1).toFixed(4)), sigma: Number(sigma.toFixed(4)), sigmas: Number(sigmas.toFixed(1)), actionLike: like, priceBand: band, adjustedBy: action?.source ?? null },
-          });
+          out.push(outlier(row, last, move, sigma, sigmas, action, action ? null : actionLike(raw)));
         }
       }
       // Outliers stay out of the volatility, so one bad print doesn't hide the next.
       if (!flagged && !(action === null && actionLike(raw))) {
-        state.returns.push(logMove);
-        if (state.returns.length > VOL_WINDOW) state.returns.shift();
+        returns.push(logMove);
+        if (returns.length > VOL_WINDOW) returns.shift();
       }
     }
-    if (report && shared >= REPEATED_MIN_STOCKS && repeated / shared >= REPEATED_SHARE && this.previousDay !== null) {
+    return out;
+  }
+
+  /** repeated_file for `days`, once every stock has been read. */
+  repeated(days: readonly number[]): Finding[] {
+    const out: Finding[] = [];
+    for (const day of days) {
+      const count = this.counts.get(day);
+      const previous = this.previousSession.get(day);
+      if (!count || previous === undefined || count.shared < REPEATED_MIN_STOCKS || count.repeated / count.shared < REPEATED_SHARE) continue;
       out.push({
         check: "repeated_file",
         day,
         subject: "cash_bhav",
         severity: "problem",
-        message: `Cash bhavcopy for ${dayName(day)} repeats ${dayName(this.previousDay)}'s prices for ${plural(repeated, "stock")} of ${thousands(shared)}: probably the previous session's file under a new date.`,
-        detail: { previousDay: isoDay(this.previousDay), repeated, shared },
+        message: `Cash bhavcopy for ${dayName(day)} repeats ${dayName(previous)}'s prices for ${plural(count.repeated, "stock")} of ${thousands(count.shared)}: probably the previous session's file under a new date.`,
+        detail: { previousDay: isoDay(previous), repeated: count.repeated, shared: count.shared },
       });
     }
-    this.previousDay = day;
     return out;
   }
 
@@ -309,12 +325,17 @@ export const FO_DROP_SHARE = 0.1;
 export const FO_DROP_MIN = 10;
 
 /** lot_change and fo_list_change between two consecutive stored F&O sessions. Pure. */
-export function foFindings(previous: { day: number; lots: ReadonlyMap<string, number | null> }, current: { day: number; lots: ReadonlyMap<string, number | null> }): Finding[] {
+export function foFindings(
+  previous: { day: number; lots: ReadonlyMap<string, number | null>; /** Stocks whose last listed contract expired that day: leaving the list next is expected. */ expired?: ReadonlySet<string> },
+  current: { day: number; lots: ReadonlyMap<string, number | null> },
+): Finding[] {
   const out: Finding[] = [];
   const added = [...current.lots.keys()].filter((symbol) => !previous.lots.has(symbol)).sort();
   const removed = [...previous.lots.keys()].filter((symbol) => !current.lots.has(symbol)).sort();
   if (added.length || removed.length) {
-    const cutOff = removed.length >= FO_DROP_MIN && removed.length >= previous.lots.size * FO_DROP_SHARE;
+    // Stocks dropped from F&O leave after their last expiry (34 at once on 28 Jun 2019): only other departures look like a cut-off file.
+    const unexpected = removed.filter((symbol) => !previous.expired?.has(symbol)).length;
+    const cutOff = unexpected >= FO_DROP_MIN && unexpected >= previous.lots.size * FO_DROP_SHARE;
     const parts = [added.length ? `${plural(added.length, "stock")} added (${list(added)})` : "", removed.length ? `${plural(removed.length, "stock")} removed (${list(removed)})` : ""].filter(Boolean);
     out.push({
       check: "fo_list_change",

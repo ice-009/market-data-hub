@@ -24,7 +24,7 @@ export const CHECK_HELP: Record<(typeof CHECKS)[number], string> = {
   price_outlier: "A close-to-close move over 10× the stock's recent volatility (and over 10%) that no corporate action explains; a warning beyond NSE's 20% price band, info within it.",
   broker_mismatch: "Stored (broker) daily closes that differ from NSE's bhavcopy; info when the difference is a corporate action the broker adjusted its history for.",
   lot_change: "Lot sizes that changed between two F&O sessions.",
-  fo_list_change: "Stocks that joined or left the F&O list (a problem when a tenth or more leave at once: a cut-off file).",
+  fo_list_change: "Stocks that joined or left the F&O list (a problem when a tenth or more leave at once other than after their last expiry: a cut-off file).",
   lot_file_mismatch: "NSE's lot file (fo_mktlots.csv) disagrees with the newest F&O bhavcopy.",
 };
 

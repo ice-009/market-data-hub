@@ -694,7 +694,7 @@ missing or wrong: worth an alert), `warning` (worth a look) or `info` (a change 
 | `price_outlier` | a close-to-close move of 10× the stock's volatility (the standard deviation of its last 60 daily log returns, at least 20 of them, taken as at least 1%) and at least 10%, that no corporate action explains: the corporate-action hook (the adjustment table, [#20](https://github.com/ice-009/market-data-hub/issues/20), once it lands), NSE's `PREV_CLOSE` off the stored close by over 1.5%, or an F&O lot change matching the move. The message says when the move matches a common split/bonus ratio (1/2, 1/5, 1/10, 2/3…) | warning beyond NSE's widest price band (20%), else info |
 | `broker_mismatch` | stored daily closes against the bhavcopy's (pluggable price adjuster; none yet), in stretches of one steady ratio. A stretch that ends where the stored history moves smoothly and NSE's raw close jumps is a corporate action the broker adjusted for and the archive isn't adjusted for yet | info; warning when nothing explains it |
 | `lot_change` | lot sizes that changed between two consecutive F&O sessions (one finding per day, `detail.changes`) | info |
-| `fo_list_change` | stocks that joined or left the F&O list (`detail.added`, `detail.removed`) | info; problem when a tenth or more (≥ 10) leave at once (a cut-off file) |
+| `fo_list_change` | stocks that joined or left the F&O list (`detail.added`, `detail.removed`) | info; problem when a tenth or more (≥ 10) leave at once, not counting stocks whose last contract expired the session before (NSE drops stocks from F&O after an expiry: 34 on 28 Jun 2019) — a cut-off file |
 | `lot_file_mismatch` | NSE's `fo_mktlots.csv` (what `/v1/lots` serves) disagreeing with the newest F&O bhavcopy's lots | warning |
 
 The session checks are recomputed whenever `nse_days` changes; the per-day ones (outliers, repeated
@@ -843,7 +843,7 @@ otherwise, so it may run alongside the server.
 ### data quality
 
 Runs the [data-quality checks](#get-v1quality) on what is stored — only new or changed days, or every
-stored day again with `--full` (the whole archive, ~8,000 sessions, takes a minute or two) — then
+stored day again with `--full` (about 10 to 60 s for eight years of sessions, depending on how much of the database is cached) — then
 prints the open findings per check and lists the problems and warnings (`--all` adds info, `--check`
 picks one check, `--resolved` lists resolved ones). It only reads and writes the database, so it can
 run while the server does. `data nse-history`, when it runs in the CLI, checks the days it

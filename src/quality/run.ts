@@ -154,34 +154,33 @@ function lotFactors(db: Db, foOk: readonly number[], from: number, to: number): 
 }
 
 function checkCashChunk(db: Db, days: readonly number[], foOk: readonly number[], [a, b]: [number, number], hooks: QualityHooks): Finding[] {
-  const warm = Math.max(0, a - VOL_WINDOW - 1);
-  const scanner = new CashScanner({ corporateAction: hooks.corporateAction, lotFactors: lotFactors(db, foOk, days[a], days[b]) });
-  const statement = db.prepare("select symbol, day, prev_close as prevClose, o, h, l, c, v from cash_bhav where day between ? and ? order by day");
+  const warm = days[Math.max(0, a - VOL_WINDOW - 1)];
+  const scanner = new CashScanner({ sessions: days, corporateAction: hooks.corporateAction, lotFactors: lotFactors(db, foOk, days[a], days[b]) });
+  // Stock by stock along the primary key (symbol, day): sequential reads, where
+  // reading day by day through the day index jumps all over a large archive.
+  const symbols = (db.prepare("select distinct symbol from cash_bhav where day between ? and ?").all(days[a], days[b]) as Array<{ symbol: string }>).map((row) => row.symbol);
+  const statement = db.prepare("select symbol, day, prev_close as prevClose, o, h, l, c, v from cash_bhav where symbol = ? and day between ? and ? order by day");
+  const from = days[a];
   const findings: Finding[] = [];
-  let current: number | null = null;
-  let rows: CashRow[] = [];
-  const flush = () => {
-    if (current !== null) findings.push(...scanner.day(current, rows, current >= days[a]));
-    rows = [];
-  };
-  for (const row of statement.iterate(days[warm], days[b]) as Iterable<CashRow>) {
-    if (row.day !== current) {
-      flush();
-      current = row.day;
-    }
-    rows.push(row);
-  }
-  flush();
+  for (const symbol of symbols) findings.push(...scanner.symbol(statement.all(symbol, warm, days[b]) as CashRow[], (day) => day >= from));
+  findings.push(...scanner.repeated(days.slice(a, b + 1)));
   return findings;
 }
 
 function checkFoChunk(db: Db, days: readonly number[], [a, b]: [number, number]): Finding[] {
   const from = a > 0 ? days[a - 1] : days[a];
   const byDay = new Map<number, Map<string, number | null>>();
-  for (const row of db.prepare("select day, symbol, lot from fo_futures where day between ? and ?").iterate(from, days[b]) as Iterable<{ day: number; symbol: string; lot: number | null }>) {
+  /** Per day, the stocks whose last listed contract (near, with no next month) expired that day. */
+  const expired = new Map<number, Set<string>>();
+  for (const row of db.prepare("select day, symbol, lot, near_expiry as nearExpiry, next_expiry as nextExpiry from fo_futures where day between ? and ?").iterate(from, days[b]) as Iterable<{ day: number; symbol: string; lot: number | null; nearExpiry: number; nextExpiry: number | null }>) {
     let lots = byDay.get(row.day);
     if (!lots) byDay.set(row.day, (lots = new Map()));
     lots.set(row.symbol, row.lot);
+    if (row.nearExpiry === row.day && row.nextExpiry === null) {
+      let set = expired.get(row.day);
+      if (!set) expired.set(row.day, (set = new Set()));
+      set.add(row.symbol);
+    }
   }
   const findings: Finding[] = [];
   for (let i = Math.max(a, 1); i <= b; i += 1) {
@@ -189,7 +188,7 @@ function checkFoChunk(db: Db, days: readonly number[], [a, b]: [number, number])
     const current = byDay.get(days[i]) ?? new Map();
     // An F&O day stored with no stock futures (a format change) says nothing about the list.
     if (!previous.size || !current.size) continue;
-    findings.push(...foFindings({ day: days[i - 1], lots: previous }, { day: days[i], lots: current }));
+    findings.push(...foFindings({ day: days[i - 1], lots: previous, expired: expired.get(days[i - 1]) }, { day: days[i], lots: current }));
   }
   return findings;
 }
