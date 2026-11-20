@@ -8,7 +8,7 @@ date** (so `new Date(t).toISOString().slice(0, 10)` is the trade date); intraday
 instant they start. Query dates are `YYYY-MM-DD` (IST) or epoch ms. For intraday data `from` means
 the start of that IST day and `to` its end.
 
-**Scopes.** `history`: candles, universes, lots, results calendar, regime, ticker renames. `fo`: everything under
+**Scopes.** `history`: candles, universes, lots, results calendar, regime, ticker renames, data quality. `fo`: everything under
 `/v1/fo`. `live`: quotes and the price stream. `admin` holds every scope (and alone may pin live
 symbols).
 
@@ -27,6 +27,7 @@ symbols).
 | `GET /v1/results-calendar?from&to[&symbol]` | history | board meetings from NSE's daily PR zip |
 | `GET /v1/market/regime[?universe]` | history | stored daily candles + cash bhavcopy |
 | `GET /v1/indices` | history | NSE index file (`ind_close_all`); synthetic baskets from the cash bhavcopy |
+| `GET /v1/quality[?check&severity&subject&from&to&status&limit]` | history | the data-quality checks' findings |
 | `GET /v1/symbols/history?symbol[&date]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
 | `GET /v1/symbols/changes[?symbol][&from&to]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
 | `GET /v1/quotes?symbols` | live | live feed; broker quotes; last stored quote |
@@ -702,8 +703,16 @@ code. A problem is raised when:
 | Live feed | during market hours (09:15–15:30 IST, weekdays) the feed isn't running or is `down` (no socket, no polling). Socket down but polling is a warning |
 | Backups | `HUB_BACKUP_DIR` is set and it holds no backup, or the newest is over 2 days old |
 | Disk | free space where the database (or, on another disk, the backups) lives is under `HUB_DISK_MIN_GB` (default 2 GB) — NSE history and backups have stopped by then, and SQLite writes are next. Under `HUB_DISK_WARN_GB` (default 5 GB) is a warning |
+| A refresh that keeps failing | any dataset (cash / F&O bhavcopy, index file, PR zip, lots, ban list, ticker renames) whose refreshes have failed for a day: the last attempts failed in a row since then, with the last error. Three failures in a row (an hour and a half of the evening run) are a *warning* first, before the data counts as stale |
 
-`HUB_JOBS=off` adds a warning (NSE files then go stale by design).
+`HUB_JOBS=off` adds a warning (NSE files then go stale by design). Open data-quality *problems* about the last 14 days' data
+add one warning (`Data quality: …`; see [GET /v1/quality](#get-v1quality)) — never a problem: a bad file is worth knowing
+about, but the hub is still serving.
+
+`quality`: the [data-quality checks](#get-v1quality)' state — `lastRunAt`, `pendingDays` (stored days not checked yet) and
+`waitingDays` (of those, the ones waiting for the sessions before them, during an NSE history download), `open`
+(`{ problem, warning, info }` counts), `checks` (per check and severity: `count`, `newestDate`) and `recent`: the open findings
+about the last 30 days' trade dates (at most 50, newest first; the same objects as `/v1/quality`'s).
 
 `disk`: `volumes` (one entry per disk: `holds` is `the database`, `backups` or `the database and
 backups`, `freeBytes` null when it can't be read), the thresholds `warnBelowBytes` and
@@ -749,6 +758,46 @@ the last tick and heartbeat the previous run left, which is where restart recove
       "previousRun": { "lastTickAt": 1794199680000, "aliveAt": 1794199690000 } } } }
 ```
 
+## GET /v1/quality
+
+Data-quality checks on what the hub has stored, run after every evening import and NSE history
+run, newest trade day first. Each finding is about one trade day and one subject (a dataset —
+`cash_bhav`, `fo_bhav`, `index_close`, `pr` —, a symbol, `fo`, `lots` or `calendar`); it is
+refreshed while the data still shows it and **resolved** (`resolvedAt`) once it doesn't, e.g. when
+NSE's next file confirms a holiday or the day is downloaded again. Severity: `problem` (a file is
+missing or wrong: worth an alert), `warning` (worth a look) or `info` (a change worth knowing).
+
+| Check | Finds | Severity |
+|---|---|---|
+| `missing_session` | a session (another NSE file of that day is stored: cash, F&O or index) whose file NSE answered with 404 or another day's file. The hub has no holiday list ([#17](https://github.com/ice-009/market-data-hub/issues/17)): a day with any of those files stored is a session | problem |
+| `unlisted_session` | a weekend session (cash/F&O files stored) that `WEEKEND_SESSIONS` doesn't list, so the evening run won't ask for its files (seen: Sun 8 Nov 2026 Muhurat, Sat 1 Feb 2025 Budget) | warning (info over a year back) |
+| `wrong_date` | NSE served another day's file for a weekday and no other dataset confirms a holiday (resolved once one does) | warning |
+| `repeated_file` | a cash bhavcopy whose OHLCV repeats the previous session's for half or more of the stocks the two share (at least 50): the previous file under a new date | problem |
+| `candle_gap` | stored daily candles (broker history) lacking sessions the stock traded inside their coverage; one finding per symbol | warning |
+| `price_outlier` | a close-to-close move of 10× the stock's volatility (the standard deviation of its last 60 daily log returns, at least 20 of them, taken as at least 1%) and at least 10%, that no corporate action explains: the corporate-action hook (the adjustment table, [#20](https://github.com/ice-009/market-data-hub/issues/20), once it lands), NSE's `PREV_CLOSE` off the stored close by over 1.5%, or an F&O lot change matching the move. The message says when the move matches a common split/bonus ratio (1/2, 1/5, 1/10, 2/3…) | warning beyond NSE's widest price band (20%), else info |
+| `broker_mismatch` | stored daily closes against the bhavcopy's (pluggable price adjuster; none yet), in stretches of one steady ratio. A stretch that ends where the stored history moves smoothly and NSE's raw close jumps is a corporate action the broker adjusted for and the archive isn't adjusted for yet | info; warning when nothing explains it |
+| `lot_change` | lot sizes that changed between two consecutive F&O sessions (one finding per day, `detail.changes`) | info |
+| `fo_list_change` | stocks that joined or left the F&O list (`detail.added`, `detail.removed`) | info; problem when a tenth or more (≥ 10) leave at once, not counting stocks whose last contract expired the session before (NSE drops stocks from F&O after an expiry: 34 on 28 Jun 2019) — a cut-off file |
+| `lot_file_mismatch` | NSE's `fo_mktlots.csv` (what `/v1/lots` serves) disagreeing with the newest F&O bhavcopy's lots | warning |
+
+The session checks are recomputed whenever `nse_days` changes; the per-day ones (outliers, repeated
+files, lots and the F&O list) look at each stored day once, newest first, in runs of 100 sessions —
+during an NSE history download a day waits until the sessions before it are stored (`waitingDays`
+in `/v1/status`) — and again if the day's file is stored again; stored candles are compared at most
+every 30 minutes, when they or the bhavcopy changed. `hub data quality --full` checks everything again.
+
+Query: `check`, `severity` (that severity and worse), `subject`, `from` / `to` (trade dates), `status`
+(`open` — the default —, `resolved`, `all`), `limit` (1–1000, default 200).
+
+```json
+200 { "summary": { "lastRunAt": 1795100000000, "pendingDays": 0, "waitingDays": 0, "open": { "problem": 0, "warning": 2, "info": 3 }, "checks": [ … ], "recent": [ … ] },
+      "checks": { "missing_session": "A session … whose file NSE answered with 404 or with another day's file.", … },
+      "count": 1,
+      "findings": [ { "check": "candle_gap", "date": "2026-11-08", "day": 1794096000000, "subject": "ABB", "severity": "warning",
+        "message": "ABB: stored daily candles lack 1 session it traded (Sun 8 Nov 2026).", "detail": { "missing": 1, "days": ["2026-11-08"] },
+        "firstSeenAt": 1795100000000, "lastSeenAt": 1795100000000, "resolvedAt": null } ] }
+```
+
 ## After a restart
 
 What the hub does by itself when it starts again (details in [h2-design.md](h2-design.md)):
@@ -779,12 +828,15 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
   day asked for; a file for another date is recorded as `mismatch` and asked for again in the
   evening (the PR zip: within the last 10 days).
 - **Queued jobs** from the CLI, one at a time: broker backfills and NSE history downloads.
+- **Data-quality checks** every minute and right after the evening import or an NSE history run: whatever changed
+  since the last round (see [GET /v1/quality](#get-v1quality)), within 1.5 s a round (0.25 s in market hours); new
+  findings go to the log (`data-quality finding`, a warning for problems and warnings).
 - **Nightly backup** when `HUB_BACKUP_DIR` is set: once a day (at least 22 hours apart), never
   between 08:45 and 16:00 IST on weekdays, keeping the newest `HUB_BACKUP_KEEP` (default 7). Without
   the disk space for it ([data backup](#data-backup)) it is skipped with one warning in the log and
   tried again an hour later.
 
-`HUB_JOBS=off` disables all three.
+`HUB_JOBS=off` disables all of these (`hub data quality` still runs the checks on demand).
 
 ## Admin CLI
 
@@ -802,6 +854,7 @@ npm run hub -- data adjustments --check [--symbols A,B] [--tolerance 0.005] [--j
 npm run hub -- data cancel <job id>
 npm run hub -- data backup [--to ./backups] [--keep 7]
 npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tradex .cache/screener>] [--dry-run]
+npm run hub -- data quality [--full] [--check price_outlier] [--all] [--resolved] [--limit 40]
 ```
 
 (In Docker: `docker compose exec hub node dist/cli.js data status`.)
@@ -907,6 +960,15 @@ newest one) and how many ex-dates agree. Exit code 1 when anything is `unexplain
 the whole report. In end-of-day mode the stored series are built from the factors themselves, so the
 check says so; it is meant for a hub with a broker. Read-only (unless `--rebuild`), so it may run
 alongside the server.
+
+### data quality
+
+Runs the [data-quality checks](#get-v1quality) on what is stored — only new or changed days, or every
+stored day again with `--full` (about 10 to 60 s for eight years of sessions, depending on how much of the database is cached) — then
+prints the open findings per check and lists the problems and warnings (`--all` adds info, `--check`
+picks one check, `--resolved` lists resolved ones). It only reads and writes the database, so it can
+run while the server does. `data nse-history`, when it runs in the CLI, checks the days it
+downloaded at the end; `data status` prints the open counts.
 
 ### data backup
 
@@ -1019,12 +1081,14 @@ free space and what the backups take.
 | `symbol_changes` | NSE's `symbolchange.csv`: (old symbol, effective date) → new symbol, company |
 | `isin_symbols` | (ISIN, symbol) → first and last stored day it traded under that ticker (old-format cash files, 2011–2024) |
 | `isin_days` | old-format cash days whose ISINs were read, with how many |
-| `datasets` | per dataset: last attempt, last success, last error, info |
+| `datasets` | per dataset: last attempt, last success, last error, info; failures in a row and since when |
 | `kv` | small hub state: the broker budget (today's counts, strikes, cooldown), the live heartbeat (`live.heartbeat`: when the last run was known alive) and the gap-repair queue (`live.recovery`) |
 | `jobs` | queued jobs (`backfill`, `nse_history`): params, state, progress, resume time |
 | `live_quotes` | symbol → the last tick (ltp, change, day OHLC, cumulative volume, trade and receive times, source) |
 | `live_bars_1m` | (symbol, t) → o, h, l, c, v, source `live` (from ticks) or `broker` (repaired; never replaced by a live write). Kept `HUB_LIVE_RETENTION_DAYS` |
 | `live_subscriptions` | the persistent set: symbol → origin `config` (`HUB_LIVE_SYMBOLS`) or `pin` (API), added time |
+| `quality_findings` | (check, trade day, subject) → severity, message, detail (JSON), first / last seen, resolved (migration 8; 7 is held for split/bonus factors, market-data-hub#20) |
+| `quality_checked` | (check, trade day) → when the per-day checks looked at it |
 
 Other files in the data directory: `fyers-token.json` (mode 600, the broker access token),
 `owner.lock` (pid of the process that owns the broker/NSE connection) and `fyers-sdk/` (mode 700,

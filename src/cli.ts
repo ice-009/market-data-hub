@@ -19,6 +19,9 @@ import { getUniverse } from "./reference/universe.js";
 import { brokerStatus, dataFreshness, dataMode, diskStatus } from "./status.js";
 import { ARCHIVE_FROM, refreshSymbolChanges } from "./nse/datasets.js";
 import { readRuns } from "./nse/store.js";
+import { logFindings, runQuality } from "./quality/run.js";
+import { CHECKS, readFindings, type CheckName } from "./quality/store.js";
+import { qualitySummary } from "./quality/summary.js";
 import { DAY_MS, isoDay, istParts, parseIsoDay } from "./time.js";
 
 // Admin CLI, run on the machine that hosts the hub (it opens the database
@@ -29,6 +32,7 @@ import { DAY_MS, isoDay, istParts, parseIsoDay } from "./time.js";
 //   npm run hub -- data backfill --tf 1d --years 5 [--symbols SBIN,INFY]
 //   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr|indices]
 //   npm run hub -- data status
+//   npm run hub -- data quality [--full] [--check price_outlier] [--all]
 //   npm run hub -- data symbols [INFY TMPV …] [--date 2005-01-03] [--refresh]
 //   npm run hub -- data adjustments [INFY …] [--rebuild] [--check [--symbols A,B] [--tolerance 0.005] [--json]]
 //   npm run hub -- data cancel <job id>
@@ -50,7 +54,8 @@ const USAGE = `Usage:
   hub data adjustments [SYMBOL …] [--rebuild] [--check [--symbols A,B,…] [--tolerance 0.005] [--json]]
   hub data cancel <job id>
   hub data backup [--to <dir>] [--keep N]
-  hub data import-tradex --db <market.db> [--screener <dir>] [--dry-run]`;
+  hub data import-tradex --db <market.db> [--screener <dir>] [--dry-run]
+  hub data quality [--full] [--check <name>] [--all] [--resolved] [--limit N]`;
 
 const fmt = (ms: number | null) => (ms ? `${new Date(ms).toISOString().replace("T", " ").slice(0, 19)} UTC` : "—");
 
@@ -82,6 +87,37 @@ function keys(db: Db, action: string, rest: string[]): number {
   }
   console.log(USAGE);
   return 1;
+}
+
+/**
+ * `data quality`: run the data-quality checks on what's stored (they only read
+ * and write the database, so this works while the server runs too), then list
+ * the open problems and warnings. `--full` checks every stored day again.
+ */
+function quality(db: Db, rest: string[]): number {
+  const check = flag(rest, "--check");
+  if (check !== undefined && !CHECKS.includes(check as CheckName)) {
+    console.error(`--check must be one of ${CHECKS.join(", ")}.`);
+    return 1;
+  }
+  const limitRaw = flag(rest, "--limit");
+  const limit = limitRaw === undefined ? 40 : Number(limitRaw);
+  if (!Number.isInteger(limit) || limit < 1) {
+    console.error("--limit must be a whole number of at least 1.");
+    return 1;
+  }
+  const full = rest.includes("--full");
+  if (full) console.log("Checking every stored day again (the whole archive takes a minute or two)…");
+  const result = runQuality(db, { full });
+  console.log(`Checked ${result.checkedDays} day(s) in ${(result.ms / 1000).toFixed(1)} s; ${result.fresh.length} new finding(s).${result.waitingDays ? ` ${result.waitingDays} stored day(s) wait for the sessions before them (an NSE history download in progress).` : ""}`);
+  const summary = qualitySummary(db);
+  console.log(`Open findings: ${summary.open.problem} problem(s), ${summary.open.warning} warning(s), ${summary.open.info} info.`);
+  for (const row of summary.checks) console.log(`  ${row.check.padEnd(18)} ${row.severity.padEnd(8)} ${String(row.count).padStart(6)}   newest ${row.newestDate}`);
+  const findings = readFindings(db, { check: check as CheckName | undefined, severity: rest.includes("--all") ? "info" : "warning", status: rest.includes("--resolved") ? "resolved" : "open", limit });
+  console.log(findings.length ? "" : "\nNothing to list.");
+  const mark = { problem: "✗", warning: "!", info: "·" } as const;
+  for (const finding of findings) console.log(`${mark[finding.severity]} ${isoDay(finding.day)} ${finding.check}: ${finding.message}`);
+  return 0;
 }
 
 const jobTitle = (job: Job) =>
@@ -188,12 +224,18 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
           lastPrinted = progress.done;
         }
       });
+      // The server checks each new day itself; here no server is running, so check the downloaded days now.
+      const quality = runQuality(db);
+      logFindings(log, quality.fresh);
+      console.log(`Data quality: checked ${quality.checkedDays} day(s), ${quality.fresh.length} new finding(s)${quality.pendingDays ? `, ${quality.pendingDays} day(s) waiting for earlier sessions` : ""}. See \`hub data quality\`.`);
       return final.state === "error" ? 1 : 0;
     } finally {
       process.off("SIGINT", stop);
       release();
     }
   }
+
+  if (action === "quality") return quality(db, rest);
 
   if (action === "status") {
     const hub = createHub({ config, db, log, owner: false });
@@ -205,6 +247,8 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     console.log(health.healthy ? "Health: OK" : `Health: ${health.problems.length} problem(s)`);
     for (const problem of health.problems) console.log(`  ✗ ${problem}`);
     for (const warning of health.warnings) console.log(`  ! ${warning}`);
+    const checks = qualitySummary(db);
+    console.log(`Data quality: ${checks.open.problem} problem(s), ${checks.open.warning} warning(s), ${checks.open.info} info open${checks.pendingDays ? `; ${checks.pendingDays} day(s) not checked yet` : ""} (\`hub data quality\` lists them)`);
     console.log("");
     const mode = dataMode(hub);
     console.log(`Mode: ${mode.modeLabel}${mode.modeNote ? ` — ${mode.modeNote}` : ""}`);

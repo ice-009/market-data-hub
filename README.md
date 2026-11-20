@@ -351,6 +351,7 @@ Errors always look like this and never echo your headers or the hub's configurat
 | `GET /v1/corporate-actions?[symbol&]from&to` | history | ✅ | NSE's corporate actions (bonus, split, rights, dividend, demerger… with ex-dates) from the PR zips. |
 | `GET /v1/symbols/history?symbol=INFY[&date=…]` | history | ✅ | A company's tickers over time (INFOSYSTCH → INFY), point in time: the ticker as it was on `date`, and the cash history stored under each name. |
 | `GET /v1/symbols/changes[?symbol][&from&to]` | history | ✅ | Every ticker rename: NSE's `symbolchange.csv` plus renames seen in the bhavcopies' ISINs. |
+| `GET /v1/quality` | history | ✅ | Data-quality findings, checked after every evening import and archive download: missing sessions, files for the wrong date, price outliers no corporate action explains, stored candles vs the bhavcopy, lot-size and F&O-list changes. |
 | `GET /v1/quotes?symbols=SBIN,TCS` | live | ✅ | Last price, change, OHLC, volume, with `ageMs`, `source` and `stale`. From the live feed when fresh, else one batched broker call (cached 3 s), else the last stored quote — never an error because the broker is down. |
 | `GET /v1/stream?symbols=SBIN,TCS` | live | ✅ | Server-Sent Events: `status`, a `snapshot` of last quotes, a `bars` replay of 1-minute bars (resumes from `Last-Event-ID`), then `tick` events from one shared broker socket. |
 | `POST` / `DELETE /v1/live/pin` | admin | ✅ | Add or remove symbols kept subscribed across restarts (on top of `HUB_LIVE_SYMBOLS`). |
@@ -506,6 +507,8 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 - **Status at a glance:** `npm run hub -- data status` (or `GET /v1/status`) shows the health check, the broker
   connection and today's budget, dataset freshness, and a live line: the persistent symbols, when
   the last tick arrived and whether a gap repair is queued or stopped.
+- **Data quality:** `npm run hub -- data quality` lists what the checks found (`--full` checks every
+  stored day again); `/v1/status` sums it up under `quality`, and `GET /v1/quality` lists it.
 - **Live prices:** the socket opens at 09:15 IST and closes after 15:30 on weekdays. In
   `/v1/status`, `live.feed.mode` is `socket` when all is well, `polling`/`mixed` when the socket is
   down or over capacity, `idle` outside market hours, and `down` when this process isn't running the
@@ -529,7 +532,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 market-data-hub/
 ├─ src/
 │  ├─ server.ts          # entry point: config → database → HTTP server, graceful shutdown
-│  ├─ cli.ts             # admin CLI (API keys, backfills, NSE history, data status, backup, import-tradex)
+│  ├─ cli.ts             # admin CLI (API keys, backfills, NSE history, data status and quality, backup, import-tradex)
 │  ├─ config.ts          # environment parsing; broker secrets kept apart for the scrubber
 │  ├─ log.ts             # JSON logger + secret scrubber (the only way the server logs)
 │  ├─ db.ts              # SQLite (WAL) + ordered migrations
@@ -544,13 +547,14 @@ market-data-hub/
 │  ├─ broker/            # Fyers: login, request budget, history + quotes, the data socket
 │  ├─ history/           # candle store, fetch planning, resampling, background fetch queue
 │  ├─ nse/               # NSE daily files: parsers, downloads, store
+│  ├─ quality/           # data-quality checks (pure), their incremental runner, findings store and summary
 │  ├─ live/              # live prices: feed, store (quotes, 1-minute bars), gap repair,
 │  │                     #   candle merge, stream fan-out, and service.ts wiring them
 │  ├─ jobs/              # scheduler (NSE files, queued jobs, nightly backup), backfill and NSE history jobs
 │  ├─ import/            # `data import-tradex`: Tradex's stored data → the hub (mapping rules in tradexMap.ts)
 │  └─ http/
 │     ├─ app.ts          # Hono app: /healthz, auth middleware, requireScope, /v1/status, errors
-│     └─ routes/         # candles, reference data, live (quotes, stream, pins)
+│     └─ routes/         # candles, reference data, live (quotes, stream, pins), data quality
 ├─ test/                 # Vitest tests (fake credentials only)
 ├─ docs/
 │  ├─ api.md             # API and CLI reference

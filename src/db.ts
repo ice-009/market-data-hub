@@ -15,10 +15,13 @@ import Database from "better-sqlite3";
 //   5  ticker renames          symbol_changes, isin_symbols, isin_days; see src/reference/renames.ts
 //   6  index closes            index_closes (NSE's ind_close_all); see src/nse/store.ts
 //   7  adjustments             corporate_actions, corporate_action_days, adjustment_factors; see src/history/adjustments.ts
+//   8  data quality            quality_findings, quality_checked; datasets.failures; see src/quality/store.ts
 
 export type Db = Database.Database;
 
-const MIGRATIONS: string[] = [
+// A hole (undefined) is a number reserved by work still in review: it's skipped,
+// not recorded, so it runs when it lands even after later ones have run.
+const MIGRATIONS: Array<string | undefined> = [
   `create table api_keys (
      id text primary key,
      name text not null,
@@ -237,6 +240,33 @@ const MIGRATIONS: string[] = [
      primary key (symbol, day)
    ) without rowid;
    create index adjustment_factors_day on adjustment_factors (day);`,
+  // Data-quality checks (src/quality): one row per finding, keyed by what it's
+  // about (check, trade day, subject: a dataset, a symbol, or "fo"), kept after
+  // it's resolved (resolved_at). quality_checked: the trade days each per-day
+  // check has looked at, so the evening run and archive downloads check only
+  // new days. datasets.failures / failing_since: refresh attempts failed in a
+  // row and since when (health reports a dataset that keeps failing).
+  `create table quality_findings (
+     check_name text not null,
+     day integer not null,
+     subject text not null,
+     severity text not null check (severity in ('problem', 'warning', 'info')),
+     message text not null,
+     detail text,
+     first_seen_at integer not null,
+     last_seen_at integer not null,
+     resolved_at integer,
+     primary key (check_name, day, subject)
+   ) without rowid;
+   create index quality_findings_open on quality_findings (resolved_at, day);
+   create table quality_checked (
+     check_name text not null,
+     day integer not null,
+     checked_at integer not null,
+     primary key (check_name, day)
+   ) without rowid;
+   alter table datasets add column failures integer not null default 0;
+   alter table datasets add column failing_since integer;`,
 ];
 
 /** Small JSON values the hub keeps between restarts (e.g. the broker budget). */
@@ -268,7 +298,7 @@ export function migrate(db: Db) {
   db.exec("create table if not exists _migrations (id integer primary key, applied_at integer not null)");
   const done = new Set((db.prepare("select id from _migrations").all() as { id: number }[]).map((row) => row.id));
   MIGRATIONS.forEach((sql, i) => {
-    if (done.has(i)) return;
+    if (sql === undefined || done.has(i)) return;
     db.transaction(() => {
       db.exec(sql);
       db.prepare("insert into _migrations (id, applied_at) values (?, ?)").run(i, Date.now());
