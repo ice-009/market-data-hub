@@ -6,7 +6,9 @@
 // 2012). Indices NSE only computes a close for print "-" for open/high/low;
 // unknown numbers are null. The file's own trade date (Index Date,
 // DD-MM-YYYY) is returned so the caller can reject a file served for another
-// day. Pure.
+// day. Some files print it month first instead (6, 10 and 11 Apr 2023 say
+// "04-06-2023", "04-10-2023", "04-11-2023"): given the day asked for, a date
+// that reads as that day month first is that day. Pure.
 
 export interface IndexCloseRow {
   /** The index's name as NSE printed it that day ("S&P CNX Nifty" in 2012, "Nifty 50" now). */
@@ -31,14 +33,26 @@ export interface IndexCloseParse {
   badRows: number;
 }
 
-/** "17-11-2026" → day key, or null. */
-export function parseDdMmYyyy(value: string): number | null {
+/** Day key of a calendar date (month 1–12), or null when there is no such date. */
+function utcDay(year: number, month: number, day: number): number | null {
+  const t = Date.UTC(year, month - 1, day);
+  const date = new Date(t);
+  return date.getUTCMonth() === month - 1 && date.getUTCDate() === day ? t : null;
+}
+
+/**
+ * "17-11-2026" → day key, or null. With `expected` (the day asked for), a
+ * date that is `expected` read month first ("04-06-2023" for 6 Apr 2023) is
+ * `expected`; one that is neither reads day first where it can.
+ */
+export function parseDdMmYyyy(value: string, expected?: number): number | null {
   const match = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(value.trim());
   if (!match) return null;
-  const month = Number(match[2]) - 1;
-  const t = Date.UTC(Number(match[3]), month, Number(match[1]));
-  const date = new Date(t);
-  return date.getUTCMonth() === month && date.getUTCDate() === Number(match[1]) ? t : null;
+  const [first, second, year] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const dayFirst = utcDay(year, second, first);
+  if (expected === undefined || dayFirst === expected) return dayFirst;
+  const monthFirst = utcDay(year, first, second);
+  return monthFirst === expected ? monthFirst : (dayFirst ?? monthFirst);
 }
 
 /** Split one CSV line, honouring double quotes (no index name has had a comma yet, but one may). */
@@ -76,7 +90,8 @@ const price = (value: string | undefined): number | null => {
   return n !== null && n > 0 ? n : null;
 };
 
-export function parseIndexClose(csv: string): IndexCloseParse {
+/** `expected`: the day the file was asked for (see parseDdMmYyyy). */
+export function parseIndexClose(csv: string, expected?: number): IndexCloseParse {
   const lines = (csv.charCodeAt(0) === 0xfeff ? csv.slice(1) : csv).split(/\r?\n/);
   const header = (lines[0] ?? "").toLowerCase();
   if (!header.startsWith("index name") || !header.includes("closing index value")) return { tradeDate: null, mixedDates: false, rows: [], badRows: 0 };
@@ -86,7 +101,7 @@ export function parseIndexClose(csv: string): IndexCloseParse {
   for (const line of lines.slice(1)) {
     if (!line.trim()) continue;
     const [name, date, open, high, low, close, points, pct, volume, turnover, pe, pb, dy] = cells(line).map((cell) => cell.trim());
-    const day = parseDdMmYyyy(date ?? "");
+    const day = parseDdMmYyyy(date ?? "", expected);
     const closeValue = price(close);
     if (!name || day === null || closeValue === null) {
       badRows += 1;

@@ -16,7 +16,7 @@ export const HEALTH_FINDING_DAYS = 14;
 
 /** What each check looks for, for people reading /v1/quality. */
 export const CHECK_HELP: Record<(typeof CHECKS)[number], string> = {
-  missing_session: "A session (another NSE file of that day is stored) whose file NSE answered with 404 or with another day's file.",
+  missing_session: "A session (another NSE file of that day is stored) whose file NSE answered with 404 or with another day's file (info for a known gap in NSE's archive).",
   unlisted_session: "A weekend session the hub's calendar (WEEKEND_SESSIONS) doesn't list, so the evening run won't ask for its files.",
   wrong_date: "NSE served another day's file for a weekday, and nothing confirms the day was a holiday.",
   repeated_file: "A cash bhavcopy whose prices repeat the previous session's: the previous file under a new date.",

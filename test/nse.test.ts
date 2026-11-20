@@ -276,7 +276,7 @@ describe("NSE datasets", () => {
   it("reads PR zips 60 days back, re-asking a mismatch only for the recent days", () => {
     const { ctx } = context({}, ist(2026, 11, 18, 20));
     const all = recentDays(ctx, "pr", 60, 10);
-    expect(all).toHaveLength(43); // weekdays from 19 Sep, today included after 17:30
+    expect(all).toHaveLength(44); // weekdays from 19 Sep and Sun 8 Nov (Muhurat), today included after 17:30
     for (const day of all) markDay(ctx.db, "pr", day, "ok", 0, 0);
     markDay(ctx.db, "pr", d("2026-11-16"), "mismatch", 0, 0);
     markDay(ctx.db, "pr", d("2026-10-01"), "mismatch", 0, 0);

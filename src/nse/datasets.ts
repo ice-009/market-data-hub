@@ -55,8 +55,39 @@ export interface NseContext {
 /** Don't ask for today's file before this (minutes after IST midnight). */
 export const PUBLISH_MIN: Record<DayDataset, number> = { cash_bhav: 17 * 60 + 30, fo_bhav: 18 * 60, pr: 17 * 60 + 30, index_close: 18 * 60 };
 
-/** Weekend days NSE held a full session on. Add new ones here (e.g. a Budget day on a weekend). */
-export const WEEKEND_SESSIONS: readonly number[] = [Date.UTC(2026, 1, 1)]; // Sun 1 Feb 2026, Union Budget
+/**
+ * Weekend days NSE held a session on (cash, F&O and index files all stored).
+ * Add new ones here: a Budget day or Diwali's Muhurat session on a weekend, a
+ * special session. `hub data quality` reports any it finds unlisted
+ * (unlisted_session) once an NSE history download has fetched the weekends.
+ */
+export const WEEKEND_SESSIONS: readonly number[] = [
+  Date.UTC(2019, 9, 27), // Sun 27 Oct 2019, Muhurat
+  Date.UTC(2020, 1, 1), // Sat 1 Feb 2020, Union Budget
+  Date.UTC(2020, 10, 14), // Sat 14 Nov 2020, Muhurat
+  Date.UTC(2023, 10, 12), // Sun 12 Nov 2023, Muhurat
+  Date.UTC(2024, 0, 20), // Sat 20 Jan 2024, special session
+  Date.UTC(2024, 2, 2), // Sat 2 Mar 2024, special session (DR site)
+  Date.UTC(2024, 4, 18), // Sat 18 May 2024, special session (DR site)
+  Date.UTC(2025, 1, 1), // Sat 1 Feb 2025, Union Budget
+  Date.UTC(2026, 1, 1), // Sun 1 Feb 2026, Union Budget
+  Date.UTC(2026, 10, 8), // Sun 8 Nov 2026, Muhurat
+];
+
+/**
+ * Sessions whose file NSE's archive doesn't have (every URL tried answers
+ * 404), checked by hand: the data-quality check reports them as known gaps
+ * (info), not as missing sessions.
+ *   fo_bhav 30 Mar 2021: fo30MAR2021bhav.csv.zip and the UDiFF name both 404;
+ *   the day's F&O market-activity report (archives/fo/mkt/fo30032021.zip)
+ *   exists but has no settlement price, change in OI, underlying or lot.
+ */
+export const ARCHIVE_GAPS: Readonly<Record<DayDataset, readonly number[]>> = {
+  cash_bhav: [],
+  fo_bhav: [Date.UTC(2021, 2, 30)],
+  pr: [],
+  index_close: [],
+};
 
 /** The last session of NSE's old file formats (Fri 5 Jul 2024); the current ones start on Mon 8 Jul 2024. */
 export const LEGACY_LAST_DAY = Date.UTC(2024, 6, 5);
@@ -231,7 +262,7 @@ export function readFoFile(ctx: NseContext, day: number, body: Buffer): DayParse
 
 /** Parse NSE's index file for `day`; `extend` (the evening run) also extends the index candles. */
 export function readIndexFile(ctx: NseContext, day: number, body: Buffer, options: ImportOptions = {}): DayParse {
-  const parsed = parseIndexClose(body.toString("utf8"));
+  const parsed = parseIndexClose(body.toString("utf8"), day);
   const wrong = checkDate(parsed.tradeDate, parsed.mixedDates, day);
   if (wrong) return { kind: "mismatch", note: wrong };
   if (!parsed.rows.length) throw new NseError("no rows in the index file (format change?)", null, false);

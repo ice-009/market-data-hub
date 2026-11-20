@@ -267,6 +267,15 @@ const MIGRATIONS: Array<string | undefined> = [
    ) without rowid;
    alter table datasets add column failures integer not null default 0;
    alter table datasets add column failing_since integer;`,
+  // Re-check the days NSE history marked "mismatch" because of parser bugs
+  // (market-data-hub#41, #42, #45): index files that print their date month
+  // first (6 Apr 2023 as "04-06-2023", read as 4 Jun) and files whose date
+  // couldn't be read at all (the 13 Jul 2020 cash bhavcopy's "13-Jul-20").
+  // Without an nse_days row, the next `hub data nse-history` run asks for them again.
+  `delete from nse_days where status = 'mismatch' and (
+     note = 'file is for no date'
+     or (dataset = 'index_close' and note = 'file is for ' || strftime('%Y-%d-%m', day / 1000, 'unixepoch'))
+   );`,
 ];
 
 /** Small JSON values the hub keeps between restarts (e.g. the broker budget). */

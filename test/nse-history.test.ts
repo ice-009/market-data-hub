@@ -152,15 +152,17 @@ describe("NSE history", () => {
   it("lists every weekend day for the cash market, and only the weekends it traded for F&O", () => {
     const { ctx } = context({}, ist(2026, 11, 16, 20));
     const days = (dataset: DayDataset, from: string, to: string) => historyDays(ctx.db, dataset, d(from), d(to)).map(isoDay);
-    expect(days("cash_bhav", "2024-01-18", "2024-01-22")).toEqual(["2024-01-18", "2024-01-19", "2024-01-20", "2024-01-21", "2024-01-22"]);
-    expect(days("fo_bhav", "2024-01-18", "2024-01-22")).toEqual(["2024-01-18", "2024-01-19", "2024-01-22"]);
-    // Sat 20 Jan 2024: NSE's special session. Once the cash market shows it, F&O asks for it too.
-    markDay(ctx.db, "cash_bhav", d("2024-01-20"), "ok", 1, 0);
-    markDay(ctx.db, "cash_bhav", d("2024-01-21"), "holiday", 0, 0);
-    markDay(ctx.db, "fo_bhav", d("2024-01-18"), "ok", 1, 0);
-    expect(days("cash_bhav", "2024-01-18", "2024-01-22")).toEqual(["2024-01-18", "2024-01-19", "2024-01-22"]);
-    expect(days("fo_bhav", "2024-01-18", "2024-01-22")).toEqual(["2024-01-19", "2024-01-20", "2024-01-22"]);
-    expect(days("pr", "2024-01-18", "2024-01-22")).toEqual(["2024-01-18", "2024-01-19", "2024-01-20", "2024-01-22"]);
+    expect(days("cash_bhav", "2013-10-31", "2013-11-04")).toEqual(["2013-10-31", "2013-11-01", "2013-11-02", "2013-11-03", "2013-11-04"]);
+    expect(days("fo_bhav", "2013-10-31", "2013-11-04")).toEqual(["2013-10-31", "2013-11-01", "2013-11-04"]);
+    // Sun 3 Nov 2013: a weekend session WEEKEND_SESSIONS doesn't list (Muhurat). Once the cash market shows it, F&O asks for it too.
+    markDay(ctx.db, "cash_bhav", d("2013-11-03"), "ok", 1, 0);
+    markDay(ctx.db, "cash_bhav", d("2013-11-02"), "holiday", 0, 0);
+    markDay(ctx.db, "fo_bhav", d("2013-10-31"), "ok", 1, 0);
+    expect(days("cash_bhav", "2013-10-31", "2013-11-04")).toEqual(["2013-10-31", "2013-11-01", "2013-11-04"]);
+    expect(days("fo_bhav", "2013-10-31", "2013-11-04")).toEqual(["2013-11-01", "2013-11-03", "2013-11-04"]);
+    expect(days("pr", "2013-10-31", "2013-11-04")).toEqual(["2013-10-31", "2013-11-01", "2013-11-03", "2013-11-04"]);
+    // Sat 20 Jan 2024, a listed special session: asked for from the start.
+    expect(days("fo_bhav", "2024-01-18", "2024-01-22")).toEqual(["2024-01-18", "2024-01-19", "2024-01-20", "2024-01-22"]);
     // Nothing before the archive starts: no F&O before the first stock futures, no PR zip before 2010.
     expect(days("fo_bhav", "2001-11-05", "2001-11-09")).toEqual(["2001-11-09"]);
     expect(days("pr", "2009-12-30", "2010-01-04")).toEqual(["2010-01-01", "2010-01-04"]);
