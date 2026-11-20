@@ -2,8 +2,8 @@ import { isFuture } from "../broker/symbols.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
 import type { CashBhavRow } from "../nse/parsers/cashBhav.js";
-import { dayStatuses, lastOkDay } from "../nse/store.js";
-import { DAY_MS, isWeekday } from "../time.js";
+import { checkedDays, dayStatuses, lastOkDay } from "../nse/store.js";
+import { DAY_MS, isWeekday, isoDay } from "../time.js";
 import { SPLIT_TOLERANCE } from "./adjustments.js";
 import { readBars, readSeries, listSeries, resetSymbol, writeBars } from "./store.js";
 
@@ -57,4 +57,40 @@ export function applyCashBhav(db: Db, day: number, rows: CashBhavRow[], log: Log
   }
   if (result.reset.length) log.info("ex-dates (split/bonus) in the bhavcopy; dropped stored history", { symbols: result.reset.slice(0, 20), count: result.reset.length });
   return result;
+}
+
+/**
+ * Bars a weekend session left out of stored daily series: a session missing
+ * from WEEKEND_SESSIONS isn't asked for by the evening run, so the next
+ * session's cash file extended the series straight past it (Sun 8 Nov 2026,
+ * Muhurat). Each such bar is written from the session's stored cash bhavcopy,
+ * where the bar before it is on the same price basis (the session's PREV_CLOSE
+ * matches its close, so no split or bonus lies between); the rest are left for
+ * the candle_gap check to report. `days`: the weekend sessions (WEEKEND_SESSIONS,
+ * passed in to keep this module free of the NSE downloader). Returns the bars written.
+ */
+export function fillSessionGaps(db: Db, days: readonly number[], log: Logger): number {
+  const stored = checkedDays(db, "cash_bhav");
+  const previousClose = db.prepare("select c from candles where symbol = ? and tf = '1d' and t < ? order by t desc limit 1").pluck();
+  let filled = 0;
+  const skipped: string[] = [];
+  for (const day of days) {
+    if (stored.get(day) !== "ok") continue;
+    const rows = db.prepare("select symbol, prev_close, o, h, l, c, v from cash_bhav where day = ?").all(day) as Array<{ symbol: string; prev_close: number; o: number; h: number; l: number; c: number; v: number }>;
+    const bySymbol = new Map(rows.map((row) => [row.symbol, row]));
+    for (const meta of listSeries(db, "1d")) {
+      if (isFuture(meta.symbol) || !meta.coverage || meta.coverage.from > day || meta.coverage.to <= day) continue;
+      const row = bySymbol.get(meta.symbol);
+      if (!row || row.o <= 0 || readBars(db, meta.symbol, "1d", day, day + 1).length) continue;
+      const previous = previousClose.get(meta.symbol, day) as number | undefined;
+      if (!previous || previous <= 0 || Math.abs(row.prev_close / previous - 1) > SPLIT_TOLERANCE) {
+        skipped.push(`${meta.symbol} ${isoDay(day)}`);
+        continue;
+      }
+      writeBars(db, meta.symbol, "1d", [{ t: day, o: row.o, h: row.h, l: row.l, c: row.c, v: row.v }], meta.coverage, meta.syncedAt);
+      filled += 1;
+    }
+  }
+  if (filled || skipped.length) log.info("weekend-session bars filled in from the cash bhavcopy", { filled, skipped: skipped.slice(0, 20), skippedCount: skipped.length });
+  return filled;
 }

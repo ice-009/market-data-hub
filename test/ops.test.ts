@@ -175,7 +175,8 @@ const healthy = (now: number): HealthInput => ({
   now,
   sessionToday: true,
   jobsEnabled: true,
-  nse: { cash_bhav: { lastOk: d("2026-11-06"), checked: new Map() }, fo_bhav: { lastOk: d("2026-11-06"), checked: new Map() }, pr: { lastOk: d("2026-11-06"), checked: new Map() } },
+  // Sun 8 Nov 2026 was a session (Muhurat).
+  nse: { cash_bhav: { lastOk: d("2026-11-08"), checked: new Map() }, fo_bhav: { lastOk: d("2026-11-08"), checked: new Map() }, pr: { lastOk: d("2026-11-08"), checked: new Map() } },
   refreshed: { lots: now - DAY_MS, fo_ban: now - DAY_MS },
   broker: { configured: true, owner: true, loginFailing: null, stoppedForToday: false, coolingDown: false },
   live: { enabled: true, running: true, feed: { mode: "socket", socket: "connected" } },
@@ -185,10 +186,13 @@ const healthy = (now: number): HealthInput => ({
 
 describe("health", () => {
   it("knows which sessions' NSE files are due", () => {
-    // Monday 9 Nov before 20:00: Friday's is the newest due.
-    expect(missingSessions(ist(2026, 11, 9, 19, 0), d("2026-11-06"), new Map())).toEqual([]);
-    expect(missingSessions(ist(2026, 11, 9, 20, 30), d("2026-11-06"), new Map())).toEqual([d("2026-11-09")]);
-    expect(missingSessions(ist(2026, 11, 11, 21, 0), d("2026-11-06"), new Map([[d("2026-11-10"), "holiday"]]))).toEqual([d("2026-11-11"), d("2026-11-09")]);
+    // Monday 9 Nov before 20:00: Sunday's (Muhurat, a listed weekend session) is the newest due.
+    expect(missingSessions(ist(2026, 11, 9, 19, 0), d("2026-11-08"), new Map())).toEqual([]);
+    expect(missingSessions(ist(2026, 11, 9, 19, 0), d("2026-11-06"), new Map())).toEqual([d("2026-11-08")]);
+    expect(missingSessions(ist(2026, 11, 9, 20, 30), d("2026-11-08"), new Map())).toEqual([d("2026-11-09")]);
+    expect(missingSessions(ist(2026, 11, 11, 21, 0), d("2026-11-08"), new Map([[d("2026-11-10"), "holiday"]]))).toEqual([d("2026-11-11"), d("2026-11-09")]);
+    // An unlisted weekend day is never due.
+    expect(missingSessions(ist(2026, 11, 16, 19, 0), d("2026-11-13"), new Map())).toEqual([]);
     expect(missingSessions(ist(2026, 11, 8, 12, 0), d("2026-11-05"), new Map([[d("2026-11-06"), "mismatch"]]))).toEqual([]);
   });
 
@@ -200,7 +204,7 @@ describe("health", () => {
     const late = ist(2026, 11, 9, 20, 30);
     const today = assessHealth(healthy(late));
     expect(today.healthy).toBe(false);
-    expect(today.problems).toEqual([expect.stringMatching(/^Cash bhavcopy is stale: last session stored 2026-11-06, missing 2026-11-09/), expect.stringMatching(/^F&O bhavcopy is stale/), expect.stringMatching(/^PR zip \(results calendar\) is stale/)]);
+    expect(today.problems).toEqual([expect.stringMatching(/^Cash bhavcopy is stale: last session stored 2026-11-08, missing 2026-11-09/), expect.stringMatching(/^F&O bhavcopy is stale/), expect.stringMatching(/^PR zip \(results calendar\) is stale/)]);
     const holiday = assessHealth({ ...healthy(late), sessionToday: false });
     expect(holiday.healthy).toBe(true);
     expect(holiday.warnings[0]).toMatch(/holiday/);

@@ -2,8 +2,9 @@ import type { Db } from "../db.js";
 import { shortOfSpace } from "../disk.js";
 import { rederiveAll } from "../history/adjustments.js";
 import { refreshBaskets } from "../history/baskets.js";
+import { fillSessionGaps } from "../history/fromBhav.js";
 import { syncIndexSeries } from "../history/fromIndices.js";
-import { ARCHIVE_FROM, ISIN_FROM, LEGACY_LAST_DAY, daysToCheck, syncDays, type DayOutcome, type NseContext } from "../nse/datasets.js";
+import { ARCHIVE_FROM, ISIN_FROM, LEGACY_LAST_DAY, WEEKEND_SESSIONS, daysToCheck, syncDays, type DayOutcome, type NseContext } from "../nse/datasets.js";
 import { checkedDays, corporateActionDaysRead, isinDaysRead, type DayDataset } from "../nse/store.js";
 import { DAY_MS, isMarketOpen, isWeekday, isoDay, istParts, parseIsoDay } from "../time.js";
 import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "./backfill.js";
@@ -172,6 +173,14 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
     }
   }
 
+  if (datasets.includes("cash_bhav")) {
+    try {
+      // Weekend sessions the stored daily series skipped (cheap: a few queries per listed session).
+      fillSessionGaps(ctx.db, WEEKEND_SESSIONS, ctx.log);
+    } catch (error) {
+      ctx.log.error("filling weekend-session bars after NSE history failed", { error });
+    }
+  }
   if (counts.ok) {
     try {
       if (datasets.includes("index_close")) syncIndexSeries(ctx.db, ctx.clock());

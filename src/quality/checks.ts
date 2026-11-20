@@ -7,7 +7,8 @@ import type { Finding } from "./store.js";
 // trade day and the subject it's about, in words a person can act on.
 //
 //   missing_session   a session (another NSE file of that day is stored) whose file
-//                     NSE answered with 404 or with another day's file      problem
+//                     NSE answered with 404 or with another day's file; info
+//                     for a known gap in NSE's archive (ARCHIVE_GAPS)       problem / info
 //   unlisted_session  a weekend session the hub's calendar (WEEKEND_SESSIONS)
 //                     doesn't list, so the evening run won't expect its files  warning
 //   wrong_date        NSE served another day's file for a weekday and nothing
@@ -53,6 +54,8 @@ export interface CalendarInput {
   weekendSessions: readonly number[];
   /** Weekend sessions older than this are reported as info, not warnings (the evening run is long past them). */
   recentFrom: number;
+  /** Sessions NSE's archive has no file for, per dataset (ARCHIVE_GAPS): reported as info. */
+  archiveGaps?: Partial<Record<DayDataset, readonly number[]>>;
 }
 
 /** Datasets whose "ok" proves a day was a session. The PR zip isn't one (it's a bundle of notices). */
@@ -87,14 +90,15 @@ export function calendarFindings(input: CalendarInput): Finding[] {
       for (const dataset of CALENDAR_DATASETS) {
         const record = input.days[dataset].get(day);
         if (!record || record.status === "ok") continue;
-        const answered = record.status === "holiday" ? "NSE had no file for it (404)" : `NSE served another day's file (${record.note ?? "wrong date"})`;
+        const knownGap = record.status === "holiday" && (input.archiveGaps?.[dataset]?.includes(day) ?? false);
+        const answered = record.status === "holiday" ? `NSE had no file for it (404)${knownGap ? ", a known gap in its archive" : ""}` : `NSE served another day's file (${record.note ?? "wrong date"})`;
         out.push({
           check: "missing_session",
           day,
           subject: dataset,
-          severity: "problem",
+          severity: knownGap ? "info" : "problem",
           message: `${DATASET_LABEL[dataset]}: nothing stored for ${dayName(day)}, a session (the ${evidence.filter((other) => other !== dataset).map((other) => DATASET_LABEL[other]).join(" and ")} has it): ${answered}.`,
-          detail: { dataset, status: record.status, note: record.note, evidence },
+          detail: { dataset, status: record.status, note: record.note, evidence, ...(knownGap ? { knownGap } : {}) },
         });
       }
       continue;

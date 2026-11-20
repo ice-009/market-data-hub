@@ -100,7 +100,7 @@ describe("daily candles from the stored archive (pure read)", () => {
     deriveFactors(t.db);
     const older = archiveDaily(t.db, "SBIN", d("2026-10-01"), d("2026-11-09"));
     expect(older.bars[0]).toMatchObject({ t: d("2026-10-22"), c: 495 });
-    expect(older.coveredToDay).toBe(d("2026-11-08")); // through the weekend; 9 Nov's file isn't stored yet
+    expect(older.coveredToDay).toBe(d("2026-11-07")); // through Saturday: Sun 8 Nov's file (Muhurat) isn't stored yet
   });
 
   it("says why when it can't answer", () => {

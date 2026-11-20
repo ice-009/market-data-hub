@@ -6,6 +6,7 @@ import { writeBars } from "../src/history/store.js";
 import { enqueueJob } from "../src/jobs/backfill.js";
 import type { CashBhavRow } from "../src/nse/parsers/cashBhav.js";
 import type { FoDayRecord } from "../src/nse/parsers/foBhav.js";
+import { WEEKEND_SESSIONS } from "../src/nse/datasets.js";
 import { markDay, recordRun, writeCashDay, writeFoDay, writeLots } from "../src/nse/store.js";
 import { CashScanner, actionLike, brokerFindings, calendarFindings, candleGapFindings, foFindings, lotFileFindings, type CashRow, type DayRecord } from "../src/quality/checks.js";
 import { logFindings, runQuality } from "../src/quality/run.js";
@@ -20,10 +21,10 @@ const d = (iso: string) => parseIsoDay(iso)!;
 const records = (entries: Array<[string, DayRecord["status"], string?]>) => new Map(entries.map(([day, status, note]) => [d(day), { status, note: note ?? null }]));
 const noDays = () => new Map<number, DayRecord>();
 
-/** `count` weekdays ending on `last` (inclusive), oldest first. */
+/** `count` sessions (weekdays and listed weekend sessions, such as Sun 8 Nov 2026) ending on `last` (inclusive), oldest first. */
 function sessions(last: string, count: number): number[] {
   const out: number[] = [];
-  for (let day = d(last); out.length < count; day -= DAY_MS) if (isWeekday(day)) out.unshift(day);
+  for (let day = d(last); out.length < count; day -= DAY_MS) if (isWeekday(day) || WEEKEND_SESSIONS.includes(day)) out.unshift(day);
   return out;
 }
 
