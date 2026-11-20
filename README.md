@@ -504,7 +504,11 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
   hours — details in [docs/api.md](docs/api.md#data-nse-history). Renamed tickers (TELCO →
   TATAMOTORS → TMPV) are joined from NSE's `symbolchange.csv` and the files' ISINs:
   `GET /v1/symbols/history`, and `npm run hub -- data symbols` checks every F&O stock's stored history
-  runs on across its renames.
+  runs on across its renames. `/v1/candles` then serves daily and weekly history back to 1994:
+  the archive before the broker's window (renames joined, lined up with the broker's level at the
+  seam) and the broker's bars inside it, saying which stretch came from where;
+  `npm run hub -- data history --check` checks the seam for every F&O stock
+  ([docs/api.md](docs/api.md#before-the-brokers-window)).
 - **Updating:** `git pull && npm install && npm run build` (or `docker compose up -d --build`).
   Database migrations run automatically at start-up.
 - **Status at a glance:** `npm run hub -- data status` (or `GET /v1/status`) shows the health check, the broker

@@ -205,8 +205,10 @@ Nov 2023; Budget days 28 Feb 2015 and 1 Feb 2020; special sessions 20 Jan, 2 Mar
    factors follow a company across them. Index history (NIFTY, sectors) needs another source: it
    isn't in these files.
 3. **Serving:** `/v1/candles?adjust=none` serves the raw NSE series and end-of-day mode the adjusted
-   one ✅; `/v1/candles?tf=1d` with `from` before the broker's window answering from the adjusted NSE
-   series is #22; Tradex's backtests and evidence check use the full range.
+   one ✅; `/v1/candles` and `/v1/candles/batch` (daily, weekly) with `from` before the broker's
+   window answer from the adjusted NSE series, renamed tickers joined, scaled to the broker's
+   level at the seam, with `sources` ✅ (#22, `hub data history --check`); Tradex's backtests and
+   evidence check use the full range (ice-009/tradex-public#18).
 
 Total ≈ 2 weeks. Tests: unit tests for parsers, budget and auth; an end-to-end test with a mock
 broker server (Tradex already supports overriding Fyers endpoints for this).

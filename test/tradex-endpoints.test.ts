@@ -212,7 +212,7 @@ describe("GET /v1/candles/batch", () => {
       expect(Object.keys(answer.body.series)).toEqual(["SBIN", "INFY", "NOSUCH"]);
     }
     expect(first.body.queued).toEqual(["SBIN", "INFY", "NOSUCH"]);
-    expect(first.body.series.SBIN).toEqual({ complete: false, coverage: null, candles: [] });
+    expect(first.body.series.SBIN).toEqual({ complete: false, coverage: null, candles: [], sources: [] });
 
     await t.hub.historyQueue.idle();
     // Two requests, one broker call per symbol.
@@ -241,8 +241,8 @@ describe("GET /v1/candles/batch", () => {
     const answer = await get("/v1/candles/batch?symbols=SBIN,INFY&from=2026-10-29&to=2026-10-29");
     expect(answer.status).toBe(200);
     expect(answer.body).toMatchObject({ queued: [], unknown: [], reason: "not_configured" });
-    expect(answer.body.series.SBIN).toEqual({ complete: true, coverage: { from: d("2026-10-29"), to: d("2026-10-30") }, candles: [{ t: d("2026-10-29"), o: 1, h: 2, l: 0.5, c: 1.5, v: 10, dp: null }] });
-    expect(answer.body.series.INFY).toEqual({ complete: false, coverage: null, candles: [] });
+    expect(answer.body.series.SBIN).toEqual({ complete: true, coverage: { from: d("2026-10-29"), to: d("2026-10-30") }, candles: [{ t: d("2026-10-29"), o: 1, h: 2, l: 0.5, c: 1.5, v: 10, dp: null }], sources: [{ source: "archive", from: d("2026-10-29"), to: d("2026-10-29") }] });
+    expect(answer.body.series.INFY).toEqual({ complete: false, coverage: null, candles: [], sources: [] });
   });
 });
 

@@ -5,6 +5,7 @@ import { createKey, listKeys, parseScopes, revokeKey } from "./auth/keys.js";
 import { brokerConfigured, loadConfig, secretValues } from "./config.js";
 import { openDb, type Db } from "./db.js";
 import { checkAdjustments, REASONS } from "./history/adjustCheck.js";
+import { checkSeams } from "./history/seamCheck.js";
 import { factorStats, lastAdjustmentRun, listingFactors, rederiveAll } from "./history/adjustments.js";
 import { BACKFILL_TFS, BASE, finalBefore, type BaseTf } from "./history/timeframes.js";
 import { hubHealth } from "./health.js";
@@ -35,6 +36,7 @@ import { DAY_MS, isoDay, istParts, parseIsoDay } from "./time.js";
 //   npm run hub -- data quality [--full] [--check price_outlier] [--all]
 //   npm run hub -- data symbols [INFY TMPV …] [--date 2005-01-03] [--refresh]
 //   npm run hub -- data adjustments [INFY …] [--rebuild] [--check [--symbols A,B] [--tolerance 0.005] [--json]]
+//   npm run hub -- data history --check [--symbols A,B] [--tolerance 0.01] [--json]
 //   npm run hub -- data cancel <job id>
 //   npm run hub -- data backup [--to ./backups] [--keep 7]
 //   npm run hub -- data import-tradex --db ../tradex/.cache/market.db [--screener ../tradex/.cache/screener] [--dry-run]
@@ -52,6 +54,7 @@ const USAGE = `Usage:
   hub data status
   hub data symbols [SYMBOL …] [--date YYYY-MM-DD] [--refresh]
   hub data adjustments [SYMBOL …] [--rebuild] [--check [--symbols A,B,…] [--tolerance 0.005] [--json]]
+  hub data history --check [--symbols A,B,…] [--tolerance 0.01] [--json]
   hub data cancel <job id>
   hub data backup [--to <dir>] [--keep N]
   hub data import-tradex --db <market.db> [--screener <dir>] [--dry-run]
@@ -340,6 +343,35 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     console.log(`F&O stocks: ${members.length}; ${renamed.length} renamed at least once (${renames.changes.length} renames known). Continuous across every rename: ${renamed.length - gaps.length - unknown.length}; with a gap: ${gaps.length}; not stored on both sides: ${unknown.length}.`);
     for (const entry of renamed) for (const line of entry.lines) console.log(line);
     return gaps.length ? 1 : 0;
+  }
+
+  if (action === "history") {
+    // What /v1/candles serves before the broker's window, joined to it (#22): the seam, jumps and gaps across renames.
+    if (!rest.includes("--check")) {
+      console.error("Usage: hub data history --check [--symbols A,B,…] [--tolerance 0.01] [--json]");
+      return 1;
+    }
+    const symbolsRaw = flag(rest, "--symbols");
+    const toleranceRaw = flag(rest, "--tolerance");
+    const tolerance = toleranceRaw === undefined ? undefined : Number(toleranceRaw);
+    if (tolerance !== undefined && !(tolerance > 0 && tolerance < 0.5)) {
+      console.error("--tolerance must be a fraction like 0.01 (1%).");
+      return 1;
+    }
+    if (!brokerConfigured(config.secrets)) console.log("Note: no broker is configured, so stored daily series were built from the archive itself; the check is meaningful against a broker's series.");
+    const report = checkSeams(db, Date.now(), { symbols: symbolsRaw ? symbolsRaw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean) : undefined, tolerance });
+    const failed = report.problems.seam + report.problems.jump + report.problems.gap;
+    if (rest.includes("--json")) {
+      console.log(JSON.stringify(report, null, 2));
+      return failed ? 1 : 0;
+    }
+    console.log(`Seam ${report.seam} (the broker's window starts). Stocks: ${report.symbols}; with archive history before it: ${report.checked}; joined across a rename: ${report.renamed}.`);
+    console.log(`Archive scaled to the broker's level: ${report.scaled} (median |gap| ${report.medianAbsGapPct ?? "—"}%). Problems — seam ${report.problems.seam}, jump ${report.problems.jump}, gap ${report.problems.gap}.`);
+    for (const row of report.rows) {
+      if (!row.problems.length && row.scale === 1 && row.names.length < 2) continue;
+      console.log(`  ${row.symbol.padEnd(12)} ${row.names.join(" → ").padEnd(26)} from ${row.archiveFrom} to ${row.handover}  scale ×${row.scale} (gap ${row.gapPct ?? "—"}%)  after: ${row.compared} sessions, max ${row.maxDiffPct ?? "—"}%  jump ${row.jumpPct ?? "—"}%${row.missing.length ? `  missing ${row.missing.join(", ")}` : ""}${row.problems.length ? `  [${row.problems.join(", ")}]` : ""}`);
+    }
+    return failed ? 1 : 0;
   }
 
   if (action === "adjustments") {
