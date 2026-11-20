@@ -69,7 +69,7 @@ describe("NSE's corporate-actions file (the PR zip's bc file)", () => {
     const old = parseCorporateActions(fixture("Bc011010.csv").toString("utf8"));
     expect(old.badRows).toBe(0);
     const havells = old.rows.filter((row) => row.symbol === "HAVELLS"); // listed as BE and EQ
-    expect(havells).toEqual([{ symbol: "HAVELLS", series: "BE", company: "Havells India Limited", exDay: d("2010-10-08"), recordDay: d("2010-10-11"), purpose: "BONUS 1:1" }]);
+    expect(havells).toEqual([{ symbol: "HAVELLS", series: "EQ", company: "Havells India Limited", exDay: d("2010-10-08"), recordDay: d("2010-10-11"), purpose: "BONUS 1:1" }]);
     expect(old.rows.find((row) => row.symbol === "GENUSPOWER")).toMatchObject({ exDay: d("2010-10-22"), purpose: "FV SPLIT RS.10 TO RE.1" });
 
     const zip = fixture("PR040425.zip");

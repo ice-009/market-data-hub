@@ -85,7 +85,7 @@ export function parseCorporateActions(csv: string): CorporateActionsParse {
   const c = { series: col("SERIES"), symbol: col("SYMBOL"), company: col("SECURITY"), record: col("RECORD_DT"), ex: col("EX_DT"), purpose: col("PURPOSE") };
   if (c.series < 0 || c.symbol < 0 || c.ex < 0 || c.purpose < 0) return { rows: [], badRows: 0, undated: 0 };
   const rows: CorporateActionRow[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, number>();
   let badRows = 0;
   let undated = 0;
   for (const line of lines.slice(1)) {
@@ -107,9 +107,13 @@ export function parseCorporateActions(csv: string): CorporateActionsParse {
       continue;
     }
     const key = `${symbol}|${exDay}|${purpose.toUpperCase()}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    rows.push({ symbol, series, company: (cells[c.company] ?? "").trim(), exDay, recordDay: c.record >= 0 ? parseBcDate(cells[c.record]) : null, purpose });
+    const row = { symbol, series, company: (cells[c.company] ?? "").trim(), exDay, recordDay: c.record >= 0 ? parseBcDate(cells[c.record]) : null, purpose };
+    const earlier = seen.get(key);
+    // Listed once per series: keep one row, the EQ one when there is one (its company name is NSE's usual spelling).
+    if (earlier === undefined) {
+      seen.set(key, rows.length);
+      rows.push(row);
+    } else if (series === "EQ") rows[earlier] = row;
   }
   return { rows, badRows, undated };
 }
