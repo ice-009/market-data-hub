@@ -161,7 +161,7 @@ function checkCashChunk(db: Db, days: readonly number[], foOk: readonly number[]
   // Stock by stock along the primary key (symbol, day): sequential reads, where
   // reading day by day through the day index jumps all over a large archive.
   const symbols = (db.prepare("select distinct symbol from cash_bhav where day between ? and ?").all(days[a], days[b]) as Array<{ symbol: string }>).map((row) => row.symbol);
-  const statement = db.prepare("select symbol, day, prev_close as prevClose, o, h, l, c, v from cash_bhav where symbol = ? and day between ? and ? order by day");
+  const statement = db.prepare("select symbol, day, series, prev_close as prevClose, o, h, l, c, v from cash_bhav where symbol = ? and day between ? and ? order by day");
   const from = days[a];
   const findings: Finding[] = [];
   for (const symbol of symbols) findings.push(...scanner.symbol(statement.all(symbol, warm, days[b]) as CashRow[], (day) => day >= from));
