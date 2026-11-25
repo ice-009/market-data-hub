@@ -2,6 +2,7 @@ import type { Config } from "./config.js";
 import { brokerConfigured } from "./config.js";
 import type { Db } from "./db.js";
 import { BrokerError } from "./broker/errors.js";
+import { syncCalendar } from "./calendar/store.js";
 import { FyersClient } from "./broker/fyers.js";
 import { FyersAuth } from "./broker/fyersAuth.js";
 import { BrokerGate } from "./broker/gate.js";
@@ -65,6 +66,8 @@ export interface HubOptions {
 export function createHub(options: HubOptions): Hub {
   const { config, db, log } = options;
   const clock = options.clock ?? Date.now;
+  // The trading calendar: NSE's checked-in lists plus this database's overrides and archive (src/calendar).
+  syncCalendar(db);
   let gate: BrokerGate | null = null;
   let auth: FyersAuth | null = null;
   let client: FyersClient | null = null;

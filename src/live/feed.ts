@@ -4,7 +4,8 @@ import type { DataSocket, DataSocketFactory } from "../broker/fyersSocket.js";
 import { BudgetExhaustedError } from "../broker/gate.js";
 import { normalizeSymbol } from "../broker/symbols.js";
 import type { Logger } from "../log.js";
-import { isMarketOpen, istDayKey } from "../time.js";
+import { isMarketOpen } from "../calendar/calendar.js";
+import { istDayKey } from "../time.js";
 import type { FeedStatus, LiveFeed, QuoteFetcher, Tick } from "./types.js";
 
 // The live feed: one upstream broker socket shared by every client, with REST
@@ -26,7 +27,8 @@ import type { FeedStatus, LiveFeed, QuoteFetcher, Tick } from "./types.js";
 //                  3 minutes. A symbol stops being polled once its socket ticks
 //                  resume. A spent budget stops polling until the next IST day —
 //                  polling can never push the account into rate-limit strikes.
-//   watchdog       In market hours (09:15–15:30 IST, weekdays): opens the socket,
+//   watchdog       In market hours (09:15–15:30 IST on trading days, a special
+//                  session's own hours; never on an exchange holiday: src/calendar): opens the socket,
 //                  restarts it after 60 s of silence. Outside them: socket closed,
 //                  no polling (quotes then come from the store).
 //   reconnects     Exponential backoff from 1 s, capped at 1 minute; the failure

@@ -104,7 +104,9 @@ describe("index candles from the index file", () => {
     expect(indexCloseUrl(archive, d("2026-11-17"))).toBe(`${archive}/content/indices/ind_close_all_17112026.csv`);
     expect(await importDay(ctx, "index_close", d("2026-11-17"))).toBe("ok");
     expect(await importDay(ctx, "index_close", d("2026-11-16"))).toBe("mismatch");
-    expect(await importDay(ctx, "index_close", d("2026-11-10"))).toBe("holiday");
+    expect(await importDay(ctx, "index_close", d("2026-11-12"))).toBe("holiday"); // NSE answered 404
+    expect(calls).toHaveLength(3);
+    expect(await importDay(ctx, "index_close", d("2026-11-10"))).toBe("holiday"); // a listed holiday: NSE isn't asked
     expect(calls).toHaveLength(3);
     expect(readBars(ctx.db, "NIFTY", "1d", 0, Number.MAX_SAFE_INTEGER)).toEqual([{ t: d("2026-11-17"), o: 25277.3, h: 25501.35, l: 25267.3, c: 25387.4, v: 342549112 }]);
     expect(readBars(ctx.db, "NIFTYCHEMICALS", "1d", 0, Number.MAX_SAFE_INTEGER)).toHaveLength(1);

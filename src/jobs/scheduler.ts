@@ -7,7 +7,9 @@ import type { Logger } from "../log.js";
 import { recentDays, refreshBan, refreshLots, refreshSymbolChanges, syncDays, type NseContext } from "../nse/datasets.js";
 import { latestBan, readRuns, type DatasetName, type DatasetRun } from "../nse/store.js";
 import { logFindings, runQuality, type QualityHooks } from "../quality/run.js";
-import { DAY_MS, MINUTE_MS, isMarketOpen, istDayStart, istParts, isWeekday } from "../time.js";
+import { isMarketOpen, isTradingDay, nextTradingDay } from "../calendar/calendar.js";
+import { forgetUnlistedHolidays, syncCalendar } from "../calendar/store.js";
+import { DAY_MS, MINUTE_MS, istDayStart, istParts } from "../time.js";
 import { nextRunnableJob, recoverJobs, runBackfill, type BackfillDeps } from "./backfill.js";
 import { runNseHistory } from "./nseHistory.js";
 
@@ -32,7 +34,9 @@ import { runNseHistory } from "./nseHistory.js";
 //     (QUALITY_MARKET_BUDGET_MS in market hours, so live prices aren't held up),
 //     and logs what it finds for the first time.
 // Every attempt is spaced at least RETRY_MS from the last one per dataset, so a
-// file NSE hasn't published yet costs one request every half hour.
+// file NSE hasn't published yet costs one request every half hour. Exchange
+// holidays the calendar lists (src/calendar) cost none: the day is recorded as a
+// holiday without asking NSE (importDay).
 
 export const RECENT_DAYS = 10;
 /** PR zips read back this far, so the results calendar holds every meeting announced for the weeks ahead. */
@@ -61,13 +65,11 @@ export interface ScheduleInput {
   banTradeDate: number | null;
 }
 
-/** The session the ban list should be for at `now`: today until the evening, then the next weekday. */
+/** The session the ban list should be for at `now`: today until the evening, then the next trading day. */
 export function banTarget(now: number): number {
   const { day, minutes } = istParts(now);
-  if (isWeekday(day) && minutes < BAN_NEXT_DAY_FROM_MIN) return day;
-  let next = day + DAY_MS;
-  while (!isWeekday(next)) next += DAY_MS;
-  return next;
+  if (isTradingDay(day) && minutes < BAN_NEXT_DAY_FROM_MIN) return day;
+  return nextTradingDay(day);
 }
 
 /** Which datasets to refresh now. Pure. */
@@ -176,8 +178,12 @@ export class Scheduler {
       // (picks up imports, history downloads by the CLI, and new index aliases).
       if (!this.derivedChecked) {
         this.derivedChecked = true;
+        // Days recorded as listed holidays that a new release's list no longer has: ask NSE for them after all.
+        forgetUnlistedHolidays(ctx.db, syncCalendar(ctx.db));
         this.refreshDerived(true);
       }
+      // The calendar follows what the archive and `hub data calendar` say (cheap when nothing changed).
+      syncCalendar(ctx.db);
       const cash = recentDays(ctx, "cash_bhav", RECENT_DAYS);
       const fo = recentDays(ctx, "fo_bhav", RECENT_DAYS);
       const pr = recentDays(ctx, "pr", RESULTS_LOOKBACK_DAYS, RECENT_DAYS);

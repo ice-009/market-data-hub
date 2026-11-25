@@ -6,7 +6,9 @@ import { fillSessionGaps } from "../history/fromBhav.js";
 import { syncIndexSeries } from "../history/fromIndices.js";
 import { ARCHIVE_FROM, ISIN_FROM, LEGACY_LAST_DAY, WEEKEND_SESSIONS, daysToCheck, syncDays, type DayOutcome, type NseContext } from "../nse/datasets.js";
 import { checkedDays, corporateActionDaysRead, isinDaysRead, type DayDataset } from "../nse/store.js";
-import { DAY_MS, isMarketOpen, isWeekday, isoDay, istParts, parseIsoDay } from "../time.js";
+import { isMarketOpen } from "../calendar/calendar.js";
+import { syncCalendar } from "../calendar/store.js";
+import { DAY_MS, isWeekday, isoDay, istParts, parseIsoDay } from "../time.js";
 import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "./backfill.js";
 
 // NSE history (`hub data nse-history`): NSE's archive files for every session
@@ -19,7 +21,8 @@ import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "
 //
 // Like backfills, these jobs live in the `jobs` table and:
 //   - are resumable: every day asked for is recorded in nse_days, so a paused
-//     or interrupted job only asks NSE for days it hasn't seen;
+//     or interrupted job only asks NSE for days it hasn't seen (and days the
+//     calendar lists as exchange holidays are recorded without asking);
 //   - pause in market hours, for a quarter of an hour after NSE refuses
 //     several days in a row, and while free disk is under HUB_DISK_MIN_GB
 //     (checked before every file; they don't start below it); the server
@@ -198,6 +201,8 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
     }
   }
 
+  // Days just downloaded may confirm holidays and sessions.
+  syncCalendar(ctx.db);
   const end = ctx.clock();
   const summary = tally(counts);
   // `halt` is assigned inside shouldStop, which TypeScript's narrowing can't see.

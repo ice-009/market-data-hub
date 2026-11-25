@@ -3,10 +3,11 @@ import type { Db } from "./db.js";
 import { gb, hubVolumes, type Volume } from "./disk.js";
 import type { Hub } from "./hub.js";
 import type { FeedStatus } from "./live/types.js";
-import { WEEKEND_SESSIONS } from "./nse/datasets.js";
 import { checkedDays, lastOkDay, readRuns, type DatasetName, type DayDataset, type DayStatus } from "./nse/store.js";
 import { HEALTH_FINDING_DAYS, recentProblems } from "./quality/summary.js";
-import { DAY_MS, isMarketOpen, isoDay, istDayStart, istParts, isWeekday } from "./time.js";
+import { calendar, calendarWarnings, type Calendar } from "./calendar/calendar.js";
+import { syncCalendar } from "./calendar/store.js";
+import { DAY_MS, isoDay, istDayStart, istParts } from "./time.js";
 
 // Is the hub healthy? `healthy`, `problems` and `warnings` at the top of
 // /v1/status (and `hub data status`), for a person and for an uptime checker
@@ -25,19 +26,18 @@ export const FAILING_PROBLEM_MS = DAY_MS;
 /** With HUB_BACKUP_DIR set, the newest backup should be younger than this. */
 export const BACKUP_STALE_MS = 2 * DAY_MS;
 
-const isSessionDay = (day: number) => isWeekday(day) || WEEKEND_SESSIONS.includes(day);
-
 /**
- * Trading days whose file should be stored by `now` but isn't — after the last
+ * Trading days (src/calendar: no weekends, no exchange holidays, plus special
+ * sessions) whose file should be stored by `now` but isn't — after the last
  * stored one, skipping days known to have no file (holiday, or NSE served another
- * day's). Today counts from NSE_DUE_MIN. Newest first. Pure.
+ * day's). Today counts from NSE_DUE_MIN. Newest first. Pure, given the calendar.
  */
-export function missingSessions(now: number, lastOk: number, checked: ReadonlyMap<number, DayStatus>): number[] {
+export function missingSessions(now: number, lastOk: number, checked: ReadonlyMap<number, DayStatus>, cal: Calendar = calendar()): number[] {
   const { day: today, minutes } = istParts(now);
   const out: number[] = [];
   for (let day = minutes >= NSE_DUE_MIN ? today : today - DAY_MS; day > lastOk; day -= DAY_MS) {
     const status = checked.get(day);
-    if (isSessionDay(day) && status !== "holiday" && status !== "mismatch") out.push(day);
+    if (cal.isTradingDay(day) && status !== "holiday" && status !== "mismatch") out.push(day);
   }
   return out;
 }
@@ -49,6 +49,8 @@ export interface NseDayState {
 
 export interface HealthInput {
   now: number;
+  /** The trading calendar (default: the hub's current one). */
+  calendar?: Calendar;
   /** Evidence that today was a trading day (live minutes or a stored daily bar for today). */
   sessionToday: boolean;
   jobsEnabled: boolean;
@@ -81,6 +83,7 @@ const age = (ms: number) => (ms >= 2 * DAY_MS ? `${Math.floor(ms / DAY_MS)} days
 /** Problems and warnings from the hub's state. Pure. */
 export function assessHealth(input: HealthInput): Health {
   const { now } = input;
+  const cal = input.calendar ?? calendar();
   const problems: string[] = [];
   const warnings: string[] = [];
   const today = istParts(now).day;
@@ -94,9 +97,9 @@ export function assessHealth(input: HealthInput): Health {
       else problems.push(`${LABEL[dataset]}: nothing stored yet.`);
       continue;
     }
-    const missing = missingSessions(now, state.lastOk, state.checked);
+    const missing = missingSessions(now, state.lastOk, state.checked, cal);
     // Today's file missing with no sign of a session today may just be an exchange holiday
-    // (the hub learns that from NSE's 404 the next day).
+    // the calendar doesn't list (the hub learns that from NSE's 404 the next day).
     const onlyToday = missing.length === 1 && missing[0] === today;
     if (!missing.length) continue;
     const message = `${LABEL[dataset]} is stale: last session stored ${isoDay(state.lastOk)}, missing ${missing.slice(0, 3).map(isoDay).join(", ")}${missing.length > 3 ? ` and ${missing.length - 3} more` : ""}.`;
@@ -118,6 +121,8 @@ export function assessHealth(input: HealthInput): Health {
     else warnings.push(text);
   }
 
+  warnings.push(...calendarWarnings(now, cal));
+
   const quality = input.quality?.problems ?? [];
   if (quality.length) warnings.push(`Data quality: ${quality.length} problem${quality.length === 1 ? "" : "s"} in the last ${HEALTH_FINDING_DAYS} days' data (see /v1/quality). ${quality[0].message}`);
 
@@ -131,8 +136,8 @@ export function assessHealth(input: HealthInput): Health {
     else if (broker.coolingDown) warnings.push("Broker calls are cooling down after a rate-limit warning.");
   }
 
-  // Live prices matter only while the market is open.
-  if (input.live.enabled && broker.owner && isMarketOpen(now)) {
+  // Live prices matter only while the market is open (never on an exchange holiday).
+  if (input.live.enabled && broker.owner && cal.isOpen(now)) {
     if (!input.live.running) problems.push("The live feed isn't running during market hours.");
     else if (input.live.feed.mode === "down") problems.push("The live feed is down during market hours (no socket and no polling).");
     else if (input.live.feed.socket !== "connected" && input.live.feed.mode !== "idle") warnings.push(`The live socket is ${input.live.feed.socket}; prices come from polling.`);
@@ -166,6 +171,7 @@ function sessionToday(db: Db, now: number): boolean {
  */
 export function hubHealth(hub: Pick<Hub, "db" | "config" | "owner" | "auth" | "gate" | "live">, feed: Pick<FeedStatus, "mode" | "socket"> | null, now = Date.now()): Health {
   const { db } = hub;
+  const cal = syncCalendar(db);
   const runs = readRuns(db);
   const success = (name: "lots" | "fo_ban") => runs.get(name)?.lastSuccessAt ?? null;
   const nse = (dataset: DayDataset): NseDayState => {
@@ -177,6 +183,7 @@ export function hubHealth(hub: Pick<Hub, "db" | "config" | "owner" | "auth" | "g
   const live = hub.live.status();
   return assessHealth({
     now,
+    calendar: cal,
     sessionToday: sessionToday(db, now),
     jobsEnabled: hub.config.jobsEnabled,
     nse: { cash_bhav: nse("cash_bhav"), fo_bhav: nse("fo_bhav"), pr: nse("pr"), index_close: nse("index_close") },

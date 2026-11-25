@@ -14,7 +14,8 @@ import type { Hub } from "../../hub.js";
 import { bucketOf, mergeMinutes } from "../../live/merge.js";
 import { lastOkDay } from "../../nse/store.js";
 import { isBasket } from "../../reference/indices.js";
-import { DAY_MS, istDayKey, weekdayOnOrBefore } from "../../time.js";
+import { tradingDayOnOrBefore } from "../../calendar/calendar.js";
+import { DAY_MS, istDayKey } from "../../time.js";
 import { errorBody, requireScope, type HubEnv } from "../common.js";
 import { ParamError, parseRange } from "../params.js";
 
@@ -101,7 +102,7 @@ export function rawCandles(hub: Hub, symbol: string, tf: "1d" | "1w", range: { f
   else candles = resample(candles, weekStart);
   candles = candles.filter((bar) => bar.t >= want.from && bar.t <= range.to);
   // Complete: every session of the range up to the newest one NSE could have published is stored or a holiday.
-  const newestFinal = weekdayOnOrBefore(istDayKey(hub.clock()) - DAY_MS);
+  const newestFinal = tradingDayOnOrBefore(istDayKey(hub.clock()) - DAY_MS);
   const lastDay = tf === "1d" ? range.to : want.to - DAY_MS;
   const complete = result.coveredFromDay <= want.from && result.coveredToDay >= Math.min(lastDay, newestFinal);
   const names = result.names.map((name) => name.symbol);
@@ -241,7 +242,7 @@ export function candleRoutes(app: Hono<HubEnv>, hub: Hub) {
     }
 
     const unavailable = hub.brokerUnavailable();
-    const latestFinal = weekdayOnOrBefore(finalBefore("1d", now) - DAY_MS);
+    const latestFinal = tradingDayOnOrBefore(finalBefore("1d", now) - DAY_MS);
     const bhavPending = hub.config.jobsEnabled && (lastOkDay(hub.db, "cash_bhav") ?? -Infinity) < latestFinal;
     // Likewise index series, once the hub stores NSE's index file (which comes out in the evening too).
     const lastIndexDay = lastOkDay(hub.db, "index_close");

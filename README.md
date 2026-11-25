@@ -347,6 +347,7 @@ Errors always look like this and never echo your headers or the hub's configurat
 | `GET /v1/lots` | history | ✅ | Futures lot sizes. |
 | `GET /v1/lots/history[?symbol][&from&to]` | history | ✅ | Lot sizes as they were on each F&O day (from the bhavcopy's lot column, 8 Jul 2024 on), as change points. |
 | `GET /v1/results-calendar` | history | ✅ | Upcoming and recent results dates. |
+| `GET /v1/calendar[?from&to]` | history | ✅ | NSE's trading calendar: trading days, exchange holidays with names, special sessions (Budget days, Muhurat trading with its hours) — from NSE's holiday circular and what its archive shows. `/v1/status` says whether today is a holiday and the next trading day. |
 | `GET /v1/market/regime` | history | ✅ | NIFTY vs its 50- and 200-day averages, breadth. |
 | `GET /v1/indices` | history | ✅ | NIFTY, NIFTY 500 and the sector indices with daily history from NSE's index file (since 2012), synthetic equal-weight sector baskets (labelled `synthetic`) for earlier years, and the industry → sector-index map. |
 | `GET /v1/adjustments?symbol=INFY[&from&to]` | history | ✅ | A company's split/bonus adjustment factors (ex-dates), across its renames, with where each came from. |

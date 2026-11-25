@@ -1,6 +1,8 @@
 import { isFuture } from "../broker/symbols.js";
 import { readKv, writeKv, type Db } from "../db.js";
-import { ARCHIVE_FROM, ARCHIVE_GAPS, WEEKEND_SESSIONS } from "../nse/datasets.js";
+import type { Calendar } from "../calendar/calendar.js";
+import { CALENDAR_NOTE, isListedHoliday, syncCalendar } from "../calendar/store.js";
+import { ARCHIVE_FROM, ARCHIVE_GAPS } from "../nse/datasets.js";
 import { lastOkDay, readLots, readRuns, type DayDataset } from "../nse/store.js";
 import type { Logger } from "../log.js";
 import { DAY_MS, MINUTE_MS, isoDay, isWeekday, istParts } from "../time.js";
@@ -79,8 +81,16 @@ export const RECENT_GAP_DAYS = 14;
 const UNLISTED_RECENT_DAYS = 365;
 
 const DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close"];
-/** The hub's own calendar: a change (a weekend session or archive gap added) recomputes the calendar findings. */
-const CALENDAR_VERSION = [WEEKEND_SESSIONS.join(","), ...Object.entries(ARCHIVE_GAPS).map(([dataset, days]) => `${dataset}:${days.join(",")}`)].join("|");
+/** The hub's own calendar: a change (a holiday, session or archive gap added) recomputes the calendar findings. */
+const calendarVersion = (cal: Calendar) => [cal.signature(), ...Object.entries(ARCHIVE_GAPS).map(([dataset, days]) => `${dataset}:${days.join(",")}`)].join("|");
+
+/** What the calendar lists (NSE's list, `hub data calendar`) for calendarFindings. */
+function listedCalendar(cal: Calendar) {
+  const holidays = new Map<number, string>();
+  for (const day of new Set([...cal.listedHolidays.keys(), ...cal.overrides.keys()])) if (isListedHoliday(cal, day)) holidays.set(day, cal.info(day).name ?? "holiday");
+  const sessions = new Set([...cal.listedSessions.keys(), ...[...cal.overrides.values()].filter((o) => o.kind === "session").map((o) => o.day)]);
+  return { holidays, years: cal.listedYears, weekendSessions: [...sessions].filter((day) => !isWeekday(day)).sort((a, b) => a - b) };
+}
 
 export function readQualityState(db: Db): QualityState {
   return readKv<QualityState>(db, STATE_KEY) ?? {};
@@ -100,11 +110,9 @@ function readRecords(db: Db): { records: Records; signature: string } {
 }
 
 const okDays = (records: Map<number, DayRecord>) => [...records].filter(([, record]) => record.status === "ok").map(([day]) => day).sort((a, b) => a - b);
-const isSessionDay = (day: number) => isWeekday(day) || WEEKEND_SESSIONS.includes(day);
-
-/** Every session-day from `from` (exclusive) to `to` (exclusive) has an answer from NSE. */
-function known(records: ReadonlyMap<number, DayRecord>, from: number, to: number): boolean {
-  for (let day = from + DAY_MS; day < to; day += DAY_MS) if (isSessionDay(day) && !records.has(day)) return false;
+/** Every trading day (src/calendar) from `from` (exclusive) to `to` (exclusive) has an answer from NSE. */
+function known(records: ReadonlyMap<number, DayRecord>, from: number, to: number, cal: Calendar): boolean {
+  for (let day = from + DAY_MS; day < to; day += DAY_MS) if (cal.isTradingDay(day) && !records.has(day)) return false;
   return true;
 }
 
@@ -195,7 +203,7 @@ function checkFoChunk(db: Db, days: readonly number[], [a, b]: [number, number])
   return findings;
 }
 
-function candleChecks(db: Db, adjust: PriceAdjuster | undefined, cash: ReadonlyMap<number, DayRecord>): { broker: Finding[]; gaps: Finding[] } {
+function candleChecks(db: Db, adjust: PriceAdjuster | undefined, cash: ReadonlyMap<number, DayRecord>, cal: Calendar): { broker: Finding[]; gaps: Finding[] } {
   const broker: Finding[] = [];
   const gaps: Finding[] = [];
   const series = db.prepare("select symbol, covered_from as coveredFrom, covered_to as coveredTo from series where tf = '1d' and covered_from is not null").all() as Array<{ symbol: string; coveredFrom: number; coveredTo: number }>;
@@ -203,7 +211,7 @@ function candleChecks(db: Db, adjust: PriceAdjuster | undefined, cash: ReadonlyM
   const missing = db.prepare("select c.day from cash_bhav c where c.symbol = ? and c.day >= ? and c.day < ? and not exists (select 1 from candles k where k.symbol = c.symbol and k.tf = '1d' and k.t = c.day) order by c.day");
   for (const entry of series) {
     if (isFuture(entry.symbol)) continue;
-    broker.push(...brokerFindings(entry.symbol, compared.all(entry.symbol) as ComparedDay[], adjust, (from, to) => known(cash, from, to)));
+    broker.push(...brokerFindings(entry.symbol, compared.all(entry.symbol) as ComparedDay[], adjust, (from, to) => known(cash, from, to, cal)));
     gaps.push(...candleGapFindings(entry.symbol, (missing.all(entry.symbol, entry.coveredFrom, entry.coveredTo) as Array<{ day: number }>).map((row) => row.day)));
   }
   return { broker, gaps };
@@ -228,12 +236,14 @@ export function runQuality(db: Db, options: QualityOptions = {}): QualityResult 
 
   const { records, signature } = readRecords(db);
   const today = istParts(started).day;
+  const cal = syncCalendar(db);
 
   // The session calendar: cheap, recomputed whenever nse_days (or the hub's own calendar) changes.
-  const calendarSignature = `${signature}|${CALENDAR_VERSION}`;
+  const calendarSignature = `${signature}|${calendarVersion(cal)}`;
   if (state.calendar !== calendarSignature) {
-    const findings = calendarFindings({ days: records, weekendSessions: WEEKEND_SESSIONS, recentFrom: today - UNLISTED_RECENT_DAYS * DAY_MS, archiveGaps: ARCHIVE_GAPS });
-    for (const check of ["missing_session", "unlisted_session", "wrong_date"] as const) save(check, null, findings);
+    const listed = listedCalendar(cal);
+    const findings = calendarFindings({ days: records, weekendSessions: listed.weekendSessions, recentFrom: today - UNLISTED_RECENT_DAYS * DAY_MS, archiveGaps: ARCHIVE_GAPS, listed, calendarNote: CALENDAR_NOTE });
+    for (const check of ["missing_session", "unlisted_session", "calendar_mismatch", "wrong_date"] as const) save(check, null, findings);
     state.calendar = calendarSignature;
   }
 
@@ -251,7 +261,7 @@ export function runQuality(db: Db, options: QualityOptions = {}): QualityResult 
   const cashOk = okDays(records.cash_bhav);
   const candleSignature = `${candleRow.n}|${candleRow.synced ?? 0}|${candleRow.covered ?? 0}|${cashOk.length}|${cashOk[cashOk.length - 1] ?? 0}`;
   if (state.candles?.signature !== candleSignature && (!state.candles || started - state.candles.at >= CANDLES_EVERY_MS)) {
-    const { broker, gaps } = candleChecks(db, hooks.adjust, records.cash_bhav);
+    const { broker, gaps } = candleChecks(db, hooks.adjust, records.cash_bhav, cal);
     save("broker_mismatch", null, broker);
     save("candle_gap", null, gaps);
     state.candles = { signature: candleSignature, at: started };
@@ -262,14 +272,14 @@ export function runQuality(db: Db, options: QualityOptions = {}): QualityResult 
   // A day waits for the sessions before it while an NSE history job may still
   // download them; with none open, gaps older than RECENT_GAP_DAYS stay as they are.
   const historyOpen = Boolean(db.prepare("select 1 from jobs where kind = 'nse_history' and state in ('queued', 'paused', 'running') limit 1").get());
-  const settled = (records: ReadonlyMap<number, DayRecord>, previous: number | undefined, day: number) => !historyOpen && (day < today - RECENT_GAP_DAYS * DAY_MS || known(records, previous ?? day - RECENT_GAP_DAYS * DAY_MS, day));
+  const settled = (records: ReadonlyMap<number, DayRecord>, previous: number | undefined, day: number) => !historyOpen && (day < today - RECENT_GAP_DAYS * DAY_MS || known(records, previous ?? day - RECENT_GAP_DAYS * DAY_MS, day, cal));
   const cashPending = pendingDays(cashOk, records.cash_bhav, checkedQualityDays(db, "price_outlier"), (index) => {
     const day = cashOk[index];
-    return known(records.cash_bhav, Math.max(day - CASH_LOOKBACK_DAYS * DAY_MS, ARCHIVE_FROM.cash_bhav - DAY_MS), day) || settled(records.cash_bhav, cashOk[index - 1], day);
+    return known(records.cash_bhav, Math.max(day - CASH_LOOKBACK_DAYS * DAY_MS, ARCHIVE_FROM.cash_bhav - DAY_MS), day, cal) || settled(records.cash_bhav, cashOk[index - 1], day);
   });
   const foPending = pendingDays(foOk, records.fo_bhav, checkedQualityDays(db, "lot_change"), (index) => {
     const day = foOk[index];
-    const before = index > 0 ? known(records.fo_bhav, foOk[index - 1], day) : known(records.fo_bhav, Math.max(day - FO_LOOKBACK_DAYS * DAY_MS, ARCHIVE_FROM.fo_bhav - DAY_MS), day);
+    const before = index > 0 ? known(records.fo_bhav, foOk[index - 1], day, cal) : known(records.fo_bhav, Math.max(day - FO_LOOKBACK_DAYS * DAY_MS, ARCHIVE_FROM.fo_bhav - DAY_MS), day, cal);
     return before || settled(records.fo_bhav, foOk[index - 1], day);
   });
   let checkedDays = 0;

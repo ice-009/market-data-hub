@@ -16,6 +16,7 @@ import Database from "better-sqlite3";
 //   6  index closes            index_closes (NSE's ind_close_all); see src/nse/store.ts
 //   7  adjustments             corporate_actions, corporate_action_days, adjustment_factors; see src/history/adjustments.ts
 //   8  data quality            quality_findings, quality_checked; datasets.failures; see src/quality/store.ts
+//  11  trading calendar        calendar_days (holidays and sessions added by hand); see src/calendar/store.ts
 
 export type Db = Database.Database;
 
@@ -275,6 +276,18 @@ const MIGRATIONS: Array<string | undefined> = [
   `delete from nse_days where status = 'mismatch' and (
      note = 'file is for no date'
      or (dataset = 'index_close' and note = 'file is for ' || strftime('%Y-%d-%m', day / 1000, 'unixepoch'))
+   );`,
+  undefined,
+  // Holidays and special sessions a person added (`hub data calendar`), over
+  // NSE's checked-in lists (reference/holidays) and what the archive shows.
+  // open_min/close_min: a session's hours, minutes after IST midnight (null = regular).
+  `create table calendar_days (
+     day integer primary key,
+     kind text not null check (kind in ('holiday', 'session')),
+     name text,
+     open_min integer,
+     close_min integer,
+     updated_at integer not null
    );`,
 ];
 

@@ -2,6 +2,8 @@ import path from "node:path";
 import { backupDb } from "./backup.js";
 import { gb, shortOfSpace } from "./disk.js";
 import { createKey, listKeys, parseScopes, revokeKey } from "./auth/keys.js";
+import { calendarStatus, calendarWarnings, hhmm, parseHours } from "./calendar/calendar.js";
+import { removeOverride, setOverride, syncCalendar } from "./calendar/store.js";
 import { brokerConfigured, loadConfig, secretValues } from "./config.js";
 import { openDb, type Db } from "./db.js";
 import { checkAdjustments, REASONS } from "./history/adjustCheck.js";
@@ -34,6 +36,10 @@ import { DAY_MS, isoDay, istParts, parseIsoDay } from "./time.js";
 //   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr|indices]
 //   npm run hub -- data status
 //   npm run hub -- data quality [--full] [--check price_outlier] [--all]
+//   npm run hub -- data calendar [--from 2026-01-01] [--to 2026-12-31]
+//   npm run hub -- data calendar holiday 2027-01-26 "Republic Day"
+//   npm run hub -- data calendar session 2027-02-01 "Union Budget" [--hours 09:15-15:30]
+//   npm run hub -- data calendar remove 2027-01-26
 //   npm run hub -- data symbols [INFY TMPV …] [--date 2005-01-03] [--refresh]
 //   npm run hub -- data adjustments [INFY …] [--rebuild] [--check [--symbols A,B] [--tolerance 0.005] [--json]]
 //   npm run hub -- data history --check [--symbols A,B] [--tolerance 0.01] [--json]
@@ -58,7 +64,10 @@ const USAGE = `Usage:
   hub data cancel <job id>
   hub data backup [--to <dir>] [--keep N]
   hub data import-tradex --db <market.db> [--screener <dir>] [--dry-run]
-  hub data quality [--full] [--check <name>] [--all] [--resolved] [--limit N]`;
+  hub data quality [--full] [--check <name>] [--all] [--resolved] [--limit N]
+  hub data calendar [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+  hub data calendar holiday|session YYYY-MM-DD "name" [--hours HH:MM-HH:MM]
+  hub data calendar remove YYYY-MM-DD`;
 
 const fmt = (ms: number | null) => (ms ? `${new Date(ms).toISOString().replace("T", " ").slice(0, 19)} UTC` : "—");
 
@@ -120,6 +129,67 @@ function quality(db: Db, rest: string[]): number {
   console.log(findings.length ? "" : "\nNothing to list.");
   const mark = { problem: "✗", warning: "!", info: "·" } as const;
   for (const finding of findings) console.log(`${mark[finding.severity]} ${isoDay(finding.day)} ${finding.check}: ${finding.message}`);
+  return 0;
+}
+
+/**
+ * `data calendar`: list the trading calendar's holidays and special sessions
+ * (a year by default), or add / remove a day by hand. The running server picks
+ * a change up within a minute.
+ */
+function calendarCommand(db: Db, rest: string[]): number {
+  const [verb, date, ...more] = rest;
+  if (verb === "holiday" || verb === "session" || verb === "remove") {
+    const day = parseIsoDay(date ?? "");
+    if (day === null) {
+      console.error(`hub data calendar ${verb} needs a date like 2027-01-26.`);
+      return 1;
+    }
+    if (verb === "remove") {
+      const removed = removeOverride(db, day);
+      console.log(removed ? `Removed the calendar entry for ${isoDay(day)}; it follows NSE's list and archive again.` : `No calendar entry for ${isoDay(day)} was added by hand.`);
+      return removed ? 0 : 1;
+    }
+    const name = more.find((arg, i) => !arg.startsWith("--") && more[i - 1] !== "--hours")?.trim() || null;
+    const hoursRaw = flag(more, "--hours");
+    const hours = hoursRaw === undefined ? null : parseHours(hoursRaw);
+    if (hoursRaw !== undefined && (verb !== "session" || !hours)) {
+      console.error("--hours goes with a session, as 14:20-15:30 (IST).");
+      return 1;
+    }
+    setOverride(db, { day, kind: verb, name, hours });
+    const info = syncCalendar(db).info(day);
+    console.log(verb === "holiday" ? `${isoDay(day)} is now an exchange holiday${name ? ` (${name})` : ""}: the evening run won't ask NSE for its files, and live prices make no bars that day.` : `${isoDay(day)} now has a session${name ? ` (${name})` : ""}, ${hhmm(info.hours!.open)}–${hhmm(info.hours!.close)} IST: the evening run asks NSE for its files.`);
+    console.log("A running hub server picks this up within a minute.");
+    return 0;
+  }
+  if (verb !== undefined && !verb.startsWith("--")) {
+    console.log(USAGE);
+    return 1;
+  }
+  const cal = syncCalendar(db);
+  const now = Date.now();
+  const status = calendarStatus(now, cal);
+  const year = Number(status.today.slice(0, 4));
+  const from = parseIsoDay(flag(rest, "--from") ?? `${year}-01-01`);
+  const to = parseIsoDay(flag(rest, "--to") ?? `${year}-12-31`);
+  if (from === null || to === null || from > to) {
+    console.error("--from and --to must be dates like 2026-01-01, --from first.");
+    return 1;
+  }
+  console.log(`Today ${status.today}: ${status.tradingDay ? `a trading day (${status.session?.open}–${status.session?.close} IST)` : status.holiday ? `an exchange holiday${status.holiday.name ? ` (${status.holiday.name})` : ""}` : "no session"}; next trading day ${status.nextTradingDay}.`);
+  console.log(`NSE holiday lists: ${status.listedYears.length ? status.listedYears.join(", ") : "none"} (other years: holidays from NSE's archive).`);
+  for (const warning of calendarWarnings(now, cal)) console.log(`  ! ${warning}`);
+  let trading = 0;
+  const lines: string[] = [];
+  for (let day = from; day <= to; day += DAY_MS) {
+    const info = cal.info(day);
+    if (info.trading) trading += 1;
+    if (info.kind === "holiday" || (info.kind === "weekend" && info.name)) lines.push(`  ${isoDay(day)}  holiday   ${(info.name ?? "—").padEnd(44)} ${info.source}${info.kind === "weekend" ? " (weekend)" : ""}`);
+    else if (info.kind === "special") lines.push(`  ${isoDay(day)}  session   ${(info.name ?? "—").padEnd(44)} ${info.source}, ${hhmm(info.hours!.open)}–${hhmm(info.hours!.close)} IST`);
+  }
+  console.log(`\n${isoDay(from)} – ${isoDay(to)}: ${trading} trading days.`);
+  for (const line of lines) console.log(line);
   return 0;
 }
 
@@ -239,6 +309,7 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
   }
 
   if (action === "quality") return quality(db, rest);
+  if (action === "calendar") return calendarCommand(db, rest);
 
   if (action === "status") {
     const hub = createHub({ config, db, log, owner: false });
@@ -256,6 +327,8 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     const mode = dataMode(hub);
     console.log(`Mode: ${mode.modeLabel}${mode.modeNote ? ` — ${mode.modeNote}` : ""}`);
     console.log(`Owner process: ${pid ? `pid ${pid}` : "none (no hub server running)"}`);
+    const today = calendarStatus(Date.now());
+    console.log(`Calendar: today ${today.today} ${today.tradingDay ? "is a trading day" : today.holiday ? `is an exchange holiday${today.holiday.name ? ` (${today.holiday.name})` : ""}` : "has no session"}; next trading day ${today.nextTradingDay}; NSE holiday lists for ${today.listedYears.join(", ") || "no year"} (\`hub data calendar\`)`);
     const disk = diskStatus(config);
     for (const volume of disk.volumes) console.log(`Disk: ${volume.freeBytes === null ? "free space unknown" : `${gb(volume.freeBytes)} free`} for ${volume.holds} (warning under ${gb(disk.warnBelowBytes)}; NSE history and backups stop under ${gb(disk.minFreeBytes)})`);
     if (disk.backups) console.log(`Backups: ${disk.backups.count}, ${gb(disk.backups.bytes)} in all${disk.backups.newestBytes === null ? "" : `, newest ${gb(disk.backups.newestBytes)}`}`);

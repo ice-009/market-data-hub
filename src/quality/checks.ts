@@ -9,8 +9,12 @@ import type { Finding } from "./store.js";
 //   missing_session   a session (another NSE file of that day is stored) whose file
 //                     NSE answered with 404 or with another day's file; info
 //                     for a known gap in NSE's archive (ARCHIVE_GAPS)       problem / info
-//   unlisted_session  a weekend session the hub's calendar (WEEKEND_SESSIONS)
-//                     doesn't list, so the evening run won't expect its files  warning
+//   unlisted_session  a weekend session the hub's calendar (reference/holidays,
+//                     `hub data calendar`) doesn't list, so the evening run
+//                     won't expect its files                                warning
+//   calendar_mismatch NSE's archive disagrees with the holiday list: files for a
+//                     listed holiday, or none for a weekday of a listed year
+//                     that the list doesn't name                            warning
 //   wrong_date        NSE served another day's file for a weekday and nothing
 //                     confirms it was a holiday                             warning
 //   repeated_file     a cash bhavcopy whose prices repeat the previous session's  problem
@@ -56,6 +60,13 @@ export interface CalendarInput {
   recentFrom: number;
   /** Sessions NSE's archive has no file for, per dataset (ARCHIVE_GAPS): reported as info. */
   archiveGaps?: Partial<Record<DayDataset, readonly number[]>>;
+  /**
+   * The holiday list (src/calendar): holidays named by NSE's list or a person
+   * (without a special session that day), by day; and the years whose list is known.
+   */
+  listed?: { holidays: ReadonlyMap<number, string>; years: ReadonlySet<number> };
+  /** nse_days note of a holiday recorded from the list without asking NSE: not evidence from the archive. */
+  calendarNote?: string;
 }
 
 /** Datasets whose "ok" proves a day was a session. The PR zip isn't one (it's a bundle of notices). */
@@ -63,11 +74,11 @@ const SESSION_EVIDENCE: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "index_
 const CALENDAR_DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "index_close", "pr"];
 
 /**
- * missing_session, unlisted_session and wrong_date, from the days NSE was
- * asked for. The hub has no holiday list (market-data-hub#17): a day is a
- * session when any of the cash, F&O or index files is stored for it, and a
- * holiday when NSE has no file for it (404) — a weekday file "for another date"
- * counts as a holiday once another dataset's 404 confirms it.
+ * missing_session, unlisted_session, calendar_mismatch and wrong_date, from
+ * the days NSE was asked for. A day is a session when any of the cash, F&O or
+ * index files is stored for it, and a holiday when NSE has no file for it (404)
+ * — a weekday file "for another date" counts as a holiday once another
+ * dataset's 404, or the holiday list, confirms it.
  */
 export function calendarFindings(input: CalendarInput): Finding[] {
   const out: Finding[] = [];
@@ -76,6 +87,17 @@ export function calendarFindings(input: CalendarInput): Finding[] {
   for (const day of [...allDays].sort((a, b) => a - b)) {
     const evidence = SESSION_EVIDENCE.filter((dataset) => input.days[dataset].get(day)?.status === "ok");
     const listed = isWeekday(day) || input.weekendSessions.includes(day);
+    const listedHoliday = input.listed?.holidays.get(day);
+    if (evidence.length && listedHoliday !== undefined) {
+      out.push({
+        check: "calendar_mismatch",
+        day,
+        subject: "calendar",
+        severity: "warning",
+        message: `NSE's archive has files for ${dayName(day)} (${evidence.map((dataset) => DATASET_LABEL[dataset]).join(" and ")}), which the hub's calendar lists as a holiday (${listedHoliday}): a special session? If so, add it with \`hub data calendar session ${isoDay(day)} "name"\`.`,
+        detail: { evidence, holiday: listedHoliday },
+      });
+    }
     if (evidence.length) {
       if (!listed) {
         out.push({
@@ -83,7 +105,7 @@ export function calendarFindings(input: CalendarInput): Finding[] {
           day,
           subject: "calendar",
           severity: day >= input.recentFrom ? "warning" : "info",
-          message: `NSE held a session on ${dayName(day)} (${evidence.map((dataset) => DATASET_LABEL[dataset]).join(" and ")} stored), which the hub's calendar (WEEKEND_SESSIONS) doesn't list: the evening run won't ask for that day's files.`,
+          message: `NSE held a session on ${dayName(day)} (${evidence.map((dataset) => DATASET_LABEL[dataset]).join(" and ")} stored), which the hub's calendar doesn't list (reference/holidays, \`hub data calendar session\`): the evening run won't ask for that day's files.`,
           detail: { evidence },
         });
       }
@@ -104,8 +126,25 @@ export function calendarFindings(input: CalendarInput): Finding[] {
       continue;
     }
     if (!listed) continue; // NSE's archive answers weekend URLs with Friday's file: expected.
-    const confirmed = CALENDAR_DATASETS.some((dataset) => input.days[dataset].get(day)?.status === "holiday");
-    if (confirmed) continue;
+    if (listedHoliday !== undefined) continue; // the list says so: no file is expected
+    const noFile = CALENDAR_DATASETS.filter((dataset) => {
+      const record = input.days[dataset].get(day);
+      return record?.status === "holiday" && (input.calendarNote === undefined || record.note !== input.calendarNote);
+    });
+    if (noFile.length) {
+      const year = new Date(day).getUTCFullYear();
+      if (isWeekday(day) && input.days.cash_bhav.has(day) && input.listed?.years.has(year)) {
+        out.push({
+          check: "calendar_mismatch",
+          day,
+          subject: "calendar",
+          severity: "warning",
+          message: `NSE had no files for ${dayName(day)} (${noFile.map((dataset) => DATASET_LABEL[dataset]).join(" and ")}: 404), a weekday the hub's holiday list for ${year} doesn't name: an unlisted holiday? If so, add it with \`hub data calendar holiday ${isoDay(day)} "name"\`.`,
+          detail: { noFile },
+        });
+      }
+      continue;
+    }
     for (const dataset of CALENDAR_DATASETS) {
       const record = input.days[dataset].get(day);
       if (record?.status !== "mismatch") continue;

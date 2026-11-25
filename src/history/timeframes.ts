@@ -1,5 +1,6 @@
 import type { Resolution } from "../broker/fyers.js";
-import { DAY_MS, MINUTE_MS, SESSION_CLOSE_MIN, SESSION_OPEN_MIN, istDayKey, istDayStart, istParts, isWeekday, weekdayOnOrBefore } from "../time.js";
+import { REGULAR_HOURS, calendar } from "../calendar/calendar.js";
+import { DAY_MS, MINUTE_MS, istDayKey, istDayStart, istParts } from "../time.js";
 
 // Timeframes the API serves, and the stored ("base") series each comes from:
 // 1w is resampled from 1d, 1h from 15m (or 5m). Pure.
@@ -53,26 +54,29 @@ export const dayStartT = (tf: BaseTf, day: number) => (BASE[tf].daily ? day : is
 
 /**
  * Exclusive bound of the bars that are final at `now`: every bar starting
- * before it has closed. Weekends count as closed; exchange holidays aren't known.
+ * before it has closed. Weekends and exchange holidays (src/calendar) count as closed.
  */
 export function finalBefore(tf: BaseTf, now: number): number {
+  const cal = calendar();
   const { day, minutes } = istParts(now);
+  const hours = cal.hours(day);
   if (BASE[tf].daily) {
-    const lastFinal = isWeekday(day) && minutes >= DAILY_FINAL_MIN ? day : weekdayOnOrBefore(day - DAY_MS);
+    const lastFinal = hours && minutes >= Math.max(DAILY_FINAL_MIN, hours.close) ? day : cal.previous(day);
     return lastFinal + DAY_MS;
   }
-  if (isWeekday(day) && minutes >= SESSION_OPEN_MIN && minutes < SESSION_CLOSE_MIN) {
+  if (hours && minutes >= hours.open && minutes < hours.close) {
     const barMs = BASE[tf].barMs;
     return Math.floor(now / barMs) * barMs;
   }
-  const lastSession = isWeekday(day) && minutes >= SESSION_CLOSE_MIN ? day : weekdayOnOrBefore(day - DAY_MS);
-  return istDayStart(lastSession) + SESSION_CLOSE_MIN * MINUTE_MS;
+  const lastSession = hours && minutes >= hours.close ? day : cal.previous(day);
+  return istDayStart(lastSession) + (cal.hours(lastSession) ?? REGULAR_HOURS).close * MINUTE_MS;
 }
 
 /** A bar of `tf` may be forming now (so a stored copy goes stale). */
 export function formingNow(tf: BaseTf, now: number): boolean {
   const { day, minutes } = istParts(now);
-  return isWeekday(day) && minutes >= SESSION_OPEN_MIN && minutes < (BASE[tf].daily ? DAILY_FINAL_MIN : SESSION_CLOSE_MIN);
+  const hours = calendar().hours(day);
+  return hours !== null && minutes >= hours.open && minutes < (BASE[tf].daily ? Math.max(DAILY_FINAL_MIN, hours.close) : hours.close);
 }
 
 /** Earliest bar start the broker serves for `tf` at `now`. */

@@ -25,6 +25,7 @@ symbols).
 | `GET /v1/fo/ban` | fo | NSE `fo_secban.csv` |
 | `GET /v1/lots[?symbol]` | history | NSE `fo_mktlots.csv` (fallback: F&O bhavcopy lots) |
 | `GET /v1/results-calendar?from&to[&symbol]` | history | board meetings from NSE's daily PR zip |
+| `GET /v1/calendar[?from&to]` | history | trading days, holidays and special sessions: NSE's holiday circular + what its archive shows |
 | `GET /v1/market/regime[?universe]` | history | stored daily candles + cash bhavcopy |
 | `GET /v1/indices` | history | NSE index file (`ind_close_all`); synthetic baskets from the cash bhavcopy |
 | `GET /v1/quality[?check&severity&subject&from&to&status&limit]` | history | the data-quality checks' findings |
@@ -417,6 +418,51 @@ by the evening run, back to 2010 with [`data nse-history`](#data-nse-history).
   another date shows on both dates: the announcement of the new date doesn't say which meeting it
   replaces.
 
+## GET /v1/calendar
+
+NSE's trading calendar (cash and F&O): the trading days, the exchange holidays with their names, and
+the special sessions (Budget days, Muhurat trading, DR drills) between `from` and `to` (IST dates;
+default: the current calendar year; at most 40 years at a time).
+
+```json
+GET /v1/calendar?from=2026-11-01&to=2026-11-30
+{ "from": "2026-11-01", "to": "2026-11-30", "today": "2026-11-24", "tradingToday": false,
+  "nextTradingDay": "2026-11-25", "previousTradingDay": "2026-11-23", "listedYears": [2026],
+  "lists": [ { "year": 2026, "source": "NSE circular NSE/CMTR/71775 (12 Dec 2025), …", "url": "https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf" } ],
+  "tradingDays": ["2026-11-02", "2026-11-03", …, "2026-11-08", "2026-11-09", "2026-11-11", …, "2026-11-23", "2026-11-25", …],
+  "holidays": [
+    { "date": "2026-11-10", "day": 1794268800000, "name": "Diwali-Balipratipada", "source": "nse_list", "weekend": false },
+    { "date": "2026-11-24", "day": 1795478400000, "name": "Prakash Gurpurb Sri Guru Nanak Dev", "source": "nse_list", "weekend": false } ],
+  "specialSessions": [
+    { "date": "2026-11-08", "day": 1794096000000, "name": "Muhurat trading (Diwali)", "source": "nse_list", "session": { "open": "14:20", "close": "15:30" } } ] }
+```
+
+Where a day's answer comes from (`source`), first match wins:
+
+| `source` | What |
+|---|---|
+| `override` | added by hand: [`hub data calendar`](#data-calendar) — a holiday announced late, a special session, a correction |
+| `archive` | what NSE's archive showed for a past day (`nse_days`): a **session** when the cash, F&O or index file of that day is stored; a **holiday** when a weekday has none of them, its cash bhavcopy isn't there, and NSE answered 404 for at least one file (a file "for another date" alone doesn't confirm one). So every year back to 1994 that [`data nse-history`](#data-nse-history) downloaded has its holidays (unnamed) |
+| `nse_list` | NSE's yearly holiday circular, checked in as `reference/holidays/<year>.json` with its special sessions (and their hours when they aren't 09:15–15:30). 2026: circular NSE/CMTR/71775 (12 Dec 2025; the F&O segment's NSE/FAOP/71777 lists the same days), plus 15 Jan 2026 (NSE/CMTR/72260) and the Muhurat session's hours (NSE/CMTR/76941). Earlier years list only their weekend sessions |
+| `rule` | weekdays trade, weekends don't |
+
+So past days follow what really happened and future days the circular. `holidays` lists weekday
+holidays and, with `weekend: true`, the circular's holidays that fall on a weekend (for their names).
+`listedYears`: the years whose circular the hub has (or that have holidays added by hand); in any
+other year a holiday is only known from NSE's archive the evening after. NSE publishes the next
+year's circular in mid-December, on its archive host
+(`nsearchives.nseindia.com/content/circulars/CMTR<number>.pdf`; the number isn't predictable, and
+www.nseindia.com's holiday API hangs for programs): add `reference/holidays/<year>.json` in a
+release, or each day with `hub data calendar holiday`. From 1 December `/v1/status` warns while next
+year's list is missing (and all year when the current year's is).
+
+The calendar is what the hub runs on: the evening NSE run doesn't ask for a listed holiday's files
+(it records the day as `holiday`, note `listed exchange holiday: not asked`, without a request; a day
+that stops being listed is asked for after all), the live feed makes no minute bars and doesn't
+connect on a holiday (and keeps a special session's hours), gap repair and candle finality skip
+holidays, the health checks don't expect files for them, background jobs don't pause for "market
+hours" on them, and the next session's ban list is the next *trading* day's.
+
 ## GET /v1/market/regime
 
 NIFTY against its 50- and 200-day averages (daily candles; fetched if missing) and breadth: the
@@ -787,7 +833,7 @@ DELETE /v1/live/pin   { "symbols": ["SBIN", "NIFTY"] }
 
 Health first, then the mode (`mode`, `modeLabel`, `modeNote`, `features` — see
 [End-of-day mode](#end-of-day-mode-no-broker-configured)), version, uptime, the calling key, the broker connection and today's budget,
-data freshness per dataset, recent jobs and a `live` section. Never credentials, tokens or keys.
+the trading calendar (`calendar`), data freshness per dataset, recent jobs and a `live` section. Never credentials, tokens or keys.
 
 **Health** (for people and uptime checkers): `healthy` (no problems), `problems` (strings: something
 is stale or down — worth an alert) and `warnings` (worth knowing, not an alert). `?strict=1` answers
@@ -796,17 +842,30 @@ code. A problem is raised when:
 
 | Check | Problem when |
 |---|---|
-| Cash / F&O bhavcopy, PR zip (results calendar) | a trading day's file isn't stored after 20:00 IST that day (days NSE had no file for — `holiday`/`mismatch` — don't count), or nothing is stored at all. Today's file missing with no sign of a session today (no live minutes, no daily bar) is only a *warning*: it may be an exchange holiday, which the hub learns from NSE the next day |
+| Cash / F&O bhavcopy, PR zip (results calendar), index file | a trading day's file isn't stored after 20:00 IST that day, or nothing is stored at all. Trading days come from the [calendar](#get-v1calendar): weekends and exchange holidays don't count, special sessions do; nor do days NSE had no file for (`holiday`/`mismatch`). Today's file missing with no sign of a session today (no live minutes, no daily bar) is only a *warning*: it may be a holiday the calendar doesn't list, which the hub learns from NSE the next day |
 | Lot sizes, ban list | never fetched, or last fetched over 4 days ago |
 | Broker | configured, and the login is failing (in its retry wait), or calls are stopped for today (budget spent / strikes). Cooling down after a rate-limit warning, or another process owning the connection, is a warning |
-| Live feed | during market hours (09:15–15:30 IST, weekdays) the feed isn't running or is `down` (no socket, no polling). Socket down but polling is a warning |
+| Live feed | during market hours (09:15–15:30 IST on trading days, a special session's own hours; never on a holiday) the feed isn't running or is `down` (no socket, no polling). Socket down but polling is a warning |
 | Backups | `HUB_BACKUP_DIR` is set and it holds no backup, or the newest is over 2 days old |
 | Disk | free space where the database (or, on another disk, the backups) lives is under `HUB_DISK_MIN_GB` (default 2 GB) — NSE history and backups have stopped by then, and SQLite writes are next. Under `HUB_DISK_WARN_GB` (default 5 GB) is a warning |
 | A refresh that keeps failing | any dataset (cash / F&O bhavcopy, index file, PR zip, lots, ban list, ticker renames) whose refreshes have failed for a day: the last attempts failed in a row since then, with the last error. Three failures in a row (an hour and a half of the evening run) are a *warning* first, before the data counts as stale |
 
-`HUB_JOBS=off` adds a warning (NSE files then go stale by design). Open data-quality *problems* about the last 14 days' data
+`HUB_JOBS=off` adds a warning (NSE files then go stale by design). So does a missing holiday list:
+from 1 December while next year's isn't in the hub, and all year when the current year's isn't
+(`Calendar: …`; see [GET /v1/calendar](#get-v1calendar)). Open data-quality *problems* about the last 14 days' data
 add one warning (`Data quality: …`; see [GET /v1/quality](#get-v1quality)) — never a problem: a bad file is worth knowing
 about, but the hub is still serving.
+
+`calendar`: today's place in the [trading calendar](#get-v1calendar) — `today`, `tradingDay`, `kind`
+(`regular` / `special` / `holiday` / `weekend`), `holiday` (`{ name, source }` on an exchange holiday,
+else null), `session` (`{ open, close }` IST, null without one), `marketOpen`, `nextTradingDay`,
+`previousTradingDay`, `listedYears` and `nextYearListed`:
+
+```json
+"calendar": { "today": "2026-11-24", "tradingDay": false, "kind": "holiday",
+  "holiday": { "name": "Prakash Gurpurb Sri Guru Nanak Dev", "source": "nse_list" }, "session": null, "marketOpen": false,
+  "nextTradingDay": "2026-11-25", "previousTradingDay": "2026-11-23", "listedYears": [2026], "nextYearListed": false }
+```
 
 `quality`: the [data-quality checks](#get-v1quality)' state — `lastRunAt`, `pendingDays` (stored days not checked yet) and
 `waitingDays` (of those, the ones waiting for the sessions before them, during an NSE history download), `open`
@@ -868,9 +927,10 @@ missing or wrong: worth an alert), `warning` (worth a look) or `info` (a change 
 
 | Check | Finds | Severity |
 |---|---|---|
-| `missing_session` | a session (another NSE file of that day is stored: cash, F&O or index) whose file NSE answered with 404 or another day's file. The hub has no holiday list ([#17](https://github.com/ice-009/market-data-hub/issues/17)): a day with any of those files stored is a session. A known gap in NSE's archive (`ARCHIVE_GAPS` in `src/nse/datasets.ts`: the F&O bhavcopy of 30 Mar 2021) is info | problem (info for a known gap) |
-| `unlisted_session` | a weekend session (cash/F&O files stored) that `WEEKEND_SESSIONS` doesn't list, so the evening run won't ask for its files and the next session's cash file extends stored daily series past it (add it to the list; the next `hub data nse-history` run fills the skipped bars from the stored bhavcopy) | warning (info over a year back) |
-| `wrong_date` | NSE served another day's file for a weekday and no other dataset confirms a holiday (resolved once one does) | warning |
+| `missing_session` | a session (another NSE file of that day is stored: cash, F&O or index) whose file NSE answered with 404 or another day's file: a day with any of those files stored is a session. A known gap in NSE's archive (`ARCHIVE_GAPS` in `src/nse/datasets.ts`: the F&O bhavcopy of 30 Mar 2021) is info | problem (info for a known gap) |
+| `unlisted_session` | a weekend session (cash/F&O files stored) that the [calendar](#get-v1calendar) doesn't list (`reference/holidays/<year>.json` sessions, or `hub data calendar session`), so the evening run won't ask for its files and the next session's cash file extends stored daily series past it (add it; the next `hub data nse-history` run fills the skipped bars from the stored bhavcopy) | warning (info over a year back) |
+| `calendar_mismatch` | NSE's archive disagrees with the holiday list: files stored for a day the list calls a holiday (a special session the list lacks?), or no files (404) for a weekday of a listed year that the list doesn't name (an unlisted holiday?). Fix the list or add the day with `hub data calendar` | warning |
+| `wrong_date` | NSE served another day's file for a weekday and neither another dataset's 404 nor the holiday list confirms a holiday (resolved once one does) | warning |
 | `repeated_file` | a cash bhavcopy whose OHLCV repeats the previous session's for half or more of the stocks the two share (at least 50): the previous file under a new date | problem |
 | `candle_gap` | stored daily candles (broker history) lacking sessions the stock traded inside their coverage; one finding per symbol | warning |
 | `price_outlier` | a close-to-close move of 10× the stock's volatility (the standard deviation of its last 60 daily log returns, at least 20 of them, taken as at least 1%) and at least 10%, that no corporate action explains: the corporate-action hook (the adjustment table, [#20](https://github.com/ice-009/market-data-hub/issues/20), once it lands), NSE's `PREV_CLOSE` off the stored close by over 1.5%, or an F&O lot change matching the move. The message says when the move matches a common split/bonus ratio (1/2, 1/5, 1/10, 2/3…) | warning beyond NSE's widest price band (20%), else info |
@@ -913,7 +973,8 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
 ## Background jobs (in the server)
 
 - **NSE files**, in the evening IST: cash bhavcopy (after 17:30) and F&O bhavcopy (after 18:00)
-  for any of the last 10 trading days not stored yet — on start that is the catch-up — then lots,
+  for any of the last 10 trading days not stored yet (exchange holidays the [calendar](#get-v1calendar)
+  lists are recorded without asking NSE) — on start that is the catch-up — then lots,
   the ban list (from 18:00 the next session's) and NSE's ticker renames (`symbolchange.csv`) once
   each evening (and on start when never fetched or over two days old), then the PR zip (after 17:30)
   for any of the last **60** days not stored yet: its board meetings are the results calendar, and
@@ -956,6 +1017,7 @@ npm run hub -- data cancel <job id>
 npm run hub -- data backup [--to ./backups] [--keep 7]
 npm run hub -- data import-tradex --db <Tradex .cache/market.db> [--screener <Tradex .cache/screener>] [--dry-run]
 npm run hub -- data quality [--full] [--check price_outlier] [--all] [--resolved] [--limit 40]
+npm run hub -- data calendar [holiday|session|remove YYYY-MM-DD ["name"]]   # the trading calendar
 ```
 
 (In Docker: `docker compose exec hub node dist/cli.js data status`.)
@@ -1083,6 +1145,22 @@ picks one check, `--resolved` lists resolved ones). It only reads and writes the
 run while the server does. `data nse-history`, when it runs in the CLI, checks the days it
 downloaded at the end; `data status` prints the open counts.
 
+### data calendar
+
+```bash
+npm run hub -- data calendar [--from 2026-01-01] [--to 2026-12-31]           # holidays and special sessions (default: this year)
+npm run hub -- data calendar holiday 2027-01-26 "Republic Day"                # an exchange holiday
+npm run hub -- data calendar session 2027-02-01 "Union Budget" [--hours 09:15-15:30]   # a session (weekend, or on a listed holiday)
+npm run hub -- data calendar remove 2027-01-26                                # back to NSE's list and archive
+```
+
+Adds or removes a day of the [trading calendar](#get-v1calendar) by hand (`calendar_days`), over the
+checked-in lists and the archive: next year's holidays before a release has the circular, a holiday
+announced at short notice (an election day), a special session. A running server picks a change up
+within a minute. A session added on a day recorded as a listed holiday has that record forgotten,
+so the evening run asks NSE for its files. Adding any holiday for a year makes the year listed (no
+missing-list warning), so add the whole circular. `data status` prints the calendar line too.
+
 ### data backup
 
 A consistent snapshot through SQLite's online backup API — **safe while the server runs**. The copy
@@ -1182,7 +1260,7 @@ free space and what the backups take.
 | `api_keys` | key hashes, scopes, last use (H0) |
 | `series` | per (symbol, tf ∈ 1d/15m/5m/1m): coverage `[covered_from, covered_to)` of final bars, `synced_at`, count, first/last bar |
 | `candles` | (symbol, tf, t) → o, h, l, c, v |
-| `nse_days` | per (dataset ∈ cash_bhav/fo_bhav/pr, day): `ok` / `holiday` / `mismatch`, rows (for `pr`: results events), checked time, note (`imported from Tradex` for imported days) |
+| `nse_days` | per (dataset ∈ cash_bhav/fo_bhav/pr/index_close, day): `ok` / `holiday` / `mismatch`, rows (for `pr`: results events), checked time, note (`imported from Tradex` for imported days; `listed exchange holiday: not asked` for a calendar holiday recorded without a request) |
 | `cash_bhav` | (symbol, day) → series (`EQ`/`BE`; `EQ/BE` on days imported from Tradex), prev close, OHLC, volume, delivery % |
 | `fo_futures` | (day, symbol) → near/next month close, settle, prev close, volume, OI, ΔOI; combined OI and ΔOI; lot; underlying |
 | `lot_sizes` | symbol → lot |
@@ -1202,6 +1280,7 @@ free space and what the backups take.
 | `live_subscriptions` | the persistent set: symbol → origin `config` (`HUB_LIVE_SYMBOLS`) or `pin` (API), added time |
 | `quality_findings` | (check, trade day, subject) → severity, message, detail (JSON), first / last seen, resolved (migration 8; 7 is held for split/bonus factors, market-data-hub#20) |
 | `quality_checked` | (check, trade day) → when the per-day checks looked at it |
+| `calendar_days` | trading-calendar days added by hand (`hub data calendar`): day → `holiday` / `session`, name, session hours (minutes after IST midnight; null = regular) (migration 11; 10 is held for split/bonus work in review) |
 
 Other files in the data directory: `fyers-token.json` (mode 600, the broker access token),
 `owner.lock` (pid of the process that owns the broker/NSE connection) and `fyers-sdk/` (mode 700,
