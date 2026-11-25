@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createKey } from "../src/auth/keys.js";
 import { compareSeries } from "../src/history/adjustCheck.js";
 import { checkAdjustments } from "../src/history/adjustCheck.js";
-import { cumulative, decideFactor, deriveFactors, ensureFactors, inferRatio, lastAdjustmentRun, listingFactors, readFactors, rederiveAll, type Factor, type PairContext } from "../src/history/adjustments.js";
+import { ADJUSTMENT_VERSION, cumulative, decideFactor, deriveFactors, ensureFactors, inferRatio, lastAdjustmentRun, listingFactors, prevCloseRatio, readFactors, rederiveAll, volatility, type Factor, type PairContext } from "../src/history/adjustments.js";
 import { applyCashBhav } from "../src/history/fromBhav.js";
 import { archiveDaily } from "../src/history/fromArchive.js";
 import { readSeries, writeBars } from "../src/history/store.js";
@@ -14,6 +14,7 @@ import { NseClient } from "../src/nse/client.js";
 import { importDay, prUrl, type NseContext } from "../src/nse/datasets.js";
 import { classifyPurpose, corporateActionsFileDay, parseCorporateActions, rightsTerms } from "../src/nse/parsers/corporateActions.js";
 import type { CashBhavRow } from "../src/nse/parsers/cashBhav.js";
+import { parseCmBhav } from "../src/nse/parsers/cmBhav.js";
 import { corporateActionDaysRead, markDay, readCorporateActions, writeCashDay, writeCorporateActions, writeSymbolChanges, type StoredCorporateAction } from "../src/nse/store.js";
 import { unzipFile } from "../src/nse/unzip.js";
 import type { Db } from "../src/db.js";
@@ -26,7 +27,10 @@ import { fakeFetch, fakeTime, type Route } from "./support/nse.js";
 // cash bhavcopy rows come from real files (the 28 Jul 2022 cm bhavcopy for
 // TATASTEEL; the hub's store of the 2025–26 files for the others), the bc
 // fixtures are real PR zips' corporate-actions files (PR011010's Bc011010.csv;
-// PR040425 trimmed to its bm and bc files; bc14112025.csv trimmed to 40 rows).
+// PR040425 trimmed to its bm and bc files; bc14112025.csv trimmed to 40 rows;
+// PR100125's Bc100125.csv, its equity rows), and the old-format cm bhavcopies
+// of 28 Feb and 1 Mar 1997 and 11–12 Oct 2001 are NSE's files trimmed to a few
+// tickers.
 
 const d = (iso: string) => parseIsoDay(iso)!;
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
@@ -123,7 +127,7 @@ describe("NSE's corporate-actions file (the PR zip's bc file)", () => {
 
 describe("deriving factors (pure)", () => {
   const action = (purpose: string): StoredCorporateAction => ({ symbol: "X", exDay: 0, purpose, series: "EQ", company: "", recordDay: null, ...classifyPurpose(purpose), firstDay: 0, lastDay: 0 });
-  const none: PairContext = { actions: [], bcCovered: false, acrossRename: false };
+  const none: PairContext = { actions: [], listedNear: false, bcCovered: false, acrossRename: false };
   const pair = (prevClose: number, filePrev: number, open: number, close: number, context = none) => decideFactor({ day: d("2026-01-01"), c: prevClose }, { symbol: "X", day: d("2026-01-02"), prev_close: filePrev, o: open, c: close }, context);
 
   it("snaps a gap to a standard ratio only when open and close both say so", () => {
@@ -137,28 +141,60 @@ describe("deriving factors (pure)", () => {
     expect(inferRatio(0.5, 0.7)).toBeNull(); // opened at half, closed far from it
   });
 
-  it("prefers NSE's own PREV_CLOSE, then the bc file, then a price gap — and only where no bc file was read", () => {
+  it("prefers NSE's own PREV_CLOSE, then the bc file, then a price gap — and only where the bc file lists nothing for the ticker", () => {
     expect(pair(13.83, 138.3, 135.65, 130.05)).toMatchObject({ factor: 10, source: "prev_close" }); // CCAVENUE 1→10, 19 Oct 2026
     // VERTOZ, 11 Jul 2025: PREV_CLOSE 9.81 against a 9.17 close, but it opened at 96.28 — a slip; the gap says ×10.
     expect(pair(9.17, 9.81, 96.28, 87.11)).toMatchObject({ factor: 10, source: "price_gap" });
     expect(pair(959.4, 959.4, 98.1, 100.35)).toMatchObject({ factor: 0.1, source: "price_gap" }); // TATASTEEL 1:10, 28 Jul 2022
-    expect(pair(959.4, 959.4, 98.1, 100.35, { ...none, bcCovered: true })).toBeNull(); // the bc file was read and lists nothing
+    // A bc file was read and lists nothing for the ticker: NSE's files miss some (SHRIRAMFIN 1:5, 10 Jan 2025) — a halving or more is still a ratio …
+    expect(pair(2809.85, 2809.85, 566, 532, { ...none, bcCovered: true })).toMatchObject({ factor: 0.2, source: "price_gap" });
+    // … a quarter off isn't (2/3 and 3/4 only where no bc file was read) …
+    expect(pair(745.25, 745.25, 560, 559, { ...none, bcCovered: true })).toBeNull();
+    expect(pair(745.25, 745.25, 560, 559)).toMatchObject({ factor: 0.75, source: "price_gap" });
+    // … and where it lists something else for the ticker near the date, a gap is just a gap.
+    expect(pair(959.4, 959.4, 98.1, 100.35, { ...none, listedNear: true, bcCovered: true })).toBeNull();
     expect(pair(959.4, 959.4, 98.1, 100.35, { ...none, acrossRename: true })).toBeNull();
-    expect(pair(745.25, 745.25, 597, 599.65, { ...none, actions: [action("BONUS 1:4")], bcCovered: true })).toMatchObject({ factor: 0.8, source: "corporate_action", action: "BONUS 1:4" }); // CONCOR, 4 Jul 2025
-    expect(pair(745.25, 745.25, 745, 740, { ...none, actions: [action("BONUS 1:4")], bcCovered: true })).toBeNull(); // the price didn't move: wrong date for this ticker
+    expect(pair(745.25, 745.25, 597, 599.65, { ...none, actions: [action("BONUS 1:4")], listedNear: true, bcCovered: true })).toMatchObject({ factor: 0.8, source: "corporate_action", action: "BONUS 1:4" }); // CONCOR, 4 Jul 2025
+    expect(pair(745.25, 745.25, 745, 740, { ...none, actions: [action("BONUS 1:4")], listedNear: true, bcCovered: true })).toBeNull(); // the price didn't move: wrong date for this ticker
     expect(pair(745.25, 745.25, 597, 599.65)).toBeNull(); // 0.8 isn't a ratio a gap is taken for
     expect(decideFactor({ day: 0, c: 1.03 }, { symbol: "SICAL-RE", day: DAY_MS, prev_close: 1.03, o: 0.52, c: 0.51 }, none)).toBeNull(); // a rights entitlement
   });
 
+  it("takes an adjusted PREV_CLOSE only within one series, for a listed action or a standard ratio on a day the file is right (#53)", () => {
+    const halved = (context: PairContext, series: [string, string] = ["EQ", "EQ"]) => decideFactor({ day: d("2026-01-01"), c: 100, series: series[0] }, { symbol: "X", day: d("2026-01-02"), series: series[1], prev_close: 50, o: 51, c: 52 }, context);
+    expect(halved({ ...none, listedNear: true, bcCovered: true })).toMatchObject({ factor: 0.5, source: "prev_close" });
+    // BE's PREVCLOSE is BE's last close: against an EQ close it says nothing.
+    expect(halved({ ...none, listedNear: true, bcCovered: true }, ["EQ", "BE"])).toBeNull();
+    // PREV_CLOSE off for many tickers that day: a glitch in the file, not NSE's word on this one.
+    expect(halved({ ...none, listedNear: true, bcCovered: true, noisyDay: true })).toBeNull();
+    // SRTRANSFIN, 19 Oct 2001: PREV_CLOSE 8.15 against an 8.35 close (×0.976) — no standard ratio, nothing in a bc file.
+    expect(decideFactor({ day: d("2001-10-18"), c: 8.35 }, { symbol: "SRTRANSFIN", day: d("2001-10-19"), prev_close: 8.15, o: 8, c: 8.15 }, none)).toBeNull();
+    // The bc file lists it: NSE's PREV_CLOSE is the factor, standard or not (CARERATING, 18 Sep 2018).
+    expect(decideFactor({ day: d("2018-09-17"), c: 1301.05 }, { symbol: "CARERATING", day: d("2018-09-18"), prev_close: 1264.05, o: 1279.8, c: 1267 }, { ...none, actions: [action("AGM/DIV-RS 37 PER SHARE")], listedNear: true, bcCovered: true })).toMatchObject({ source: "prev_close" });
+    expect([0.5, 0.2, 10, 0.8, 1 / 3].map((ratio) => prevCloseRatio(ratio * 1.004))).toEqual([0.5, 0.2, 10, 0.8, 1 / 3]);
+    expect([0.973, 1.0245, 0.94, 0.7, 0.59].map(prevCloseRatio)).toEqual([null, null, null, null, null]);
+  });
+
+  it("takes a gap for a ratio only far outside the stock's own daily moves", () => {
+    // A stock that moves 1% a day doesn't lose a quarter but for a 1:3 bonus; one that moves 7% a day (PRAJIND, Aug 2000) does.
+    expect(pair(745.25, 745.25, 560, 559, { ...none, sigma: 0.01 })).toMatchObject({ factor: 0.75, source: "price_gap" });
+    expect(pair(19.85, 19.85, 15.45, 15.4, { ...none, sigma: 0.07 })).toBeNull();
+    // Too little history to tell: only a halving or more.
+    expect(pair(745.25, 745.25, 560, 559, { ...none, sigma: null })).toBeNull();
+    expect(pair(200, 200, 100, 101, { ...none, sigma: null })).toMatchObject({ factor: 0.5 });
+    expect(volatility([0.01, -0.01, 0.01, -0.01])).toBeNull();
+    expect(volatility([0.01, -0.01, 0.01, -0.01, 0])).toBeCloseTo(0.01, 10);
+  });
+
   it("takes a demerger's opening gap and a rights issue's ex-rights price", () => {
     // SIEMENS, 7 Apr 2025 (Siemens Energy demerged): the broker's factor is 0.4971.
-    expect(pair(4928.15, 4928.15, 2450, 2812.45, { ...none, actions: [action("DEMERGER")], bcCovered: true })!.factor).toBeCloseTo(2450 / 4928.15, 10);
+    expect(pair(4928.15, 4928.15, 2450, 2812.45, { ...none, actions: [action("DEMERGER")], listedNear: true, bcCovered: true })!.factor).toBeCloseTo(2450 / 4928.15, 10);
     // ADANIENT, 17 Nov 2025, RIGHTS 3:25 at a premium of 1799: the broker's factor is 0.9695.
-    const rights = pair(2516.8, 2516.8, 2460, 2462, { ...none, actions: [action("RIGHTS 3:25@PRM RS 1799")], bcCovered: true })!;
+    const rights = pair(2516.8, 2516.8, 2460, 2462, { ...none, actions: [action("RIGHTS 3:25@PRM RS 1799")], listedNear: true, bcCovered: true })!;
     expect(rights).toMatchObject({ source: "corporate_action" });
     expect(rights.factor).toBeCloseTo((25 * 2516.8 + 3 * 1799) / (28 * 2516.8), 10);
     expect(rights.factor).toBeCloseTo(0.9695, 3);
-    expect(pair(4.93, 4.93, 4.93, 4.69, { ...none, actions: [action("RIGHTS 5:9")], bcCovered: true })).toBeNull(); // PRAXIS: no price, nothing to compute
+    expect(pair(4.93, 4.93, 4.93, 4.69, { ...none, actions: [action("RIGHTS 5:9")], listedNear: true, bcCovered: true })).toBeNull(); // PRAXIS: no price, nothing to compute
   });
 
   it("multiplies factors after a bar", () => {
@@ -199,8 +235,8 @@ describe("deriving factors from the store", () => {
     seed(t.db, {
       CONCOR: [["2025-07-02", 745.75, 748, 744.25], ["2025-07-03", 744.25, 748, 745.25], ["2025-07-04", 745.25, 597, 599.65]],
       SIEMENS: [["2025-04-03", 5282.85, 5201, 5248.55], ["2025-04-04", 5248.55, 5287.45, 4928.15], ["2025-04-07", 4928.15, 2450, 2812.45], ["2025-04-08", 2812.45, 2938.35, 2763.45]],
-      // Halves on 7 Apr; the bc file read for 4 Apr lists nothing for it: a crash, not a split.
-      CRASHCO: [["2025-04-04", 200, 200, 200], ["2025-04-07", 200, 100, 101]],
+      // A quarter off on 7 Apr; the bc file read for 4 Apr lists nothing for it: a crash, not a 1:3 bonus.
+      CRASHCO: [["2025-04-04", 200, 200, 200], ["2025-04-07", 200, 150, 150]],
     });
     const zip = fixture("PR040425.zip");
     storeBc(t.db, "Bc040425.csv", unzipFile(zip, (name) => corporateActionsFileDay(name) !== null)!.data.toString("utf8"));
@@ -210,6 +246,73 @@ describe("deriving factors from the store", () => {
     expect(factorsOf(t.db, "SIEMENS")).toEqual([{ date: "2025-04-07", factor: Number((2450 / 4928.15).toFixed(5)), source: "corporate_action" }]);
     expect(readFactors(t.db, "SIEMENS")[0].action).toBe("DEMERGER");
     expect(factorsOf(t.db, "CRASHCO")).toEqual([]);
+  });
+
+  it("reads no action into the 1997 and 2001 files' PREV_CLOSE: another series' close, or a whole file off (#53)", () => {
+    t = makeHub();
+    // One more ticker each with NSE's PREV_CLOSE at exactly half and the open bearing it out.
+    const half = (symbol: string, prevClose: number, close: number): CashBhavRow => ({ symbol, series: "EQ", prevClose, open: close, high: close, low: close, close, volume: 100, deliveryPct: null });
+    const extra: Record<string, CashBhavRow[]> = {
+      "cm28FEB1997bhav.csv": [half("HALFA", 100, 100)],
+      "cm01MAR1997bhav.csv": [half("HALFA", 50, 51)],
+      "cm11OCT2001bhav.csv": [half("HALFB", 100, 100)],
+      "cm12OCT2001bhav.csv": [half("HALFB", 50, 51)],
+    };
+    for (const [name, rows] of Object.entries(extra)) {
+      const parsed = parseCmBhav(fixture(name).toString("utf8"));
+      writeCashDay(t.db, parsed.tradeDate!, [...parsed.rows, ...rows], 0);
+    }
+    // 11 Oct 2001: SRTRANSFIN traded in both series (EQ 7.4 is stored, BE closed 7.2); 12 Oct only in BE, PREVCLOSE 7.2 — BE's close.
+    expect(t.db.prepare("select series, prev_close, c from cash_bhav where symbol = 'SRTRANSFIN' order by day").all()).toEqual([{ series: "EQ", prev_close: 7.1, c: 7.4 }, { series: "BE", prev_close: 7.2, c: 7.35 }]);
+    // 1 Mar 1997: every ticker's PREVCLOSE is off (RELIANCE 272.2 against a 293.75 close; 814 tickers in the whole file).
+    expect(t.db.prepare("select prev_close from cash_bhav where symbol = 'RELIANCE' and day = ?").pluck().get(d("1997-03-01"))).toBe(272.2);
+    deriveFactors(t.db);
+    const all = t.db.prepare("select symbol, day, factor, source from adjustment_factors order by day").all() as Array<{ symbol: string; day: number; factor: number; source: string }>;
+    expect(all.map((row) => [row.symbol, isoDay(row.day), row.factor, row.source])).toEqual([
+      // On the day the file is off the halving is still a gap (no bc file then), not NSE's word …
+      ["HALFA", "1997-03-01", 0.5, "price_gap"],
+      // … on a day it's right, PREV_CLOSE at a standard ratio is.
+      ["HALFB", "2001-10-12", 0.5, "prev_close"],
+    ]);
+  });
+
+  it("infers SHRIRAMFIN's 1:5 split, 10 Jan 2025, though that day's bc file was read: it doesn't list it (#54)", () => {
+    t = makeHub();
+    seed(t.db, {
+      SHRIRAMFIN: [
+        ["2024-12-09", 3126.35, 3100.6, 3106.9], ["2024-12-10", 3106.9, 3125.45, 3186.5], ["2024-12-11", 3186.5, 3195.5, 3248.25], ["2024-12-12", 3248.25, 3239.5, 3248.1],
+        ["2024-12-13", 3248.1, 3242.05, 3162.55], ["2024-12-16", 3162.55, 3174.0, 3137.45], ["2024-12-17", 3137.45, 3135.0, 2976.9], ["2024-12-18", 2976.9, 2976.9, 2931.4],
+        ["2024-12-19", 2931.4, 2870.0, 2945.45], ["2024-12-20", 2945.45, 2953.25, 2877.25], ["2024-12-23", 2877.25, 2906.0, 2882.9], ["2024-12-24", 2882.9, 2883.0, 2882.95],
+        ["2024-12-26", 2882.95, 2892.3, 2926.9], ["2024-12-27", 2926.9, 2936.9, 2898.9], ["2024-12-30", 2898.9, 2912.8, 2919.0], ["2024-12-31", 2919.0, 2897.9, 2889.15],
+        ["2025-01-01", 2889.15, 2899.0, 2918.65], ["2025-01-02", 2918.65, 2937.3, 3060.05], ["2025-01-03", 3060.05, 3060.0, 3048.35], ["2025-01-06", 3048.35, 3031.0, 2969.55],
+        ["2025-01-07", 2969.55, 2977.05, 2958.4], ["2025-01-08", 2958.4, 2970.0, 2898.75], ["2025-01-09", 2898.75, 2903.75, 2809.85],
+        // PREV_CLOSE is the unadjusted close; the stock opens at a fifth.
+        ["2025-01-10", 2809.85, 566.0, 532.0], ["2025-01-13", 532.0, 530.05, 521.1],
+      ],
+    });
+    storeBc(t.db, "Bc100125.csv", fixture("Bc100125.csv").toString("utf8"));
+    // The file was read — it lists JAIBALAJI's and NAVA's splits — but nothing for SHRIRAMFIN.
+    const listed = readCorporateActions(t.db, d("2025-01-01"), d("2025-01-31")).map((action) => action.symbol);
+    expect(listed).toEqual(expect.arrayContaining(["JAIBALAJI", "NAVA"]));
+    expect(listed).not.toContain("SHRIRAMFIN");
+    deriveFactors(t.db);
+    expect(factorsOf(t.db, "SHRIRAMFIN")).toEqual([{ date: "2025-01-10", factor: 0.2, source: "price_gap" }]);
+    expect(archiveDaily(t.db, "SHRIRAMFIN", d("2025-01-09"), d("2025-01-10")).bars.map((bar) => bar.c)).toEqual([561.97, 532]);
+  });
+
+  it("doesn't read an illiquid stock's bad day as a bonus (PRAJIND, 18 Aug 2000) (#53)", () => {
+    t = makeHub();
+    seed(t.db, {
+      // NSE's rows: a stock moving 5–15% a day loses a quarter in one trade and is back up 13% the next session.
+      PRAJIND: [
+        ["2000-07-17", 22.0, 22.0, 22.0], ["2000-07-18", 22.0, 21.1, 21.0], ["2000-07-19", 21.0, 21.0, 21.0], ["2000-07-20", 21.0, 20.0, 20.0], ["2000-07-21", 20.0, 20.0, 20.8],
+        ["2000-07-24", 20.8, 22.0, 20.0], ["2000-07-25", 20.0, 21.5, 21.5], ["2000-07-26", 21.5, 21.5, 20.05], ["2000-07-27", 20.05, 20.1, 18.65], ["2000-07-28", 18.65, 20.2, 20.25],
+        ["2000-07-31", 20.25, 21.0, 21.0], ["2000-08-01", 21.0, 20.0, 19.55], ["2000-08-08", 19.55, 16.85, 16.85], ["2000-08-10", 16.85, 19.75, 20.25], ["2000-08-11", 20.25, 20.0, 20.0],
+        ["2000-08-14", 20.0, 18.4, 19.85], ["2000-08-18", 19.85, 15.45, 15.4], ["2000-08-21", 15.4, 17.45, 17.45], ["2000-08-22", 17.45, 16.75, 15.85],
+      ],
+    });
+    deriveFactors(t.db);
+    expect(factorsOf(t.db, "PRAJIND")).toEqual([]);
   });
 
   it("follows a company across a rename; the rename itself is no action, and a reused ticker isn't one company", () => {
@@ -248,7 +351,7 @@ describe("deriving factors from the store", () => {
     seed(t.db, { SBIN: [["2026-11-02", 500, 500, 500], ["2026-11-03", 500, 501, 502]] });
     expect(ensureFactors(t.db, { endOfDay: true, now: 1 })).toMatchObject({ factors: 0 });
     expect(ensureFactors(t.db, { endOfDay: true, now: 2 })).toBeNull();
-    expect(lastAdjustmentRun(t.db)).toMatchObject({ version: 1, derivedAt: 1, factors: 0 });
+    expect(lastAdjustmentRun(t.db)).toMatchObject({ version: ADJUSTMENT_VERSION, derivedAt: 1, factors: 0 });
 
     // A stored series (from the archive, end-of-day mode) through 3 Nov; 4 Nov is a 1:2 split.
     writeBars(t.db, "SBIN", "1d", [{ t: d("2026-11-03"), o: 501, h: 502, l: 501, c: 502, v: 1 }], { from: d("2026-11-03"), to: d("2026-11-04") }, 0);
