@@ -1,7 +1,7 @@
 // NSE calendar helpers (IST). Daily bars are keyed by the "day key": UTC
 // midnight of the IST calendar date, so a daily bar's time reads as its trade
 // date in any timezone. Intraday bars use the real instant their bar starts.
-// Exchange holidays aren't known here; callers learn them from NSE's files.
+// Exchange holidays, special sessions and market hours: src/calendar/calendar.ts.
 
 export const MINUTE_MS = 60_000;
 export const DAY_MS = 24 * 60 * MINUTE_MS;
@@ -39,13 +39,7 @@ export function isWeekday(dayKey: number): boolean {
   return weekday !== 0 && weekday !== 6;
 }
 
-/** Inside the regular 09:15–15:30 IST session on a weekday. */
-export function isMarketOpen(time: number = Date.now()): boolean {
-  const { minutes, weekday } = istParts(time);
-  return weekday !== 0 && weekday !== 6 && minutes >= SESSION_OPEN_MIN && minutes < SESSION_CLOSE_MIN;
-}
-
-/** The weekday on or before `dayKey`. */
+/** The weekday on or before `dayKey` (exchange holidays aside: tradingDayOnOrBefore in src/calendar/calendar.ts knows them). */
 export function weekdayOnOrBefore(dayKey: number): number {
   let day = dayKey;
   while (!isWeekday(day)) day -= DAY_MS;

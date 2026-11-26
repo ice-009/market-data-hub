@@ -1,7 +1,8 @@
 import type { Statement } from "better-sqlite3";
 import { readKv, writeKv, type Db } from "../db.js";
 import type { Logger } from "../log.js";
-import { DAY_MS, MINUTE_MS, isMarketOpen } from "../time.js";
+import { isMarketOpen } from "../calendar/calendar.js";
+import { DAY_MS, MINUTE_MS } from "../time.js";
 import { foldTick, minuteOf, seedAgg, tradeTime, type MinuteAcc, type SymbolAgg } from "./aggregate.js";
 import type { LiveStore, MinuteBar, Quote, Tick } from "./types.js";
 

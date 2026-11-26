@@ -58,10 +58,15 @@ describe("timeframes and resampling (pure)", () => {
     // Wednesday 4 Nov 2026.
     expect(finalBefore("1d", ist(2026, 11, 4, 12))).toBe(d("2026-11-04")); // today's bar still forming
     expect(finalBefore("1d", ist(2026, 11, 4, 16, 30))).toBe(d("2026-11-05"));
-    expect(finalBefore("1d", ist(2026, 11, 8, 12))).toBe(d("2026-11-07")); // Sunday: Friday's is the last
+    expect(finalBefore("1d", ist(2026, 11, 8, 12))).toBe(d("2026-11-07")); // Sunday before its Muhurat session: Friday's is the last
     expect(finalBefore("15m", ist(2026, 11, 4, 10, 7))).toBe(ist(2026, 11, 4, 10, 0));
     expect(finalBefore("15m", ist(2026, 11, 4, 20))).toBe(ist(2026, 11, 4, 15, 30));
-    expect(finalBefore("5m", ist(2026, 11, 9, 8))).toBe(ist(2026, 11, 6, 15, 30)); // Monday pre-open
+    expect(finalBefore("5m", ist(2026, 11, 9, 8))).toBe(ist(2026, 11, 8, 15, 30)); // Monday pre-open: Sunday's Muhurat session (14:20–15:30) was the last
+    expect(finalBefore("5m", ist(2026, 11, 3, 8))).toBe(ist(2026, 11, 2, 15, 30)); // Tuesday pre-open
+    expect(finalBefore("5m", ist(2026, 11, 8, 14, 47))).toBe(ist(2026, 11, 8, 14, 45)); // inside the Muhurat session
+    expect(finalBefore("1d", ist(2026, 11, 24, 17))).toBe(d("2026-11-24")); // a holiday (Guru Nanak Jayanti): Monday's bar is the last
+    expect(finalBefore("15m", ist(2026, 11, 24, 11))).toBe(ist(2026, 11, 23, 15, 30));
+    expect(formingNow("15m", ist(2026, 11, 24, 11))).toBe(false);
     expect(formingNow("1d", ist(2026, 11, 4, 15, 45))).toBe(true);
     expect(formingNow("15m", ist(2026, 11, 4, 15, 45))).toBe(false);
     expect(windowStart("1d", ist(2026, 11, 4, 12))).toBe(d("2026-11-04") - (5 * 365 - 3) * DAY_MS);

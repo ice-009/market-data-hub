@@ -537,7 +537,7 @@ describe("live feed", () => {
   });
 
   it("runs only in market hours: closes the socket at 15:30, stays idle overnight, and reports the overnight gap at the open", async () => {
-    vi.setSystemTime(ist(2026, 11, 9, 15, 28));
+    vi.setSystemTime(ist(2026, 11, 11, 15, 28));
     const { feed, sockets, polls, downtimes } = harness({ plan: { socketSymbols: 1, quoteBatch: 50 } });
     feed.subscribe("a", ["SBIN", "INFY"]);
     feed.start();
@@ -557,14 +557,26 @@ describe("live feed", () => {
     expect(polls).toHaveLength(polled);
     expect(sockets).toHaveLength(1);
 
-    vi.setSystemTime(ist(2026, 11, 10, 9, 14) + 50_000);
+    vi.setSystemTime(ist(2026, 11, 12, 9, 14) + 50_000);
     await advance(5_000);
     expect(sockets).toHaveLength(1); // 09:14:55: not yet
     await advance(10_000);
     expect(sockets).toHaveLength(2);
     expect(downtimes).toHaveLength(1);
     expect(downtimes[0].from).toBe(lastHeard);
-    expect(downtimes[0].to).toBeGreaterThanOrEqual(ist(2026, 11, 10, 9, 15)); // when the socket connected after the open
+    expect(downtimes[0].to).toBeGreaterThanOrEqual(ist(2026, 11, 12, 9, 15)); // when the socket connected after the open
+    await feed.stop();
+  });
+
+  it("does nothing on an exchange holiday (Tue 24 Nov 2026, Guru Nanak Jayanti)", async () => {
+    vi.setSystemTime(ist(2026, 11, 24, 9, 10));
+    const { feed, sockets, polls } = harness();
+    feed.subscribe("a", ["SBIN"]);
+    feed.start();
+    await advance(30 * 60_000); // through 09:15 and on
+    expect(sockets).toHaveLength(0);
+    expect(polls).toHaveLength(0);
+    expect(feed.status().mode).toBe("idle");
     await feed.stop();
   });
 
@@ -627,7 +639,7 @@ describe("live feed", () => {
     expect(polls).toHaveLength(1);
 
     spent = false;
-    vi.setSystemTime(ist(2026, 11, 10, 10, 0));
+    vi.setSystemTime(ist(2026, 11, 11, 10, 0)); // Wednesday (Tue 10 Nov is a holiday)
     await advance(15_000);
     expect(polls).toHaveLength(2);
     expect(feed.status()).toMatchObject({ mode: "polling", pollingStopped: null });

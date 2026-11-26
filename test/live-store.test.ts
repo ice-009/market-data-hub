@@ -13,10 +13,10 @@ import type { MinuteBar, Tick } from "../src/live/types.js";
 import { DAY_MS, MINUTE_MS, parseIsoDay } from "../src/time.js";
 import { ist } from "./support/hub.js";
 
-// Monday 9 Nov 2026 is a trading weekday; Friday 6 Nov the session before it.
+// Monday 16 Nov 2026 is a trading weekday; Friday 13 Nov the session before it.
 const d = (iso: string) => parseIsoDay(iso)!;
-const mon = (hour: number, minute = 0, second = 0) => ist(2026, 11, 9, hour, minute) + second * 1000;
-const fri = (hour: number, minute = 0, second = 0) => ist(2026, 11, 6, hour, minute) + second * 1000;
+const mon = (hour: number, minute = 0, second = 0) => ist(2026, 11, 16, hour, minute) + second * 1000;
+const fri = (hour: number, minute = 0, second = 0) => ist(2026, 11, 13, hour, minute) + second * 1000;
 
 const tick = (symbol: string, ltt: number, ltp: number, volume: number, extra: Partial<Tick> = {}): Tick => ({
   symbol,
@@ -92,7 +92,7 @@ describe("aggregation (pure)", () => {
     fold(agg, [tick("SBIN", fri(15, 29, 10), 100, 9_000_000), tick("SBIN", fri(15, 29, 50), 100, 9_000_500)]);
     const monday = foldTick(agg, tick("SBIN", mon(9, 15, 3), 101, 20_000));
     expect(monday?.v).toBe(20_000);
-    expect(agg.day).toBe(d("2026-11-09"));
+    expect(agg.day).toBe(d("2026-11-16"));
     // A late Friday tick after Monday started adds nothing and makes no bar.
     expect(foldTick(agg, tick("SBIN", fri(15, 29, 59), 100, 9_000_600))).toBeNull();
     expect(agg.open.find((bar) => bar.t === mon(9, 15))?.v).toBe(20_000);
@@ -104,7 +104,7 @@ describe("aggregation (pure)", () => {
     const open = foldTick(agg, tick("SBIN", mon(9, 15, 1), 100, 41_000));
     expect(open?.v).toBe(41_000);
     expect(foldTick(agg, tick("SBIN", mon(15, 30, 2), 104, 900_000))).toBeNull(); // after the close
-    expect(foldTick(agg, tick("SBIN", ist(2026, 11, 7, 11), 104, 1))).toBeNull(); // Saturday
+    expect(foldTick(agg, tick("SBIN", ist(2026, 11, 14, 11), 104, 1))).toBeNull(); // Saturday
   });
 
   it("handles out-of-order and duplicate ticks", () => {
@@ -249,37 +249,37 @@ describe("recovery planning (pure)", () => {
 
   it("cuts a range into session slices, newest first, skipping the weekend", () => {
     expect(sessionSlices(fri(11), mon(10))).toEqual([
-      { day: d("2026-11-09"), from: mon(9, 15), to: mon(10) },
-      { day: d("2026-11-06"), from: fri(11), to: fri(15, 30) },
+      { day: d("2026-11-16"), from: mon(9, 15), to: mon(10) },
+      { day: d("2026-11-13"), from: fri(11), to: fri(15, 30) },
     ]);
     expect(sessionSlices(fri(16), mon(9))).toEqual([]);
-    expect(latestSessionDay(mon(9))).toBe(d("2026-11-06"));
+    expect(latestSessionDay(mon(9))).toBe(d("2026-11-13"));
     expect(recoveryWindowStart(mon(10), 2)).toBe(fri(9, 15));
   });
 
   it("plans a downtime inside today's session, through the minute now is in", () => {
     const tasks = planRecovery({ symbols: ["SBIN", "INFY"], now: mon(11, 30, 20), from: () => mon(11, 7), sessions: 2 });
     expect(tasks).toEqual([
-      { symbol: "SBIN", day: d("2026-11-09"), from: mon(11, 7), to: mon(11, 31) },
-      { symbol: "INFY", day: d("2026-11-09"), from: mon(11, 7), to: mon(11, 31) },
+      { symbol: "SBIN", day: d("2026-11-16"), from: mon(11, 7), to: mon(11, 31) },
+      { symbol: "INFY", day: d("2026-11-16"), from: mon(11, 7), to: mon(11, 31) },
     ]);
   });
 
   it("plans across sessions newest first, within the window, and fetches the latest session for new symbols", () => {
     // Down since Thursday: Thursday is outside the 2-session window.
-    const tasks = planRecovery({ symbols: ["SBIN", "NEW"], now: mon(10, 0, 5), from: (s) => (s === "SBIN" ? ist(2026, 11, 5, 12) : null), sessions: 2 });
+    const tasks = planRecovery({ symbols: ["SBIN", "NEW"], now: mon(10, 0, 5), from: (s) => (s === "SBIN" ? ist(2026, 11, 12, 12) : null), sessions: 2 });
     expect(tasks).toEqual([
-      { symbol: "SBIN", day: d("2026-11-09"), from: mon(9, 15), to: mon(10, 1) },
-      { symbol: "NEW", day: d("2026-11-09"), from: mon(9, 15), to: mon(10, 1) },
-      { symbol: "SBIN", day: d("2026-11-06"), from: fri(9, 15), to: fri(15, 30) },
+      { symbol: "SBIN", day: d("2026-11-16"), from: mon(9, 15), to: mon(10, 1) },
+      { symbol: "NEW", day: d("2026-11-16"), from: mon(9, 15), to: mon(10, 1) },
+      { symbol: "SBIN", day: d("2026-11-13"), from: fri(9, 15), to: fri(15, 30) },
     ]);
   });
 
   it("skips minutes already repaired, and merges overlapping work per symbol and day", () => {
     const tasks = planRecovery({ symbols: ["SBIN", "INFY"], now: mon(10, 0, 5), from: () => fri(14), sessions: 2, repaired: (s, from) => s === "SBIN" && from === fri(14) });
-    expect(tasks.map((task) => `${task.symbol}@${task.day === d("2026-11-09") ? "mon" : "fri"}`)).toEqual(["SBIN@mon", "INFY@mon", "INFY@fri"]);
-    const merged = mergeTasks(tasks, [{ symbol: "INFY", day: d("2026-11-06"), from: fri(13), to: fri(14, 30) }]);
-    expect(merged.find((task) => task.symbol === "INFY" && task.day === d("2026-11-06"))).toMatchObject({ from: fri(13), to: fri(15, 30) });
+    expect(tasks.map((task) => `${task.symbol}@${task.day === d("2026-11-16") ? "mon" : "fri"}`)).toEqual(["SBIN@mon", "INFY@mon", "INFY@fri"]);
+    const merged = mergeTasks(tasks, [{ symbol: "INFY", day: d("2026-11-13"), from: fri(13), to: fri(14, 30) }]);
+    expect(merged.find((task) => task.symbol === "INFY" && task.day === d("2026-11-13"))).toMatchObject({ from: fri(13), to: fri(15, 30) });
     expect(merged).toHaveLength(3);
   });
 });
@@ -432,7 +432,7 @@ describe("recovery runs", () => {
       return { bars, coveredFromDay: fromDay, complete: true } satisfies HistoryResult;
     };
     const bars = await minuteFetcher(history)("SBIN", mon(10), mon(10, 2));
-    expect(asked).toEqual([["SBIN", "1", d("2026-11-09"), d("2026-11-09"), "background"]]);
+    expect(asked).toEqual([["SBIN", "1", d("2026-11-16"), d("2026-11-16"), "background"]]);
     expect(bars).toEqual([mon(10), mon(10, 1)].map((t) => ({ symbol: "SBIN", t, o: 1, h: 1, l: 1, c: 1, v: 1, source: "broker" })));
   });
 });
@@ -481,25 +481,25 @@ describe("merging minutes into candles (pure)", () => {
   });
 
   it("builds today's daily bar from minutes, or exactly from the quote", () => {
-    const daily = [{ t: d("2026-11-06"), o: 90, h: 99, l: 89, c: 95, v: 1_000_000, dp: 41.2 }];
+    const daily = [{ t: d("2026-11-13"), o: 90, h: 99, l: 89, c: 95, v: 1_000_000, dp: 41.2 }];
     const minutes = [minute(mon(9, 15), 96, 500), minute(mon(12, 0), 98, 700)];
     const fromMinutes = mergeMinutes("1d", daily, minutes);
     expect(fromMinutes[0]).toEqual(daily[0]);
-    expect(fromMinutes[1]).toEqual({ t: d("2026-11-09"), o: 96, h: 99, l: 95, c: 98, v: 1_200 });
+    expect(fromMinutes[1]).toEqual({ t: d("2026-11-16"), o: 96, h: 99, l: 95, c: 98, v: 1_200 });
     const quote = { ...tick("SBIN", mon(12, 0, 5), 98.5, 2_500_000), open: 95.5, high: 101, low: 94 };
     const withQuote = mergeMinutes("1d", daily, minutes, { quote });
-    expect(withQuote[1]).toEqual({ t: d("2026-11-09"), o: 95.5, h: 101, l: 94, c: 98.5, v: 2_500_000 });
+    expect(withQuote[1]).toEqual({ t: d("2026-11-16"), o: 95.5, h: 101, l: 94, c: 98.5, v: 2_500_000 });
     // A stored forming daily bar keeps its extra fields.
-    const forming = mergeMinutes("1d", [{ ...daily[0], t: d("2026-11-09") }], minutes, { quote });
+    const forming = mergeMinutes("1d", [{ ...daily[0], t: d("2026-11-16") }], minutes, { quote });
     expect(forming).toHaveLength(1);
-    expect(forming[0]).toMatchObject({ t: d("2026-11-09"), dp: 41.2, c: 98.5, v: 2_500_000 });
+    expect(forming[0]).toMatchObject({ t: d("2026-11-16"), dp: 41.2, c: 98.5, v: 2_500_000 });
   });
 
   it("extends this week's bar or starts a new one", () => {
-    const weekly = [{ t: d("2026-11-02"), o: 80, h: 99, l: 79, c: 95, v: 9_000 }];
+    const weekly = [{ t: d("2026-11-09"), o: 80, h: 99, l: 79, c: 95, v: 9_000 }];
     const out = mergeMinutes("1w", weekly, [minute(mon(9, 15), 96, 500)]);
-    expect(out[1]).toEqual({ t: d("2026-11-09"), o: 96, h: 97, l: 95, c: 96, v: 500 });
-    const same = mergeMinutes("1w", [{ ...weekly[0], t: d("2026-11-09") }], [minute(mon(9, 15), 120, 500)]);
-    expect(same).toEqual([{ t: d("2026-11-09"), o: 80, h: 121, l: 79, c: 120, v: 9_000 }]);
+    expect(out[1]).toEqual({ t: d("2026-11-16"), o: 96, h: 97, l: 95, c: 96, v: 500 });
+    const same = mergeMinutes("1w", [{ ...weekly[0], t: d("2026-11-16") }], [minute(mon(9, 15), 120, 500)]);
+    expect(same).toEqual([{ t: d("2026-11-16"), o: 80, h: 121, l: 79, c: 120, v: 9_000 }]);
   });
 });

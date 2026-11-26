@@ -1,0 +1,9 @@
+{
+  "year": 2024,
+  "source": "Special sessions only (NSE's archive has their files); this year's holidays come from the archive.",
+  "sessions": [
+    { "date": "2024-01-20", "name": "Special session" },
+    { "date": "2024-03-02", "name": "Special session (DR site)" },
+    { "date": "2024-05-18", "name": "Special session (DR site)" }
+  ]
+}

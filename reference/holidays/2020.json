@@ -1,0 +1,8 @@
+{
+  "year": 2020,
+  "source": "Special sessions only (NSE's archive has their files); this year's holidays come from the archive.",
+  "sessions": [
+    { "date": "2020-02-01", "name": "Union Budget" },
+    { "date": "2020-11-14", "name": "Muhurat trading (Diwali)" }
+  ]
+}

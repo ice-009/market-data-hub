@@ -310,7 +310,10 @@ describe("scheduler (pure)", () => {
   it("wants the next session's ban list from the evening on", () => {
     expect(isoDay(banTarget(ist(2026, 11, 4, 12)))).toBe("2026-11-04");
     expect(isoDay(banTarget(ist(2026, 11, 4, 19)))).toBe("2026-11-05");
-    expect(isoDay(banTarget(ist(2026, 11, 6, 19)))).toBe("2026-11-09"); // Friday evening → Monday
-    expect(banTarget(ist(2026, 11, 7, 12)) - d("2026-11-07")).toBe(2 * DAY_MS);
+    expect(isoDay(banTarget(ist(2026, 11, 13, 19)))).toBe("2026-11-16"); // Friday evening → Monday
+    expect(banTarget(ist(2026, 11, 14, 12)) - d("2026-11-14")).toBe(2 * DAY_MS);
+    expect(isoDay(banTarget(ist(2026, 11, 6, 19)))).toBe("2026-11-08"); // Friday evening → Sunday's Muhurat session
+    expect(isoDay(banTarget(ist(2026, 11, 23, 19)))).toBe("2026-11-25"); // Monday evening → Wednesday (Tuesday is a holiday)
+    expect(isoDay(banTarget(ist(2026, 11, 24, 10)))).toBe("2026-11-25"); // on the holiday itself
   });
 });

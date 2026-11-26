@@ -4,7 +4,9 @@ import { deriveFactors } from "../history/adjustments.js";
 import { applyCashBhav } from "../history/fromBhav.js";
 import { syncIndexSeries } from "../history/fromIndices.js";
 import type { Logger } from "../log.js";
-import { DAY_MS, isoDay, istParts } from "../time.js";
+import { calendar } from "../calendar/calendar.js";
+import { CALENDAR_NOTE, isListedHoliday } from "../calendar/store.js";
+import { DAY_MS, isoDay, istParts, isWeekday } from "../time.js";
 import { NseError, type NseClient } from "./client.js";
 import { parseCashBhav, type CashBhavParse } from "./parsers/cashBhav.js";
 import { parseCmBhav } from "./parsers/cmBhav.js";
@@ -56,23 +58,14 @@ export interface NseContext {
 export const PUBLISH_MIN: Record<DayDataset, number> = { cash_bhav: 17 * 60 + 30, fo_bhav: 18 * 60, pr: 17 * 60 + 30, index_close: 18 * 60 };
 
 /**
- * Weekend days NSE held a session on (cash, F&O and index files all stored).
- * Add new ones here: a Budget day or Diwali's Muhurat session on a weekend, a
- * special session. `hub data quality` reports any it finds unlisted
- * (unlisted_session) once an NSE history download has fetched the weekends.
+ * Weekend days NSE held a session on (cash, F&O and index files all stored),
+ * from the checked-in calendar (reference/holidays/<year>.json, `sessions`).
+ * Add new ones there: a Budget day or Diwali's Muhurat session on a weekend, a
+ * special session (or, without a release, `hub data calendar session`).
+ * `hub data quality` reports any it finds unlisted (unlisted_session) once an
+ * NSE history download has fetched the weekends.
  */
-export const WEEKEND_SESSIONS: readonly number[] = [
-  Date.UTC(2019, 9, 27), // Sun 27 Oct 2019, Muhurat
-  Date.UTC(2020, 1, 1), // Sat 1 Feb 2020, Union Budget
-  Date.UTC(2020, 10, 14), // Sat 14 Nov 2020, Muhurat
-  Date.UTC(2023, 10, 12), // Sun 12 Nov 2023, Muhurat
-  Date.UTC(2024, 0, 20), // Sat 20 Jan 2024, special session
-  Date.UTC(2024, 2, 2), // Sat 2 Mar 2024, special session (DR site)
-  Date.UTC(2024, 4, 18), // Sat 18 May 2024, special session (DR site)
-  Date.UTC(2025, 1, 1), // Sat 1 Feb 2025, Union Budget
-  Date.UTC(2026, 1, 1), // Sun 1 Feb 2026, Union Budget
-  Date.UTC(2026, 10, 8), // Sun 8 Nov 2026, Muhurat
-];
+export const WEEKEND_SESSIONS: readonly number[] = [...calendar().listedSessions.keys()].filter((day) => !isWeekday(day)).sort((a, b) => a - b);
 
 /**
  * Sessions whose file NSE's archive doesn't have (every URL tried answers
@@ -116,18 +109,19 @@ export const ISIN_FROM = Date.UTC(2011, 0, 1);
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
 /**
- * Trading days from `from` through `today` (day keys) that still need a
- * download, newest first: weekdays plus WEEKEND_SESSIONS (every weekend day with
- * `weekends`, for history where NSE's Budget-day and Muhurat sessions aren't
- * listed). Today counts only after `publishMin`. `recheck` lists statuses worth
- * asking again. Pure.
+ * Days from `from` through `today` (day keys) that still need a download,
+ * newest first: weekdays plus the weekend days the calendar has a session on
+ * (every weekend day with `weekends`, for history where NSE's Budget-day and
+ * Muhurat sessions aren't listed). Listed holidays stay in: importDay records
+ * them without asking NSE. Today counts only after `publishMin`. `recheck`
+ * lists statuses worth asking again. Pure, given the calendar.
  */
 export function daysToCheck(params: { today: number; minutes: number; from: number; publishMin: number; checked: ReadonlyMap<number, string>; recheck?: readonly string[]; weekends?: boolean }): number[] {
   const { today, minutes, from, publishMin, checked, recheck = [], weekends = false } = params;
   const out: number[] = [];
   for (let day = today; day >= from; day -= DAY_MS) {
     const weekday = new Date(day).getUTCDay();
-    if ((weekday === 0 || weekday === 6) && !weekends && !WEEKEND_SESSIONS.includes(day)) continue;
+    if ((weekday === 0 || weekday === 6) && !weekends && !calendar().isTradingDay(day)) continue;
     if (day === today && minutes < publishMin) continue;
     const status = checked.get(day);
     if (status === undefined || recheck.includes(status)) out.push(day);
@@ -340,8 +334,18 @@ export async function importCorporateActions(ctx: NseContext, day: number): Prom
 
 const DAY_URL: Record<DayDataset, (archiveUrl: string, day: number) => string> = { cash_bhav: cashBhavUrl, fo_bhav: foBhavUrl, pr: prUrl, index_close: indexCloseUrl };
 
-/** Download, check and store one day. Throws NseError when NSE won't serve it. */
+/**
+ * Download, check and store one day. A day the calendar lists as an exchange
+ * holiday (NSE's list, or `hub data calendar`) is recorded as one without
+ * asking NSE, whose archive answers such days with another day's file.
+ * Throws NseError when NSE won't serve it.
+ */
 export async function importDay(ctx: NseContext, dataset: DayDataset, day: number, options: ImportOptions = {}): Promise<DayOutcome> {
+  if (isListedHoliday(calendar(), day)) {
+    markDay(ctx.db, dataset, day, "holiday", 0, ctx.clock(), CALENDAR_NOTE);
+    ctx.log.debug("exchange holiday: NSE not asked", { dataset, day: isoDay(day), holiday: calendar().info(day).name });
+    return "holiday";
+  }
   const url = DAY_URL[dataset](ctx.urls.archiveUrl, day);
   const response = await ctx.nse.get(url);
   const today = istParts(ctx.clock()).day;

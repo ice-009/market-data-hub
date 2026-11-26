@@ -1,4 +1,5 @@
-import { MINUTE_MS, SESSION_CLOSE_MIN, SESSION_OPEN_MIN, istDayKey, istDayStart, isMarketOpen } from "../time.js";
+import { isMarketOpen, sessionHoursOf } from "../calendar/calendar.js";
+import { MINUTE_MS, istDayKey, istDayStart } from "../time.js";
 import type { MinuteBar, Tick } from "./types.js";
 
 // Ticks → 1-minute bars (no I/O; the store owns the state between calls).
@@ -15,9 +16,11 @@ import type { MinuteBar, Tick } from "./types.js";
 //            charts do); a first tick later in the day (the hub started
 //            mid-session) adds 0, because the minute it came from is unknown —
 //            recovery replaces those minutes with broker bars.
-//   session  only ticks inside 09:15–15:30 IST on weekdays make bars (ticks
-//            outside it are still kept as last quotes by the store). Pre-open
-//            ticks leave the baseline alone so their volume reaches 09:15.
+//   session  only ticks inside a session make bars: 09:15–15:30 IST on trading
+//            days, a special session's own hours (src/calendar), none on exchange
+//            holidays (ticks outside are still kept as last quotes by the
+//            store). Pre-open ticks leave the baseline alone so their volume
+//            reaches the open.
 //
 // A few recent minutes stay open in memory so a tick delayed by network jitter
 // still folds into its own minute; older ones are final and later ticks for
@@ -51,10 +54,11 @@ export const minuteOf = (time: number) => Math.floor(time / MINUTE_MS) * MINUTE_
 /** The tick's trade time, falling back to receipt time when the broker sent none. */
 export const tradeTime = (tick: Tick) => (Number.isFinite(tick.ltt) && tick.ltt > 0 ? tick.ltt : tick.ts);
 
-/** Session [open, close) of an IST day key. */
+/** Session [open, close) of an IST day key (the regular hours on a day without one). */
 export function sessionOf(dayKey: number): { from: number; to: number } {
   const start = istDayStart(dayKey);
-  return { from: start + SESSION_OPEN_MIN * MINUTE_MS, to: start + SESSION_CLOSE_MIN * MINUTE_MS };
+  const hours = sessionHoursOf(dayKey);
+  return { from: start + hours.open * MINUTE_MS, to: start + hours.close * MINUTE_MS };
 }
 
 /** Set the volume baseline for a symbol's first sight of `day` at trade time `ltt`. */

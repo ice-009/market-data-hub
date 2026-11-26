@@ -5,7 +5,8 @@ import { BACKFILL_TFS, BASE, finalBefore, type BaseTf } from "../history/timefra
 import type { Logger } from "../log.js";
 import type { DayDataset } from "../nse/store.js";
 import { getUniverse } from "../reference/universe.js";
-import { DAY_MS, MINUTE_MS, SESSION_CLOSE_MIN, istDayStart, istParts, isMarketOpen } from "../time.js";
+import { isMarketOpen, sessionHoursOf } from "../calendar/calendar.js";
+import { DAY_MS, MINUTE_MS, istDayStart, istParts } from "../time.js";
 
 // History backfills (`hub data backfill`): fill the store with N years of a
 // base timeframe for a list of symbols (default: the F&O stocks plus the main
@@ -147,7 +148,7 @@ export function updateJob(db: Db, id: number, fields: Partial<Pick<Job, "state" 
 /** When a paused job may continue: after today's close in market hours; after the IST day rolls over when the budget is spent. */
 export function resumeTime(reason: "market" | "budget" | "rate_limited" | "auth" | "failures" | "disk", now: number): number {
   const { day } = istParts(now);
-  if (reason === "market") return istDayStart(day) + (SESSION_CLOSE_MIN + 5) * MINUTE_MS;
+  if (reason === "market") return istDayStart(day) + (sessionHoursOf(day).close + 5) * MINUTE_MS;
   if (reason === "budget") return istDayStart(day + DAY_MS) + 5 * MINUTE_MS;
   if (reason === "rate_limited") return now + 2 * MINUTE_MS;
   if (reason === "disk") return now + 30 * MINUTE_MS;

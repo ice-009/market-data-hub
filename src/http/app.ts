@@ -3,12 +3,14 @@ import { Hono } from "hono";
 import { verifyKey } from "../auth/keys.js";
 import { RateLimiter } from "../auth/rateLimit.js";
 import type { Db } from "../db.js";
+import { calendarStatus } from "../calendar/calendar.js";
 import { hubHealth } from "../health.js";
 import type { Hub } from "../hub.js";
 import type { Logger } from "../log.js";
 import { brokerStatus, dataFreshness, dataMode, dataQuality, diskStatus, recentJobs } from "../status.js";
 import { errorBody, type HubEnv } from "./common.js";
 import { adjustmentRoutes } from "./routes/adjustments.js";
+import { calendarRoutes } from "./routes/calendar.js";
 import { candleRoutes } from "./routes/candles.js";
 import { pointInTimeRoutes } from "./routes/pointInTime.js";
 import { qualityRoutes } from "./routes/quality.js";
@@ -67,7 +69,8 @@ export function createApp(deps: AppDeps) {
       dbBytes = null;
     }
     const liveNow = liveStatus(live);
-    const health = hubHealth(deps.hub, liveNow.feed);
+    const now = deps.hub.clock();
+    const health = hubHealth(deps.hub, liveNow.feed, now);
     const strict = ["1", "true"].includes(c.req.query("strict") ?? "");
     const unhealthy = strict && !health.healthy ? { ...errorBody(`Unhealthy: ${health.problems.join(" ")}`, "unhealthy") } : {};
     return c.json({
@@ -79,6 +82,8 @@ export function createApp(deps: AppDeps) {
       time: Date.now(),
       uptimeSec: Math.round((Date.now() - deps.startedAt) / 1000),
       key: { name: c.get("apiKey").name, scopes: c.get("apiKey").scopes },
+      // hubHealth synced the calendar with the database just now.
+      calendar: calendarStatus(now),
       broker: brokerStatus(deps.hub),
       data: { dbBytes, ...dataFreshness(deps.db) },
       quality: dataQuality(deps.db),
@@ -97,6 +102,7 @@ export function createApp(deps: AppDeps) {
   pointInTimeRoutes(app, deps.hub);
   adjustmentRoutes(app, deps.hub);
   referenceRoutes(app, deps.hub);
+  calendarRoutes(app, deps.hub);
   symbolRoutes(app, deps.hub);
   qualityRoutes(app, deps.hub);
   // The live routes share one fan-out per hub (keyed on hub.live.deps); the hub closes their streams at shutdown.

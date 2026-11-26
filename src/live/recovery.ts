@@ -3,7 +3,8 @@ import { BrokerError } from "../broker/errors.js";
 import type { HistoryResult, Resolution } from "../broker/fyers.js";
 import { readKv, writeKv, type Db } from "../db.js";
 import type { Logger } from "../log.js";
-import { DAY_MS, MINUTE_MS, SESSION_OPEN_MIN, istDayKey, istParts, isWeekday, sleep as realSleep, weekdayOnOrBefore } from "../time.js";
+import { isTradingDay, latestSessionDay as calendarLatestSessionDay, tradingDayOnOrBefore } from "../calendar/calendar.js";
+import { DAY_MS, MINUTE_MS, istDayKey, sleep as realSleep } from "../time.js";
 import { minuteOf, sessionOf } from "./aggregate.js";
 import type { PreviousRun, SqliteLiveStore } from "./store.js";
 import type { MinuteBar, MinuteHistoryFetcher } from "./types.js";
@@ -21,8 +22,9 @@ import type { MinuteBar, MinuteHistoryFetcher } from "./types.js";
 // newest day first, at background priority, spaced `minIntervalMs` apart
 // (4 s → 15 a minute, inside the ~20/minute background share of the budget even
 // before the gate's own checks): 100 symbols after a restart take ~7 minutes.
-// A weekday that turns out to be a holiday (the first few long fetches all
-// come back empty) is dropped instead of being asked for every symbol.
+// Exchange holidays the calendar knows (src/calendar) have no session to repair;
+// a weekday that turns out to be an unlisted holiday (the first few long
+// fetches all come back empty) is dropped instead of being asked for every symbol.
 //
 // Resumable and idempotent: planned work is kept in kv ("live.recovery") and a
 // task is removed only once its bars are written, so a crash part-way just
@@ -70,16 +72,13 @@ interface Saved {
 
 // ── Planning (pure) ─────────────────────────────────────────────────────────
 
-/** The latest session that has started by `now` (IST day key). Exchange holidays aren't known. */
-export function latestSessionDay(now: number): number {
-  const { day, minutes } = istParts(now);
-  return isWeekday(day) && minutes >= SESSION_OPEN_MIN ? day : weekdayOnOrBefore(day - DAY_MS);
-}
+/** The latest session that has started by `now` (IST day key), skipping the calendar's holidays. */
+export const latestSessionDay = (now: number): number => calendarLatestSessionDay(now);
 
 /** Open of the oldest of the latest `sessions` sessions: recovery reaches back no further. */
 export function recoveryWindowStart(now: number, sessions: number): number {
   let day = latestSessionDay(now);
-  for (let i = 1; i < sessions; i += 1) day = weekdayOnOrBefore(day - DAY_MS);
+  for (let i = 1; i < sessions; i += 1) day = tradingDayOnOrBefore(day - DAY_MS);
   return sessionOf(day).from;
 }
 
@@ -96,14 +95,14 @@ export function downtimeStart(previous: PreviousRun): number | null {
   return minuteOf(lastTickAt);
 }
 
-/** [from, to) cut into per-day session slices (weekdays 09:15–15:30 IST), minute-aligned, newest first. */
+/** [from, to) cut into per-day session slices (trading days' sessions, src/calendar), minute-aligned, newest first. */
 export function sessionSlices(from: number, to: number): Array<{ day: number; from: number; to: number }> {
   const start = minuteOf(from);
   const end = Math.ceil(to / MINUTE_MS) * MINUTE_MS;
   const out: Array<{ day: number; from: number; to: number }> = [];
   if (start >= end) return out;
   for (let day = istDayKey(end - 1); day >= istDayKey(start); day -= DAY_MS) {
-    if (!isWeekday(day)) continue;
+    if (!isTradingDay(day)) continue;
     const session = sessionOf(day);
     const slice = { day, from: Math.max(start, session.from), to: Math.min(end, session.to) };
     if (slice.from < slice.to) out.push(slice);

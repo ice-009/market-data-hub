@@ -12,6 +12,7 @@ import { CashScanner, actionLike, brokerFindings, calendarFindings, candleGapFin
 import { logFindings, runQuality } from "../src/quality/run.js";
 import { readFindings, saveFindings, type Finding } from "../src/quality/store.js";
 import { DAY_MS, isWeekday, parseIsoDay } from "../src/time.js";
+import { Calendar, calendar, setCalendar } from "../src/calendar/calendar.js";
 import { ist, makeHub, type TestHub } from "./support/hub.js";
 
 // Data-quality monitors (ice-009/tradex-public#21): the pure checks, the
@@ -201,8 +202,16 @@ describe("data quality: findings storage", () => {
 
 describe("data quality: the runner", () => {
   let t: TestHub;
-  beforeEach(() => (t = makeHub()));
-  afterEach(() => t.cleanup());
+  // Synthetic sessions on every weekday: a calendar without NSE's holiday lists (2026's would disagree with them), special sessions kept.
+  const listed = calendar();
+  beforeEach(() => {
+    setCalendar(new Calendar(listed.lists.map((list) => ({ ...list, holidays: null }))));
+    t = makeHub();
+  });
+  afterEach(() => {
+    t.cleanup();
+    setCalendar(listed);
+  });
 
   const DAYS = sessions("2026-11-18", 45);
   const fo = (day: number, symbol: string, lot: number): FoDayRecord => ({ day, symbol, nseSymbol: symbol, expiries: 3, lot, underlying: 100, near: { expiry: day + 7 * DAY_MS, close: 100, settle: 100, prevClose: 100, volume: 1, oi: 1, chgOi: 0 }, next: null, oi: 1, chgOi: 0 });
