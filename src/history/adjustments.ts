@@ -1,3 +1,4 @@
+import type { Statement } from "better-sqlite3";
 import { readKv, writeKv, type Db } from "../db.js";
 import { WEEKEND_SESSIONS } from "../nse/datasets.js";
 import { rightsTerms } from "../nse/parsers/corporateActions.js";
@@ -27,6 +28,20 @@ import { resetSymbol } from "./store.js";
 //                     adjusted: checked on TATASTEEL's 1:10 split, 28 Jul 2022,
 //                     in the old cash file; ANGELONE's, 26 Feb 2026, in the new
 //                     one and in the UDiFF bhavcopy; CUB's bonus, 12 Jun 2026.
+//                     Taken only when
+//                       both sessions are in the same series: each series has
+//                         its own PREVCLOSE, and cash_bhav keeps one row a day
+//                         (EQ, else BE) — in 2000–02 many stocks traded in both,
+//                         so the stored row switched series from day to day
+//                         (SRTRANSFIN 11 Oct 2001: EQ 7.4 stored, BE 7.2; on
+//                         12 Oct only BE, PREVCLOSE 7.2) (#53);
+//                       and the bc file lists an action for the ticker that
+//                         day, or the factor is a standard ratio
+//                         (PREV_CLOSE_RATIOS) on a day whose file isn't off
+//                         for many tickers at once (NOISY_DAY_MIN: on 1 Mar
+//                         1997 PREVCLOSE is off for 814 — RELIANCE 272.2
+//                         against a 293.75 close — and on a dozen more days of
+//                         the 1995–2002 files).
 //   corporate_action  NSE's corporate-actions file (the PR zip's bc file, from
 //                     2010; src/nse/parsers/corporateActions.ts) for this ticker
 //                     and ex-date has
@@ -38,12 +53,18 @@ import { resetSymbol } from "./store.js";
 //                         left in a special pre-open session);
 //                       a rights issue with its price: the theoretical
 //                         ex-rights price over the last close.
-//   price_gap         no bc file was read for the week before the ex-date
-//                     (before 2010, or PR zips not downloaded): an opening gap
-//                     near a standard ratio (STANDARD_RATIOS; inferRatio) — a
-//                     move a price band or a normal day doesn't make — is taken
-//                     for that ratio. Where a bc file was read and lists
-//                     nothing, a gap is just a gap.
+//   price_gap         the bc file lists nothing for this ticker within
+//                     BC_NEAR_DAYS of the ex-date (before 2010 there is no bc
+//                     file; after, NSE's files still miss some: SHRIRAMFIN's
+//                     1:5 split, 10 Jan 2025, is in none of them) (#54): an
+//                     opening gap near a standard ratio (STANDARD_RATIOS;
+//                     inferRatio) — a move a price band or a normal day doesn't
+//                     make — far outside the stock's own daily moves
+//                     (GAP_SIGMAS × the stdev of its last VOL_WINDOW daily log
+//                     returns: in 1998–2001 a 25–50% move in one trade was an
+//                     ordinary day for many penny stocks) is taken for that
+//                     ratio. Where the bc file lists something else for the
+//                     ticker near the date, a gap is just a gap.
 //
 // Renamed tickers (src/reference/renames.ts): a pair is never formed across a
 // rename of its ticker (the ticker may have passed to another company), and the
@@ -74,8 +95,23 @@ const NARROW = { open: Math.log(1.06), close: Math.log(1.2) };
 const INFER_MAX_GAP_MS = 15 * DAY_MS;
 const CONFIRM = Math.log(1.25);
 const SMALL_FACTOR = Math.log(1.15);
-/** A bc file this many days before an ex-date (or on it) lists the action. */
-export const BC_LOOKBACK_DAYS = 7;
+/** A bc row for a ticker this many days either side of a gap: the bc file speaks for it, so the gap isn't read as a ratio. */
+export const BC_NEAR_DAYS = 7;
+/**
+ * The ratios an adjusted PREV_CLOSE is taken for without a bc row: the
+ * standard ones and the bonuses 1:4, 1:5 and 1:10 (NSE's PREV_CLOSE is exact,
+ * so they must match within PREV_CLOSE_MATCH).
+ */
+export const PREV_CLOSE_RATIOS: readonly number[] = [...STANDARD_RATIOS, 4 / 5, 5 / 6, 10 / 11];
+const PREV_CLOSE_MATCH = Math.log(1.01);
+/** A day on which at least this many tickers' PREV_CLOSE differs from their previous close (same series, within INFER_MAX_GAP_MS): a glitch in the file. */
+export const NOISY_DAY_MIN = 5;
+/** A gap is taken for a ratio only beyond this many times the stock's daily volatility … */
+export const GAP_SIGMAS = 6;
+/** … the stdev of its last VOL_WINDOW daily log returns (at least VOL_MIN_RETURNS of them; fewer: only a halving or more), floored. */
+export const VOL_WINDOW = 20;
+const VOL_MIN_RETURNS = 5;
+const SIGMA_FLOOR = 0.01;
 
 export type FactorSource = "prev_close" | "corporate_action" | "price_gap";
 export const FACTOR_SOURCES: readonly FactorSource[] = ["prev_close", "corporate_action", "price_gap"];
@@ -102,6 +138,7 @@ export interface Factor {
 interface CashRow {
   symbol: string;
   day: number;
+  series: string;
   prev_close: number;
   o: number;
   c: number;
@@ -154,27 +191,59 @@ function rightsFactor(actions: readonly StoredCorporateAction[], close: number):
   return null;
 }
 
+/** A halving or more, or a doubling: no market move. */
+const wide = (ratio: number) => ratio <= 0.5 || ratio >= 2;
+
 /** The standard ratio a gap is, or null. Pure. */
 export function inferRatio(openGap: number, closeGap: number): number | null {
   if (!(openGap > 0) || !(closeGap > 0)) return null;
   // The nearest ratio to the open, then whether open and close are near enough.
   let ratio = STANDARD_RATIOS[0];
   for (const candidate of STANDARD_RATIOS) if (Math.abs(Math.log(openGap / candidate)) < Math.abs(Math.log(openGap / ratio))) ratio = candidate;
-  const window = ratio <= 0.5 || ratio >= 2 ? WIDE : NARROW;
+  const window = wide(ratio) ? WIDE : NARROW;
   return Math.abs(Math.log(openGap / ratio)) < window.open && Math.abs(Math.log(closeGap / ratio)) < window.close ? ratio : null;
+}
+
+/** The standard ratio an adjusted PREV_CLOSE is, or null. Pure. */
+export function prevCloseRatio(nse: number): number | null {
+  if (!(nse > 0)) return null;
+  for (const ratio of PREV_CLOSE_RATIOS) if (Math.abs(Math.log(nse / ratio)) < PREV_CLOSE_MATCH) return ratio;
+  return null;
+}
+
+/** Stdev of daily log returns, or null when there are too few. Pure. */
+export function volatility(returns: readonly number[]): number | null {
+  if (returns.length < VOL_MIN_RETURNS) return null;
+  const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+  return Math.sqrt(returns.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (returns.length - 1));
+}
+
+/** Is a move to `ratio` beyond a normal day for a stock with this volatility? Unknown (undefined): yes; too little history (null): only a halving or more (or a doubling). */
+function beyondNormal(ratio: number, sigma: number | null | undefined): boolean {
+  if (sigma === undefined) return true;
+  if (sigma === null) return wide(ratio);
+  return Math.abs(Math.log(ratio)) >= GAP_SIGMAS * Math.max(sigma, SIGMA_FLOOR);
 }
 
 export interface PairContext {
   /** The corporate-actions file's rows for this ticker (and, across a rename, the old one) with this ex-date. */
   actions: readonly StoredCorporateAction[];
-  /** Was a bc file read for the days before the ex-date? */
+  /** Does the bc file list anything for this ticker within BC_NEAR_DAYS of the ex-date? */
+  listedNear: boolean;
+  /** Was a bc file read for the days before the ex-date (BC_NEAR_DAYS)? Silent for this ticker, it leaves only a halving or more to infer. */
   bcCovered: boolean;
   /** Across a rename: only NSE's own word (PREV_CLOSE, the bc file) counts. */
   acrossRename: boolean;
+  /** Is the day's file's PREV_CLOSE off for many tickers at once (NOISY_DAY_MIN)? */
+  noisyDay?: boolean;
+  /** The stock's daily volatility before the pair (volatility()); null: too little history; undefined: not measured. */
+  sigma?: number | null;
 }
 
+type PairRow = { day: number; c: number; series?: string };
+
 /** The factor for one pair of consecutive sessions, or null. Pure. */
-export function decideFactor(prev: { day: number; c: number }, row: { symbol: string; day: number; prev_close: number; o: number; c: number }, context: PairContext): Factor | null {
+export function decideFactor(prev: PairRow, row: PairRow & { symbol: string; prev_close: number; o: number }, context: PairContext): Factor | null {
   if (!(prev.c > 0) || !(row.c > 0)) return null;
   const purposes = [...new Set(context.actions.map((action) => action.purpose))];
   const base = { symbol: row.symbol, day: row.day, prevDay: prev.day, prevC: prev.c, prevClose: row.prev_close, o: row.o, c: row.c, action: purposes.length ? purposes.join(" · ") : null, renamedFrom: null };
@@ -188,15 +257,19 @@ export function decideFactor(prev: { day: number; c: number }, row: { symbol: st
   const nse = row.prev_close > 0 ? row.prev_close / prev.c : 1;
   // An adjusted PREV_CLOSE the opening price doesn't bear out is a slip in the file (seen: VERTOZ, 11 Jul 2025, a 1→10 consolidation printed 9.81 for 9.17).
   // Only between sessions close together: after weeks without a row (FORCEMOT, Oct 2023 – Feb 2024) PREV_CLOSE is a close the store doesn't have.
-  if (Math.abs(nse - 1) > SPLIT_TOLERANCE && confirmed(nse) && row.day - prev.day <= INFER_MAX_GAP_MS) return { ...base, factor: nse, source: "prev_close" };
+  // Only within one series (BE's PREVCLOSE is BE's last close), and only what the bc file lists or a standard ratio on a day the file is otherwise right.
+  const sameSeries = prev.series === undefined || row.series === undefined || prev.series === row.series;
+  const nseAction = context.actions.length > 0 || (prevCloseRatio(nse) !== null && !context.noisyDay);
+  if (sameSeries && Math.abs(nse - 1) > SPLIT_TOLERANCE && confirmed(nse) && row.day - prev.day <= INFER_MAX_GAP_MS && nseAction) return { ...base, factor: nse, source: "prev_close" };
   const ratio = actionRatio(context.actions);
   if (ratio !== null) return confirmed(ratio) ? { ...base, factor: ratio, source: "corporate_action" } : null;
   if (context.actions.some((action) => action.kinds.includes("demerger")) && gap < 1 - SPLIT_TOLERANCE) return { ...base, factor: gap, source: "corporate_action" };
   const rights = rightsFactor(context.actions, prev.c);
   if (rights !== null) return { ...base, factor: rights, source: "corporate_action" };
-  if (context.acrossRename || context.bcCovered || row.day - prev.day > INFER_MAX_GAP_MS || !inferable(row.symbol, prev.c)) return null;
+  if (context.acrossRename || context.listedNear || row.day - prev.day > INFER_MAX_GAP_MS || !inferable(row.symbol, prev.c)) return null;
   const inferred = inferRatio(gap, row.c / prev.c);
-  return inferred === null ? null : { ...base, factor: inferred, source: "price_gap" };
+  if (inferred !== null && context.bcCovered && !wide(inferred)) return null;
+  return inferred === null || !beyondNormal(inferred, context.sigma) ? null : { ...base, factor: inferred, source: "price_gap" };
 }
 
 /**
@@ -207,12 +280,16 @@ export function decideFactor(prev: { day: number; c: number }, row: { symbol: st
 const inferable = (symbol: string, price: number) => price >= MIN_INFER_PRICE && !/-RE\d*$/.test(symbol);
 const MIN_INFER_PRICE = 2;
 
-/** What deriving needs to know besides the two rows: checked days, bc coverage, actions, renames. */
+/** What deriving needs to know besides the two rows: checked days, the bc file's rows, renames, days PREV_CLOSE is off. */
 class Derivation {
   private readonly unchecked: number[];
   private readonly bcDays: number[];
   private readonly actions = new Map<string, StoredCorporateAction[]>();
+  /** Each ticker's ex-dates in the bc file (any action), sorted. */
+  private readonly listed = new Map<string, number[]>();
   private readonly renameDays = new Map<string, number[]>();
+  private readonly noisy = new Map<number, boolean>();
+  private readonly mismatches: Statement;
 
   constructor(
     db: Db,
@@ -232,14 +309,23 @@ class Derivation {
     }
     this.unchecked = unchecked;
     this.bcDays = sorted((db.prepare("select day from corporate_action_days").all() as Array<{ day: number }>).map((row) => row.day));
-    for (const action of readCorporateActions(db, from, to)) {
+    const near = BC_NEAR_DAYS * DAY_MS;
+    for (const action of readCorporateActions(db, Math.max(MIN_DAY, from - near), Math.min(MAX_DAY, to + near))) {
       const key = `${action.symbol}|${action.exDay}`;
       this.actions.set(key, [...(this.actions.get(key) ?? []), action]);
+      this.listed.set(action.symbol, [...(this.listed.get(action.symbol) ?? []), action.exDay]);
     }
+    for (const list of this.listed.values()) list.sort((a, b) => a - b);
     for (const change of renames.changes) {
       for (const symbol of [change.oldSymbol, change.newSymbol]) this.renameDays.set(symbol, [...(this.renameDays.get(symbol) ?? []), change.day]);
     }
     for (const list of this.renameDays.values()) list.sort((a, b) => a - b);
+    // Tickers whose PREV_CLOSE on a day isn't their previous close in the same series, within INFER_MAX_GAP_MS.
+    this.mismatches = db.prepare(
+      `select count(*) from cash_bhav r
+       join cash_bhav p on p.symbol = r.symbol and p.day = (select max(q.day) from cash_bhav q where q.symbol = r.symbol and q.day < r.day)
+       where r.day = ? and p.series = r.series and r.day - p.day <= ? and p.c > 0 and r.prev_close > 0 and abs(r.prev_close / p.c - 1) > ?`,
+    ).pluck();
   }
 
   /** Every trading day strictly between a and b checked? */
@@ -247,13 +333,25 @@ class Derivation {
     return !anyBetween(this.unchecked, a + DAY_MS, b - DAY_MS);
   }
 
-  pair(prev: CashRow, row: CashRow, renamedFrom: string | null): Factor | null {
+  /** Is the day's PREV_CLOSE off for many tickers at once? Asked only for days with a candidate, and remembered. */
+  private noisyDay(day: number): boolean {
+    let noisy = this.noisy.get(day);
+    if (noisy === undefined) {
+      noisy = (this.mismatches.get(day, INFER_MAX_GAP_MS, SPLIT_TOLERANCE) as number) >= NOISY_DAY_MIN;
+      this.noisy.set(day, noisy);
+    }
+    return noisy;
+  }
+
+  pair(prev: CashRow, row: CashRow, renamedFrom: string | null, sigma?: number | null): Factor | null {
     if (!this.consecutive(prev.day, row.day)) return null;
     // A rename of this ticker between the two sessions: they may not even be one company.
     if (renamedFrom === null && anyBetween(this.renameDays.get(row.symbol) ?? [], prev.day + 1, row.day)) return null;
     const actions = [...(this.actions.get(`${row.symbol}|${row.day}`) ?? []), ...(renamedFrom ? (this.actions.get(`${renamedFrom}|${row.day}`) ?? []) : [])];
-    const bcCovered = anyBetween(this.bcDays, row.day - BC_LOOKBACK_DAYS * DAY_MS, row.day);
-    const factor = decideFactor(prev, row, { actions, bcCovered, acrossRename: renamedFrom !== null });
+    const near = BC_NEAR_DAYS * DAY_MS;
+    const listedNear = [row.symbol, ...(renamedFrom ? [renamedFrom] : [])].some((symbol) => anyBetween(this.listed.get(symbol) ?? [], row.day - near, row.day + near));
+    const candidate = !actions.length && prev.series === row.series && prev.c > 0 && row.prev_close > 0 && Math.abs(row.prev_close / prev.c - 1) > SPLIT_TOLERANCE;
+    const factor = decideFactor(prev, row, { actions, listedNear, bcCovered: anyBetween(this.bcDays, row.day - near, row.day), acrossRename: renamedFrom !== null, noisyDay: candidate && this.noisyDay(row.day), sigma });
     return factor && renamedFrom ? { ...factor, renamedFrom } : factor;
   }
 }
@@ -284,19 +382,34 @@ export function deriveFactors(db: Db, options: DeriveOptions = {}): DeriveResult
   const derivation = new Derivation(db, renames, from, to);
   const wanted = options.symbols ? new Set(options.symbols) : null;
   const symbols = options.symbols ?? (db.prepare("select distinct symbol from cash_bhav where day between ? and ?").pluck().all(from, to) as string[]);
-  const rowsOf = db.prepare("select symbol, day, prev_close, o, c from cash_bhav where symbol = ? and day between ? and ? order by day");
-  const before = db.prepare("select symbol, day, prev_close, o, c from cash_bhav where symbol = ? and day < ? order by day desc limit 1");
-  const firstFrom = db.prepare("select symbol, day, prev_close, o, c from cash_bhav where symbol = ? and day >= ? order by day limit 1");
+  const columns = "symbol, day, series, prev_close, o, c";
+  const rowsOf = db.prepare(`select ${columns} from cash_bhav where symbol = ? and day between ? and ? order by day`);
+  const before = db.prepare(`select ${columns} from cash_bhav where symbol = ? and day < ? order by day desc limit 1`);
+  const firstFrom = db.prepare(`select ${columns} from cash_bhav where symbol = ? and day >= ? order by day limit 1`);
+  // The sessions before the range, to measure the stock's volatility from: their stored factors' days left out.
+  const warmUp = db.prepare(`select day, c from cash_bhav where symbol = ? and day < ? order by day desc limit ${VOL_WINDOW + 1}`);
+  const storedDays = db.prepare("select day from adjustment_factors where symbol = ? and day between ? and ?").pluck();
 
   const factors: Factor[] = [];
   for (const symbol of symbols) {
     const rows = rowsOf.all(symbol, from, to) as CashRow[];
     if (!rows.length) continue;
     let prev = (before.get(symbol, rows[0].day) as CashRow | undefined) ?? null;
+    const returns: number[] = [];
+    if (prev) {
+      const earlier = (warmUp.all(symbol, rows[0].day) as Array<{ day: number; c: number }>).reverse();
+      const skip = new Set(earlier.length ? (storedDays.all(symbol, earlier[0].day, earlier[earlier.length - 1].day) as number[]) : []);
+      for (let i = 1; i < earlier.length; i += 1) if (!skip.has(earlier[i].day) && earlier[i].c > 0 && earlier[i - 1].c > 0) returns.push(Math.log(earlier[i].c / earlier[i - 1].c));
+    }
     for (const row of rows) {
       if (prev) {
-        const factor = derivation.pair(prev, row, null);
+        const factor = derivation.pair(prev, row, null, volatility(returns));
         if (factor) factors.push(factor);
+        // A factor's own move stays out of the volatility, like a move across weeks without a session.
+        else if (prev.c > 0 && row.c > 0 && row.day - prev.day <= INFER_MAX_GAP_MS) {
+          returns.push(Math.log(row.c / prev.c));
+          if (returns.length > VOL_WINDOW) returns.shift();
+        }
       }
       prev = row;
     }
@@ -410,7 +523,7 @@ export function factorStats(db: Db): FactorStats {
 }
 
 /** Bump when the derivation changes: the server derives every factor again on its next start. */
-export const ADJUSTMENT_VERSION = 1;
+export const ADJUSTMENT_VERSION = 2;
 const KV_KEY = "adjustments";
 
 export interface AdjustmentRun {

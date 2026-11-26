@@ -77,7 +77,7 @@ describe("data quality: price outliers and repeated files", () => {
     const rows: CashRow[] = [];
     let prev = walk(0);
     days.forEach((day, i) => {
-      const base: CashRow = { symbol: "ACME", day, prevClose: prev, o: prev, h: prev * 1.01, l: prev * 0.99, c: walk(i), v: 1000 + i };
+      const base: CashRow = { symbol: "ACME", day, series: "EQ", prevClose: prev, o: prev, h: prev * 1.01, l: prev * 0.99, c: walk(i), v: 1000 + i };
       const row = i === days.length - 1 ? { ...base, ...last(prev) } : base;
       rows.push(row);
       prev = row.c;
@@ -96,6 +96,8 @@ describe("data quality: price outliers and repeated files", () => {
   it("leaves alone moves a corporate action explains: NSE's PREV_CLOSE, an F&O lot change, or the hook", () => {
     // PREV_CLOSE adjusted for a 1:2 split: the close is only 1% under it.
     expect(feed(40, (prev) => ({ prevClose: prev / 2, c: (prev / 2) * 0.99 }))).toEqual([]);
+    // …but not one from another series: BE's PREV_CLOSE is BE's own last close (market-data-hub#53).
+    expect(feed(40, (prev) => ({ series: "BE", prevClose: prev / 2, c: (prev / 2) * 0.99 }))).toMatchObject([{ detail: { adjustedBy: null, actionLike: "1/2" } }]);
     // An F&O lot that doubled the same day.
     const day = d("2026-11-18");
     expect(feed(40, (prev) => ({ c: prev * 0.5 }), { lotFactors: new Map([[`ACME|${day}`, 0.5]]) })).toEqual([]);

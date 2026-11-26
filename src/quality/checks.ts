@@ -200,6 +200,8 @@ export type CorporateActionHook = (symbol: string, day: number) => { factor: num
 export interface CashRow {
   symbol: string;
   day: number;
+  /** EQ or BE: each series has its own PREV_CLOSE. */
+  series?: string;
   prevClose: number;
   o: number;
   h: number;
@@ -354,7 +356,9 @@ export class CashScanner {
   private explain(row: CashRow, prev: CashRow, raw: number): { factor: number; source: string } | null {
     const hooked = this.options.corporateAction?.(row.symbol, row.day);
     if (hooked && hooked.factor > 0) return hooked;
-    if (row.prevClose > 0 && Math.abs(row.prevClose / prev.c - 1) > PREV_CLOSE_TOLERANCE) return { factor: row.prevClose / prev.c, source: "PREV_CLOSE" };
+    // A PREV_CLOSE from another series is that series' last close, not an adjustment (src/history/adjustments.ts, #53).
+    const sameSeries = row.series === undefined || prev.series === undefined || row.series === prev.series;
+    if (sameSeries && row.prevClose > 0 && Math.abs(row.prevClose / prev.c - 1) > PREV_CLOSE_TOLERANCE) return { factor: row.prevClose / prev.c, source: "PREV_CLOSE" };
     const lot = this.options.lotFactors?.get(`${row.symbol}|${row.day}`);
     if (lot && Math.abs(Math.log(raw) - Math.log(lot)) <= LOT_AGREEMENT) return { factor: lot, source: "F&O lot change" };
     return null;

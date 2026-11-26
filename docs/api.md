@@ -546,14 +546,14 @@ consecutive sessions of a ticker gets a factor from the first of these that appl
 
 | `source` | When | Factor |
 |---|---|---|
-| `prev_close` | the file's `PREV_CLOSE` differs from the previous close by over 1.5%, the open bears it out, and the sessions are at most 15 days apart | `PREV_CLOSE / close(d−1)` (NSE's own adjustment) |
+| `prev_close` | the file's `PREV_CLOSE` differs from the previous close by over 1.5%, the open bears it out, the sessions are at most 15 days apart and in the same series (EQ or BE: each has its own `PREV_CLOSE`), and either the `bc` file lists an action for the ticker that day or the factor is a standard ratio (those below, and 4/5, 5/6, 10/11, within 1%) on a day the file's `PREV_CLOSE` isn't off for 5 or more tickers at once (1 Mar 1997, and a dozen more days of the 1995–2002 files) | `PREV_CLOSE / close(d−1)` (NSE's own adjustment) |
 | `corporate_action` | NSE's corporate-actions file (the PR zip's `bc` file, from 2010) lists, for that ticker and ex-date, a bonus, split or consolidation | its ratio (`BONUS 1:1` → 0.5, `FV SPLIT RS.10 TO RE.1` → 0.1), when the opening gap bears it out |
 | | … a `DEMERGER` | the opening gap `open(d) / close(d−1)` (NSE prices what is left in a special pre-open session) |
 | | … a rights issue with its price (`RIGHTS 3:25@PRM RS 1799`) | the theoretical ex-rights price over the last close |
-| `price_gap` | no `bc` file was read for the week before (before 2010, or PR zips not downloaded), and the opening gap is nearest a standard ratio (1/10, 1/6, 1/5, 1/4, 1/3, 2/5, 1/2, 2/3, 3/4, 2, 5, 10): within 12% of it with the close within 25% for a halving or more (or a doubling) — no market move — and within 6% / 20% for 2/3 and 3/4 | that ratio |
+| `price_gap` | the `bc` file lists nothing for the ticker within 7 days of the date (before 2010 there's none; after, NSE's files still miss some — SHRIRAMFIN's 1:5 split, 10 Jan 2025), and the opening gap is nearest a standard ratio (1/10, 1/6, 1/5, 1/4, 1/3, 2/5, 1/2, 2/3, 3/4, 2, 5, 10): within 12% of it with the close within 25% for a halving or more (or a doubling) — no market move — and within 6% / 20% for 2/3 and 3/4, which are taken only where no `bc` file was read for the week; and the move is at least 6× the stock's daily volatility (the stdev of its last 20 daily log returns; with fewer than 5, only a halving or more) | that ratio |
 
 Sessions are consecutive only when every trading day between them was checked (stored or a known
-holiday). Where a `bc` file was read and lists nothing, a gap is a gap (no guess); rights
+holiday). Where the `bc` file lists something else for the ticker near the date, a gap is a gap (no guess); rights
 entitlements (`-RE`) and prices under ₹2 are never guessed at. **Renames** (`/v1/symbols`): no pair
 is formed across a rename of its ticker (it may have passed to another company); the last session
 under the old name and the first under the new one form a pair of their own, kept under the new
