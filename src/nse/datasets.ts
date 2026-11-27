@@ -332,6 +332,9 @@ export async function importCorporateActions(ctx: NseContext, day: number): Prom
   return actions ? "ok" : "mismatch";
 }
 
+/** nse_days note of a past day NSE answered with an empty file (HTTP 200, no bytes). */
+export const EMPTY_FILE_NOTE = "NSE served an empty file";
+
 const DAY_URL: Record<DayDataset, (archiveUrl: string, day: number) => string> = { cash_bhav: cashBhavUrl, fo_bhav: foBhavUrl, pr: prUrl, index_close: indexCloseUrl };
 
 /**
@@ -353,6 +356,14 @@ export async function importDay(ctx: NseContext, dataset: DayDataset, day: numbe
     // Today's file may just not be out yet; an earlier weekday without a file is a holiday.
     if (day >= today) return "not_yet";
     markDay(ctx.db, dataset, day, "holiday", 0, ctx.clock());
+    return "holiday";
+  }
+  // NSE answers some old days with 200 and nothing in it (cm06SEP1995bhav.csv.zip): no file, like a 404 —
+  // not a broken download to retry forever, which left the day unchecked and cut daily candles off at 7 Sep 1995 (#59).
+  if (!response.body.length) {
+    if (day >= today) return "not_yet";
+    markDay(ctx.db, dataset, day, "holiday", 0, ctx.clock(), EMPTY_FILE_NOTE);
+    ctx.log.warn("NSE served an empty file; the day is recorded as having none", { dataset, day: isoDay(day) });
     return "holiday";
   }
   let parsed: DayParse;

@@ -31,6 +31,7 @@ symbols).
 | `GET /v1/quality[?check&severity&subject&from&to&status&limit]` | history | the data-quality checks' findings |
 | `GET /v1/symbols/history?symbol[&date]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
 | `GET /v1/symbols/changes[?symbol][&from&to]` | history | NSE `symbolchange.csv` + ISINs in the cash bhavcopy |
+| `GET /v1/symbols/archive[?from&to][&series][&after&limit]` | history | the stored cash bhavcopies (+ renames) |
 | `GET /v1/quotes?symbols` | live | live feed; broker quotes; last stored quote |
 | `GET /v1/stream?symbols[&since]` | live | Server-Sent Events: stored snapshot + minute-bar replay, then live ticks |
 | `POST` / `DELETE /v1/live/pin` | admin | the persistent live symbol set |
@@ -103,7 +104,8 @@ daily only, below) or a futures contract (below). Index and basket answers carry
   earlier than that are clamped. **Daily and weekly history reaches back to 1994** — see
   [Before the broker's window](#before-the-brokers-window) below. `complete` says every final bar
   of the range is stored (for a stock before the window: every session is in the archive or a
-  holiday).
+  holiday). The archive's first day is 3 Nov 1994 (until hub #59, candles started on 7 Sep 1995:
+  NSE serves 6 Sep 1995's file empty, and the day stayed unchecked).
 - `sources` (daily and weekly) says where each stretch of bars came from, oldest first:
   `{ "source": "archive" | "broker" | "index_file" | "basket", "from", "to" }` (`from`/`to` are
   the first and last bar's `t`); archive stretches add `names` (the tickers read, more than one
@@ -442,7 +444,7 @@ Where a day's answer comes from (`source`), first match wins:
 | `source` | What |
 |---|---|
 | `override` | added by hand: [`hub data calendar`](#data-calendar) — a holiday announced late, a special session, a correction |
-| `archive` | what NSE's archive showed for a past day (`nse_days`): a **session** when the cash, F&O or index file of that day is stored; a **holiday** when a weekday has none of them, its cash bhavcopy isn't there, and NSE answered 404 for at least one file (a file "for another date" alone doesn't confirm one). So every year back to 1994 that [`data nse-history`](#data-nse-history) downloaded has its holidays (unnamed) |
+| `archive` | what NSE's archive showed for a past day (`nse_days`): a **session** when the cash, F&O or index file of that day is stored; a **holiday** when a weekday has none of them, its cash bhavcopy isn't there, and NSE answered 404 — or 200 with an empty file (6 Sep 1995's cash bhavcopy; note `NSE served an empty file`) — for at least one file (a file "for another date" alone doesn't confirm one). So every year back to 1994 that [`data nse-history`](#data-nse-history) downloaded has its holidays (unnamed) |
 | `nse_list` | NSE's yearly holiday circular, checked in as `reference/holidays/<year>.json` with its special sessions (and their hours when they aren't 09:15–15:30). 2026: circular NSE/CMTR/71775 (12 Dec 2025; the F&O segment's NSE/FAOP/71777 lists the same days), plus 15 Jan 2026 (NSE/CMTR/72260) and the Muhurat session's hours (NSE/CMTR/76941). Earlier years list only their weekend sessions |
 | `rule` | weekdays trade, weekends don't |
 
@@ -461,7 +463,10 @@ The calendar is what the hub runs on: the evening NSE run doesn't ask for a list
 that stops being listed is asked for after all), the live feed makes no minute bars and doesn't
 connect on a holiday (and keeps a special session's hours), gap repair and candle finality skip
 holidays, the health checks don't expect files for them, background jobs don't pause for "market
-hours" on them, and the next session's ban list is the next *trading* day's.
+hours" on them, and the next session's ban list is the next *trading* day's. A holiday listed or
+added by hand also counts as checked for archive coverage and adjustment factors whether or not NSE
+was asked: a weekday NSE's archive can't settle (no answer at all) can be closed with `hub data
+calendar holiday`, and daily candles then run across it.
 
 ## GET /v1/market/regime
 
@@ -547,10 +552,11 @@ consecutive sessions of a ticker gets a factor from the first of these that appl
 | `source` | When | Factor |
 |---|---|---|
 | `prev_close` | the file's `PREV_CLOSE` differs from the previous close by over 1.5%, the open bears it out, the sessions are at most 15 days apart and in the same series (EQ or BE: each has its own `PREV_CLOSE`), and either the `bc` file lists an action for the ticker that day or the factor is a standard ratio (those below, and 4/5, 5/6, 10/11, within 1%) on a day the file's `PREV_CLOSE` isn't off for 5 or more tickers at once (1 Mar 1997, and a dozen more days of the 1995–2002 files) | `PREV_CLOSE / close(d−1)` (NSE's own adjustment) |
-| `corporate_action` | NSE's corporate-actions file (the PR zip's `bc` file, from 2010) lists, for that ticker and ex-date, a bonus, split or consolidation | its ratio (`BONUS 1:1` → 0.5, `FV SPLIT RS.10 TO RE.1` → 0.1), when the opening gap bears it out |
+| `corporate_action` | NSE's corporate-actions file (the PR zip's `bc` file, from 2010) lists, for that ticker and an ex-date within the pair (on its second session, or on a day between the two the ticker didn't trade, when they are at most 15 days apart), a bonus, split or consolidation | its ratio (`BONUS 1:1` → 0.5, `FV SPLIT RS.10 TO RE.1` → 0.1; a bonus and a split together multiply: `BON1:1/FV SPLT RS10TO RE1` → 0.05), when the opening gap bears it out (within 25%, and nearer to it than to no change — or the close does, with the open within 50%). A purpose without the terms (`AGM/DIV-RS 29.50/BONUS`; `FV SPLT FRM RS 10/- TO RS`, cut off by NSE's 25-character column) takes the usual ratio (bonuses 1:1 … 1:5, a split to ₹5, ₹2 or ₹1) that open and close both fit within 25% |
+| | … listed for a date up to 7 days off with nothing listed within the pair (NSE's date is off for the ticker: KRITIKA's split, listed for 29 Aug 2022, traded at a fifth on the 30th) | its ratio, when open and close both fit it as closely as `price_gap` requires, and it's a halving or more or beyond the stock's normal moves; each listed ex-date gives one factor at most |
 | | … a `DEMERGER` | the opening gap `open(d) / close(d−1)` (NSE prices what is left in a special pre-open session) |
 | | … a rights issue with its price (`RIGHTS 3:25@PRM RS 1799`) | the theoretical ex-rights price over the last close |
-| `price_gap` | the `bc` file lists nothing for the ticker within 7 days of the date (before 2010 there's none; after, NSE's files still miss some — SHRIRAMFIN's 1:5 split, 10 Jan 2025), and the opening gap is nearest a standard ratio (1/10, 1/6, 1/5, 1/4, 1/3, 2/5, 1/2, 2/3, 3/4, 2, 5, 10): within 12% of it with the close within 25% for a halving or more (or a doubling) — no market move — and within 6% / 20% for 2/3 and 3/4, which are taken only where no `bc` file was read for the week; and the move is at least 6× the stock's daily volatility (the stdev of its last 20 daily log returns; with fewer than 5, only a halving or more) | that ratio |
+| `price_gap` | the `bc` file lists nothing for the ticker within 7 days of the date (before 2010 there's none; after, NSE's files still miss some — SHRIRAMFIN's 1:5 split, 10 Jan 2025), and the gap is a standard ratio (1/10, 1/6, 1/5, 1/4, 1/3, 2/5, 1/2, 2/3, 3/4, 2, 5, 10): the open within 12% of it and the close within 25% for a halving or more (or a doubling) — no market move — and within 6% / 20% for 2/3 and 3/4, which are taken only where no `bc` file was read for the week (of the ratios that qualify, the one open and close fit best: SUZLON's 1:5 split, 21 Jan 2008, opened a shade nearer 1/4); or, for a halving or more in the same series, the open within 20%, the close within 12%, the day's high within 20%, the open at least twice as far from the last close as from the ratio, and the median close of the next 3–5 sessions (within 15 days) within 25% of the ex-date's (before 2002 or so the first trade on an ex-date was often off: DIVISLAB's 1:1 bonus, 30 Jul 2009, opened at 0.563 — a crash opens near the last close, SATYAMCOMP 7 Jan 2009); and the move is at least 6× the stock's daily volatility (the stdev of its last 20 daily log returns; with fewer than 5, only a halving or more) | that ratio |
 
 Sessions are consecutive only when every trading day between them was checked (stored or a known
 holiday). Where the `bc` file lists something else for the ticker near the date, a gap is a gap (no guess); rights
@@ -601,7 +607,11 @@ NSE's corporate actions as its PR zips list them (the `bc` file: bonus, split, r
 demerger, buy-back… with record and ex-dates), equity rows only. With `symbol`, every one of the
 listing's names (default range: all); without, every ticker, at most 400 days (default: 30 days
 either side of today). `kinds` and `ratio` are what the hub reads from `purpose` (`ratio`: the price
-factor of a bonus, split or consolidation, else `null`). `asOf` is the newest PR day whose `bc` file
+factor of a bonus, split or consolidation — several multiplied, `BON 1:1/SPLIT RS.10TORS.2` → 0.1 —
+else `null`; NSE's spellings `BONUS1:1`, `BONS`, `FV SPL`, `FVSPLIT`, `FV-SPTL`, `SUB DIV` are read,
+and `SPL` without face values going down is a special dividend). `partial`: it names a bonus, split
+or consolidation without the terms (`AGM/DIV-RS 29.50/BONUS`, or cut off by NSE's 25-character
+column: `FV SPLT FRM RS 10/- TO RS`), so the factor comes from the price gap. `asOf` is the newest PR day whose `bc` file
 was read; `503 not_ready` before the first. Each day's file lists the actions near their ex-date, so
 the calendar is the union of the files read — every evening's, and back to 2010 with
 `data nse-history`.
@@ -610,7 +620,7 @@ the calendar is the union of the files read — every evening's, and back to 201
 GET /v1/corporate-actions?symbol=SIEMENS&from=2025-04-01&to=2025-04-30
 { "symbol": "SIEMENS", "names": [ … ], "asOf": "2026-11-18",
   "actions": [ { "symbol": "SIEMENS", "exDate": "2025-04-07", "exDay": 1743984000000, "recordDate": "2025-04-07",
-      "purpose": "DEMERGER", "kinds": ["demerger"], "ratio": null, "series": "EQ", "company": "Siemens Ltd" } ] }
+      "purpose": "DEMERGER", "kinds": ["demerger"], "ratio": null, "partial": false, "series": "EQ", "company": "Siemens Ltd" } ] }
 ```
 
 ## Ticker renames: /v1/symbols
@@ -676,6 +686,39 @@ GET /v1/symbols/changes?symbol=TMPV
     { "date": "2025-10-24", "day": 1761264000000, "oldSymbol": "TATAMOTORS", "newSymbol": "TMPV",
       "company": "Tata Motors Passenger Vehicles Limited", "source": "nse", "isin": null } ] }
 ```
+
+### GET /v1/symbols/archive[?from=…&to=…][&series=EQ|BE][&after=…&limit=…]
+
+Every ticker with a stored cash-bhavcopy row in `from`..`to` (default: the whole archive, Nov 1994
+on) — delisted, suspended and renamed tickers included: a survivorship-free universe without reading
+the files. `from=to=` one day gives that day's universe. One row per ticker as NSE printed it
+(`INFOSYSTCH` and `INFY` are two rows, each with its own days), sorted by ticker:
+
+```json
+GET /v1/symbols/archive?limit=2&after=INFOSYSTCH
+{ "from": null, "to": null, "series": null, "count": 5761, "returned": 2, "next": "INFY",
+  "renamesFetchedAt": 1795010799626,
+  "symbols": [
+    { "symbol": "INFRATEL", "first": "2012-12-28", "last": "2020-11-19", "sessions": 1945, "series": ["EQ"],
+      "listing": { "current": "INDUSTOWER", "names": [ { "symbol": "INFRATEL", "from": null, "to": "2020-11-19" },
+                                                       { "symbol": "INDUSTOWER", "from": "2020-11-20", "to": null } ] } },
+    { "symbol": "INFY", "first": "2011-06-29", "last": "2026-11-25", "sessions": 3819, "series": ["EQ", "EQ/BE"],
+      "listing": { "current": "INFY", "names": [ { "symbol": "INFOSYSTCH", "from": null, "to": "2011-06-28" },
+                                                 { "symbol": "INFY", "from": "2011-06-29", "to": null } ] } } ] }
+```
+
+- `first`, `last`, `sessions`: its stored sessions within the range. `series`: the series of those
+  rows — the hub keeps one row a ticker a day, EQ, else BE (trade-for-trade); `EQ/BE` marks days
+  imported from Tradex's store, whose series isn't known. `series=EQ` or `BE` keeps the tickers with
+  a row in that series (or an imported one).
+- `listing`: for a ticker of a renamed company, its names point in time as `/v1/symbols/history`
+  gives them (the listing that had the ticker on its `last` day), so rows join into one company;
+  `null` for a ticker never renamed. `renamesFetchedAt` is when NSE's rename list was last
+  downloaded (`null`: not yet — only renames seen in ISINs are joined).
+- Pages: at most `limit` rows (default 2000, at most 10000); `next` is the `after` of the next page,
+  `null` on the last. `count` is the whole list's length.
+- The whole archive is read once (about a second) and kept until another day is stored or the
+  renames change. `400` for a bad date, `series`, `after` or `limit`.
 
 ## Live prices
 

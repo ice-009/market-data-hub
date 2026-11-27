@@ -1,15 +1,19 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
+import { calendar, setCalendar } from "../src/calendar/calendar.js";
+import { setOverride } from "../src/calendar/store.js";
 import { migrate } from "../src/db.js";
+import { archiveDaily } from "../src/history/fromArchive.js";
 import { fillSessionGaps } from "../src/history/fromBhav.js";
 import { readBars, readSeries, writeBars } from "../src/history/store.js";
 import { historyDays } from "../src/jobs/nseHistory.js";
 import { createLogger } from "../src/log.js";
 import { NseClient } from "../src/nse/client.js";
-import { ARCHIVE_GAPS, WEEKEND_SESSIONS, cashBhavUrl, daysToCheck, importDay, indexCloseUrl, type NseContext } from "../src/nse/datasets.js";
+import { ARCHIVE_GAPS, EMPTY_FILE_NOTE, WEEKEND_SESSIONS, cashBhavUrl, daysToCheck, importDay, indexCloseUrl, type NseContext } from "../src/nse/datasets.js";
 import { parseCmBhav } from "../src/nse/parsers/cmBhav.js";
 import { parseDdMmYyyy, parseIndexClose } from "../src/nse/parsers/indexClose.js";
-import { checkedDays, markDay, readIndexCloses, writeCashDay, type DayDataset } from "../src/nse/store.js";
+import type { CashBhavRow } from "../src/nse/parsers/cashBhav.js";
+import { checkedDays, coverageStatuses, dayStatuses, markDay, readIndexCloses, writeCashDay, type DayDataset } from "../src/nse/store.js";
 import { calendarFindings, type DayRecord } from "../src/quality/checks.js";
 import { DAY_MS, parseDmyDay, parseIsoDay } from "../src/time.js";
 import { ist, makeHub, type TestHub } from "./support/hub.js";
@@ -19,7 +23,8 @@ import { fakeFetch, fakeTime, makeZip, type Route } from "./support/nse.js";
 // (market-data-hub#41–#45). The fixtures are real files, cut to a few rows:
 // ind_close_all_06042023.csv prints its date month first ("04-06-2023");
 // cm13JUL2020bhav.csv has a two-digit year ("13-Jul-20") and comes zipped in a
-// folder (cm13JUL2020bhav.csv/cm13JUL2020bhav.csv).
+// folder (cm13JUL2020bhav.csv/cm13JUL2020bhav.csv). NSE serves 6 Sep 1995's
+// cash file as HTTP 200 with no bytes (#59).
 
 const d = (iso: string) => parseIsoDay(iso)!;
 const quiet = createLogger({ level: "error", secrets: [], write: () => {} });
@@ -164,5 +169,43 @@ describe("repairing what the bugs left behind (#44, #45)", () => {
     expect(readBars(db, "ACME", "1d", sun, sun + 1)).toEqual([]);
     expect(readBars(db, "INFY", "1d", 0, Number.MAX_SAFE_INTEGER)).toHaveLength(1);
     expect(fillSessionGaps(db, WEEKEND_SESSIONS, quiet)).toBe(0);
+  });
+});
+
+describe("a day NSE answers with an empty file (#59)", () => {
+  // cm06SEP1995bhav.csv.zip: HTTP 200, no bytes (checked 26 Nov 2026); 5 and 7 Sep 1995 are ordinary files.
+  const row = (close: number): CashBhavRow => ({ symbol: "ACC", series: "EQ", prevClose: close, open: close, high: close, low: close, close, volume: 1, deliveryPct: null });
+  const listed = calendar();
+  afterEach(() => setCalendar(listed));
+
+  it("is recorded as a day without a file, so daily candles reach back past it", async () => {
+    const { ctx, calls } = context({ [cashBhavUrl(archive, d("1995-09-06"))]: new Response(new Uint8Array(0)) }, ist(2026, 11, 26, 20));
+    writeCashDay(ctx.db, d("1995-09-05"), [row(100)], 0);
+    writeCashDay(ctx.db, d("1995-09-07"), [row(101)], 0);
+    // Before: the unchecked 6 Sep cuts coverage off at the 7th.
+    expect(archiveDaily(ctx.db, "ACC", d("1995-09-05"), d("1995-09-07"), { adjusted: false })).toMatchObject({ coveredFromDay: d("1995-09-07"), bars: [{ t: d("1995-09-07") }] });
+    expect(await importDay(ctx, "cash_bhav", d("1995-09-06"))).toBe("holiday");
+    expect(calls).toHaveLength(1); // not retried as a broken download
+    expect(ctx.db.prepare("select status, note from nse_days where dataset = 'cash_bhav' and day = ?").get(d("1995-09-06"))).toEqual({ status: "holiday", note: EMPTY_FILE_NOTE });
+    const after = archiveDaily(ctx.db, "ACC", d("1995-09-05"), d("1995-09-07"), { adjusted: false });
+    expect(after.coveredFromDay).toBe(d("1995-09-05"));
+    expect(after.bars.map((bar) => bar.c)).toEqual([100, 101]);
+  });
+
+  it("is just not out yet when it's today's", async () => {
+    const { ctx } = context({ [cashBhavUrl(archive, d("2026-11-26"))]: new Response(new Uint8Array(0)) }, ist(2026, 11, 26, 18));
+    expect(await importDay(ctx, "cash_bhav", d("2026-11-26"))).toBe("not_yet");
+    expect(checkedDays(ctx.db, "cash_bhav").has(d("2026-11-26"))).toBe(false);
+  });
+
+  it("can be settled with the calendar instead: a holiday added by hand counts as checked", () => {
+    t = makeHub();
+    writeCashDay(t.db, d("1995-09-05"), [row(100)], 0);
+    writeCashDay(t.db, d("1995-09-07"), [row(101)], 0);
+    expect(archiveDaily(t.db, "ACC", d("1995-09-05"), d("1995-09-07")).coveredFromDay).toBe(d("1995-09-07"));
+    setOverride(t.db, { day: d("1995-09-06"), kind: "holiday", name: "NSE archive: empty file" });
+    expect(archiveDaily(t.db, "ACC", d("1995-09-05"), d("1995-09-07")).coveredFromDay).toBe(d("1995-09-05"));
+    expect(coverageStatuses(t.db, "cash_bhav").get(d("1995-09-06"))).toBe("holiday");
+    expect(dayStatuses(t.db, "cash_bhav").has(d("1995-09-06"))).toBe(false); // what NSE is asked for is unchanged
   });
 });

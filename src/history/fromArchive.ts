@@ -2,7 +2,7 @@ import { BrokerError } from "../broker/errors.js";
 import type { Bar, HistoryResult, Resolution } from "../broker/fyers.js";
 import { isFuture, isIndex } from "../broker/symbols.js";
 import type { Db } from "../db.js";
-import { dayStatuses, lastOkDay, type DayStatus } from "../nse/store.js";
+import { coverageStatuses, lastOkDay, type DayStatus } from "../nse/store.js";
 import { listingOf, loadRenames, namesBetween, type Renames } from "../reference/renames.js";
 import { DAY_MS } from "../time.js";
 import { cumulative, isSessionDay, readListingFactors } from "./adjustments.js";
@@ -66,7 +66,7 @@ export interface ArchiveContext {
 }
 
 export function archiveContext(db: Db, from = Number.MIN_SAFE_INTEGER): ArchiveContext {
-  return { statuses: dayStatuses(db, "cash_bhav", from), renames: loadRenames(db) };
+  return { statuses: coverageStatuses(db, "cash_bhav", from), renames: loadRenames(db) };
 }
 
 export interface ArchiveDaily extends HistoryResult {

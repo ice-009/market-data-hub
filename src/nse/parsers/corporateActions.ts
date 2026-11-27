@@ -19,8 +19,14 @@ import { splitCsvLine } from "./symbolChange.js";
 // PURPOSE is free text, written differently over the years. `classifyPurpose`
 // reads what matters for prices out of it:
 //   BONUS a:b            a new shares for every b held: prices × b/(a+b)
-//   FV SPLIT RS x TO RS y (SPLT, SUB-DIVISION…): prices × y/x
+//                        (BON, BONS, glued or not: "BONUS1:1", "BON-2:1")
+//   FV SPLIT RS x TO RS y (SPLT, SPTL, SUB DIV, SUB-DIVISION…; or "FV SPL",
+//                        "SPL RS10 TO RS2" when face values go down): prices × y/x
 //   CONSOLIDATION x TO y prices × y/x (y > x)
+//   Several at once multiply: "BON 1:1/SPLIT RS.10TORS.2" → 0.5 × 0.2. One
+//   named without its terms ("AGM/DIV-RS 29.50/BONUS", or cut off by NSE's
+//   25-character column: "FV SPLT FRM RS 10/- TO RS") is `partial`: the
+//   factor then comes from the price gap (src/history/adjustments.ts).
 //   RIGHTS a:b [@ PRM P] a rights issue: its factor depends on the price the
 //                        day before (rightsTerms; src/history/adjustments.ts)
 //   DEMERGER / SCHEME OF ARRANGEMENT, DIVIDEND, MERGER, BUY BACK, …: classified only
@@ -45,14 +51,31 @@ export interface CorporateActionsParse {
   undated: number;
 }
 
+/** One bonus, split or consolidation in a purpose, and what it does to the price (null: the purpose doesn't say). */
+export interface PricePart {
+  kind: "bonus" | "split" | "consolidation";
+  ratio: number | null;
+  /** A split's old face value, when the purpose gives it but not the new one ("FV SPLT FRM RS 10/- TO RS"). */
+  from?: number;
+}
+
 export interface Classified {
   kinds: ActionKind[];
   /**
    * What the action does to the price (prices before the ex-date are multiplied
    * by it): bonus, split and consolidation only, multiplied together when one
-   * purpose has more than one; null for everything else.
+   * purpose has more than one ("BON 1:1/SPLIT RS.10TORS.2" → 0.5 × 0.2); null
+   * when it names none, or none with its terms.
    */
   ratio: number | null;
+  /** The bonus, split and consolidation it names, each with its ratio. */
+  parts: PricePart[];
+  /**
+   * It names a bonus, split or consolidation without its terms ("AGM/DIV-RS
+   * 29.50/BONUS"; "FV SPLT FRM RS 10/- TO RS", cut off by NSE): the ratio is
+   * then read from the price gap (src/history/adjustments.ts).
+   */
+  partial: boolean;
 }
 
 const EQUITY_SERIES = new Set(["EQ", "BE"]);
@@ -119,16 +142,37 @@ export function parseCorporateActions(csv: string): CorporateActionsParse {
 }
 
 const NUMBER = String.raw`(\d+(?:\.\d+)?)`;
-// "RS.10", "RS 10/-", "RE.1", "RS10", "RS. 2/-" … "TO" … the same. FROM is optional ("FV SPLIT RS.10 TO RE.1").
-const FACE_VALUES = new RegExp(String.raw`R[SE]\.?\s*${NUMBER}\s*(?:\/-)?\s*(?:PER\s+SHARE\s*|EACH\s*)?(?:\/-\s*)?TO\s+R[SE]\.?\s*${NUMBER}`, "i");
+// Face values, "from TO to", right after a split or consolidation word. NSE
+// writes them every way: "RS.10 TO RE.1", "RS 10/- TO RS 5", "RS.10TORS.2",
+// "RS10 TO 2", "FRM 10 TO 1", "FRM100TO1", "RS 10/- PER SHARE TO RE 1/- PER
+// SHARE". The target is optional: NSE cuts PURPOSE off at 25 characters, so
+// "FV SPLT FRM RS 10/- TO RS" and "FV SPLT FRM RS 126.18 TO" have none.
+const FACE_VALUES = new RegExp(
+  String.raw`^[^0-9:]{0,24}?(?:R[SE]\.?\s*)?${NUMBER}\s*(?:\/-)?\s*(?:PER\s+SHARE\s*|EACH\s*|PER\s+SH\s*)?(?:\/-\s*)?TO\s*(?:R[SE]\.?\s*)?(?:${NUMBER})?`,
+);
 
-function faceValues(text: string): { from: number; to: number } | null {
-  const match = text.match(FACE_VALUES);
+/** The face values after `from` in `text`; `to` null when NSE cut the purpose off before it. */
+function faceValues(text: string, from: number): { from: number; to: number | null } | null {
+  const match = text.slice(from).match(FACE_VALUES);
   if (!match) return null;
-  const from = Number(match[1]);
-  const to = Number(match[2]);
-  return from > 0 && to > 0 && from !== to ? { from, to } : null;
+  const before = Number(match[1]);
+  const after = match[2] === undefined ? null : Number(match[2]);
+  if (!(before > 0)) return null;
+  return { from: before, to: after !== null && after > 0 && after !== before ? after : null };
 }
+
+/** Words that name a split by themselves. */
+const SPLIT_WORD = /SPLIT|SPLT|SPTL|SUB[-\s]?DIV(?!IDEND)/;
+/**
+ * Words that name a split only with face values going down after them: "FV",
+ * "FACE VALUE", "FVS", and "SPL" — which is just as often a special dividend
+ * ("SPL DIV", "DIV- FIN RS.3+SPL RS.7.50").
+ */
+const FACE_VALUE_WORD = /\bF\.?\s?V\b\.?|FACE\s*VALUE|\bFVS\b|\bSPL\b(?![\s-]*(?:INT|DI?V))/g;
+const CONSOLIDATION_WORD = /CONSOLIDAT|\bCONSL?\b/;
+/** "BONUS", "BON", "BONS", glued to what follows or not ("BONUS1:1", "BON1:1"), but not "BOND". */
+const BONUS_WORD = /\bBON(?:US|S)?(?![A-Z])/;
+const BONUS_TERMS = /\bBON(?:US|S)?(?![A-Z])[^0-9]{0,12}(\d+)\s*:\s*(\d+)/;
 
 export interface RightsTerms {
   /** `offered` new shares for every `held`, at `price` (rupees; null when the purpose doesn't say). */
@@ -154,36 +198,50 @@ export function rightsTerms(purpose: string): RightsTerms | null {
 export function classifyPurpose(purpose: string): Classified {
   const text = purpose.toUpperCase();
   const kinds = new Set<ActionKind>();
-  let ratio: number | null = null;
-  const times = (value: number) => {
-    ratio = (ratio ?? 1) * value;
-  };
+  const parts: PricePart[] = [];
 
-  const bonus = text.match(/\bBON(?:US)?\b[^0-9]{0,12}(\d+)\s*:\s*(\d+)/);
-  if (bonus) {
-    const [a, b] = [Number(bonus[1]), Number(bonus[2])];
-    if (a > 0 && b > 0) {
-      kinds.add("bonus");
-      times(b / (a + b));
+  const bonus = text.match(BONUS_TERMS);
+  const [a, b] = bonus ? [Number(bonus[1]), Number(bonus[2])] : [0, 0];
+  // Bonus debentures, preference or DVR shares ("BON 1 DVR : 4 EQ SHARES") aren't more of the same shares: no price part.
+  if (BONUS_WORD.test(text) && /DVR|DEBT|DEBEN|PREF/.test(text)) kinds.add("bonus");
+  else if (a > 0 && b > 0) parts.push({ kind: "bonus", ratio: b / (a + b) });
+  else if (BONUS_WORD.test(text)) parts.push({ kind: "bonus", ratio: null });
+
+  const consolidation = CONSOLIDATION_WORD.exec(text);
+  if (consolidation) {
+    const values = faceValues(text, consolidation.index + consolidation[0].length);
+    parts.push({ kind: "consolidation", ratio: values?.to && values.to > values.from ? values.to / values.from : null });
+  } else {
+    const word = SPLIT_WORD.exec(text);
+    let split: PricePart | null = null;
+    if (word) {
+      const values = faceValues(text, word.index + word[0].length);
+      split = { kind: "split", ratio: values?.to && values.to < values.from ? values.to / values.from : null, ...(values ? { from: values.from } : {}) };
     }
-  } else if (/\bBON(?:US)?\b/.test(text)) kinds.add("bonus");
-
-  const values = faceValues(text);
-  if (/CONSOLIDAT|\bCONSL?\b/.test(text)) {
-    kinds.add("consolidation");
-    if (values && values.to > values.from) times(values.to / values.from);
-  } else if (/SPLIT|SPLT|SUB-?\s?DIVI/.test(text) || (/\bF\.?V\b|FACE VALUE/.test(text) && values && values.to < values.from)) {
-    kinds.add("split");
-    if (values && values.to < values.from) times(values.to / values.from);
+    // "FV SPL RS.5TORE.1", "BON 1:1/SPL RS10 TO RS2": face values going down after FV or SPL.
+    if (!split?.ratio) {
+      for (const match of text.matchAll(FACE_VALUE_WORD)) {
+        const values = faceValues(text, match.index + match[0].length);
+        if (values?.to && values.to < values.from) {
+          split = { kind: "split", ratio: values.to / values.from };
+          break;
+        }
+        // "FV SPLT FRM RS 10/- TO RS" is caught by SPLIT_WORD; an "FV … TO" cut off with no split word is too thin to call.
+      }
+    }
+    if (split) parts.push(split);
   }
+  for (const part of parts) kinds.add(part.kind);
+  const known = parts.filter((part) => part.ratio !== null);
+  const ratio = known.length ? known.reduce((product, part) => product * part.ratio!, 1) : null;
 
   if (/\bRI?GH?TS?\b/.test(text)) kinds.add("rights");
   if (/DE-?MERGER|SPIN.?OFF/.test(text)) kinds.add("demerger");
   else if (/ARRANGEMENT|ARRGMT|\bARR\b/.test(text)) kinds.add("arrangement");
   if (/AMALGAMATION|(?<!DE-?)MERGER/.test(text)) kinds.add("merger");
-  if (/DIV(?!ISI)/.test(text)) kinds.add("dividend");
+  if (/(?<!SUB[-\s]?)DIV(?!ISI)|\bDV\b/.test(text)) kinds.add("dividend");
   if (/BUY\s?-?BACK/.test(text)) kinds.add("buyback");
   if (/CAPITAL REDUCTION|REDUCTION OF CAPITAL/.test(text)) kinds.add("capital_reduction");
   if (!kinds.size) kinds.add("other");
-  return { kinds: [...kinds], ratio };
+  return { kinds: [...kinds], ratio, parts, partial: parts.some((part) => part.ratio === null) };
 }
