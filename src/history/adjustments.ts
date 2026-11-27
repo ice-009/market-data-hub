@@ -1,8 +1,8 @@
 import type { Statement } from "better-sqlite3";
 import { readKv, writeKv, type Db } from "../db.js";
 import { WEEKEND_SESSIONS } from "../nse/datasets.js";
-import { rightsTerms } from "../nse/parsers/corporateActions.js";
-import { dayStatuses, readCorporateActions, type StoredCorporateAction } from "../nse/store.js";
+import { rightsTerms, type PricePart } from "../nse/parsers/corporateActions.js";
+import { coverageStatuses, readCorporateActions, refreshCorporateActions, type StoredCorporateAction } from "../nse/store.js";
 import { listingOf, loadRenames, type Listing, type Renames } from "../reference/renames.js";
 import { DAY_MS, isWeekday } from "../time.js";
 import { resetSymbol } from "./store.js";
@@ -92,6 +92,11 @@ export const STANDARD_RATIOS: readonly number[] = [1 / 10, 1 / 6, 1 / 5, 1 / 4, 
  */
 const WIDE = { open: Math.log(1.12), close: Math.log(1.25) };
 const NARROW = { open: Math.log(1.06), close: Math.log(1.2) };
+/** inferLooseRatio's windows, and how many sessions after (STAY_SESSIONS, at least STAY_MIN_SESSIONS) must stay within STAY of the ex-date's close. */
+const LOOSE = { open: Math.log(1.2), close: Math.log(1.12) };
+const STAY = Math.log(1.25);
+export const STAY_SESSIONS = 5;
+const STAY_MIN_SESSIONS = 3;
 const INFER_MAX_GAP_MS = 15 * DAY_MS;
 const CONFIRM = Math.log(1.25);
 const SMALL_FACTOR = Math.log(1.15);
@@ -141,6 +146,7 @@ interface CashRow {
   series: string;
   prev_close: number;
   o: number;
+  h: number;
   c: number;
 }
 
@@ -165,15 +171,59 @@ const anyBetween = (values: readonly number[], from: number, to: number) => {
   return i < values.length && values[i] <= to;
 };
 
-/** The ratio an action list implies: one bonus, one split and one consolidation at most (NSE sometimes words one twice). */
-function actionRatio(actions: readonly StoredCorporateAction[]): number | null {
-  const byKind = new Map<string, number>();
+/**
+ * What an action list does to the price: one bonus, one split and one
+ * consolidation at most (NSE sometimes words one twice, or lists a bonus and a
+ * split on one ex-date as two rows), multiplied; `unknown` are those named
+ * without their terms. Null when it names none.
+ */
+function actionTerms(actions: readonly StoredCorporateAction[]): { known: number; unknown: PricePart[] } | null {
+  const byKind = new Map<string, PricePart>();
   for (const action of actions) {
-    if (action.ratio === null) continue;
-    const kind = action.kinds.find((k) => k === "bonus" || k === "split" || k === "consolidation") ?? "other";
-    if (!byKind.has(kind)) byKind.set(kind, action.ratio);
+    for (const part of action.parts) {
+      const had = byKind.get(part.kind);
+      if (!had || (had.ratio === null && part.ratio !== null)) byKind.set(part.kind, part);
+    }
   }
-  return byKind.size ? [...byKind.values()].reduce((product, ratio) => product * ratio, 1) : null;
+  if (!byKind.size) return null;
+  let known = 1;
+  const unknown: PricePart[] = [];
+  for (const part of byKind.values()) {
+    if (part.ratio === null) unknown.push(part);
+    else known *= part.ratio;
+  }
+  return { known, unknown };
+}
+
+/** Bonuses 1:1, 2:1, 3:1, 4:1, 5:1, 1:2, 3:2, 1:3, 1:4, 1:5. */
+const BONUS_RATIOS: readonly number[] = [1 / 2, 1 / 3, 1 / 4, 1 / 5, 1 / 6, 2 / 3, 2 / 5, 3 / 4, 4 / 5, 5 / 6];
+
+/** What a bonus, split or consolidation named without its terms may be: the usual ratios (a split to ₹5, ₹2 or ₹1 when the old face value is known). */
+function partCandidates(part: PricePart): number[] {
+  if (part.kind === "bonus") return [...BONUS_RATIOS];
+  if (part.kind === "consolidation") return [2, 5, 10];
+  const out = new Set([1 / 2, 1 / 4, 1 / 5, 1 / 10]);
+  if (part.from) for (const to of [5, 2, 1]) if (to < part.from) out.add(to / part.from);
+  return [...out];
+}
+
+/** How far a factor is from the open and the close (the worse of the two, as a log distance). */
+const misfit = (factor: number, openGap: number, closeGap: number) => Math.max(Math.abs(Math.log(openGap / factor)), Math.abs(Math.log(closeGap / factor)));
+
+/**
+ * The factor for a listed action whose terms are (partly) missing: the known
+ * part × the candidates for the rest that the open and the close fit best —
+ * both within ±25% and each nearer to it than to no change at all. Pure.
+ */
+export function inferPartial(known: number, unknown: readonly PricePart[], openGap: number, closeGap: number): number | null {
+  if (!(openGap > 0) || !(closeGap > 0)) return null;
+  let factors = [known];
+  for (const part of unknown) factors = factors.flatMap((factor) => partCandidates(part).map((candidate) => factor * candidate));
+  let best: number | null = null;
+  for (const factor of factors) if (best === null || misfit(factor, openGap, closeGap) < misfit(best, openGap, closeGap)) best = factor;
+  if (best === null || misfit(best, openGap, closeGap) >= CONFIRM) return null;
+  const nearer = (gap: number) => Math.abs(Math.log(gap / best!)) < Math.abs(Math.log(gap));
+  return nearer(openGap) && nearer(closeGap) ? best : null;
 }
 
 /**
@@ -194,14 +244,44 @@ function rightsFactor(actions: readonly StoredCorporateAction[], close: number):
 /** A halving or more, or a doubling: no market move. */
 const wide = (ratio: number) => ratio <= 0.5 || ratio >= 2;
 
-/** The standard ratio a gap is, or null. Pure. */
+/**
+ * The standard ratio a gap is, or null. Pure. Of the ratios the open and the
+ * close are both near enough to, the one they fit best — not just the one
+ * nearest the open (SUZLON's 1:5 split, 21 Jan 2008, opened at 0.224, a shade
+ * nearer 1/4, and closed at 0.193, far from it).
+ */
 export function inferRatio(openGap: number, closeGap: number): number | null {
   if (!(openGap > 0) || !(closeGap > 0)) return null;
-  // The nearest ratio to the open, then whether open and close are near enough.
+  let best: number | null = null;
+  for (const ratio of STANDARD_RATIOS) {
+    const window = wide(ratio) ? WIDE : NARROW;
+    if (Math.abs(Math.log(openGap / ratio)) >= window.open || Math.abs(Math.log(closeGap / ratio)) >= window.close) continue;
+    if (best === null || misfit(ratio, openGap, closeGap) < misfit(best, openGap, closeGap)) best = ratio;
+  }
+  return best;
+}
+
+/**
+ * Before 2002 or so NSE's first trade on an ex-date was often well off the new
+ * base (DIVISLAB's 1:1 bonus, 30 Jul 2009, opened at 0.563 and closed at 0.495;
+ * ICICI's, CENTURYTEX's, VIMTALABS' splits alike). A halving or more (or a
+ * doubling) is also taken when the open is within LOOSE.open of it, the close
+ * within LOOSE.close, and the next sessions stay there (the median of their
+ * closes within STAY of the ex-date's): a crash opens near the last close
+ * (SATYAMCOMP, 7 Jan 2009: 1.0, then 0.225) and rarely sits still after. Pure.
+ */
+export function inferLooseRatio(openGap: number, closeGap: number, after: readonly number[], close: number, highGap?: number): number | null {
+  if (!(openGap > 0) || !(closeGap > 0) || !(close > 0) || after.length < STAY_MIN_SESSIONS) return null;
   let ratio = STANDARD_RATIOS[0];
-  for (const candidate of STANDARD_RATIOS) if (Math.abs(Math.log(openGap / candidate)) < Math.abs(Math.log(openGap / ratio))) ratio = candidate;
-  const window = wide(ratio) ? WIDE : NARROW;
-  return Math.abs(Math.log(openGap / ratio)) < window.open && Math.abs(Math.log(closeGap / ratio)) < window.close ? ratio : null;
+  for (const candidate of STANDARD_RATIOS) if (Math.abs(Math.log(closeGap / candidate)) < Math.abs(Math.log(closeGap / ratio))) ratio = candidate;
+  if (!wide(ratio) || Math.abs(Math.log(openGap / ratio)) >= LOOSE.open || Math.abs(Math.log(closeGap / ratio)) >= LOOSE.close) return null;
+  // The whole day near the new base: no trade back up at the old price (PASUPATFAB, 9 May 2000: 7 → open 4, high 9.9, close 3.5).
+  if (highGap !== undefined && highGap > 0 && Math.log(highGap / ratio) >= LOOSE.open) return null;
+  // The open at least twice as far (in log terms) from the last close as from the new base.
+  if (Math.abs(Math.log(openGap)) < 2 * Math.abs(Math.log(openGap / ratio))) return null;
+  const sorted = [...after].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  return median > 0 && Math.abs(Math.log(median / close)) < STAY ? ratio : null;
 }
 
 /** The standard ratio an adjusted PREV_CLOSE is, or null. Pure. */
@@ -238,22 +318,44 @@ export interface PairContext {
   noisyDay?: boolean;
   /** The stock's daily volatility before the pair (volatility()); null: too little history; undefined: not measured. */
   sigma?: number | null;
+  /**
+   * `actions` are listed for a nearby ex-date, not one within the pair (NSE's
+   * date is off for this ticker: KRITIKA's split is listed for 29 Aug 2022 and
+   * traded at the old price that day, at a fifth the next): only a gap that
+   * fits their ratio closely counts.
+   */
+  offDate?: boolean;
+  /** The closes of the next sessions (up to STAY_SESSIONS), for inferLooseRatio. */
+  after?: readonly number[];
 }
 
 type PairRow = { day: number; c: number; series?: string };
 
 /** The factor for one pair of consecutive sessions, or null. Pure. */
-export function decideFactor(prev: PairRow, row: PairRow & { symbol: string; prev_close: number; o: number }, context: PairContext): Factor | null {
+export function decideFactor(prev: PairRow, row: PairRow & { symbol: string; prev_close: number; o: number; h?: number }, context: PairContext): Factor | null {
   if (!(prev.c > 0) || !(row.c > 0)) return null;
   const purposes = [...new Set(context.actions.map((action) => action.purpose))];
   const base = { symbol: row.symbol, day: row.day, prevDay: prev.day, prevC: prev.c, prevClose: row.prev_close, o: row.o, c: row.c, action: purposes.length ? purposes.join(" · ") : null, renamedFrom: null };
   const gap = (row.o > 0 ? row.o : row.c) / prev.c;
+  const closeGap = row.c / prev.c;
   // Borne out by the opening price: within ±25% of it, and nearer to it than to no change at all —
   // except for a factor within 15% of 1 (a 1:10 bonus), which a normal day's move can hide.
-  const confirmed = (factor: number) => {
-    const off = Math.abs(Math.log(gap / factor));
-    return off < CONFIRM && (off <= Math.abs(Math.log(gap)) || Math.abs(Math.log(factor)) < SMALL_FACTOR);
+  // Or by the close, when the open isn't far off either (AXITA's 1:3 bonus, 20 Sep 2024: opened at 0.866, closed at 0.802).
+  const borneOut = (factor: number, by: number) => {
+    const off = Math.abs(Math.log(by / factor));
+    return off < CONFIRM && (off <= Math.abs(Math.log(by)) || Math.abs(Math.log(factor)) < SMALL_FACTOR);
   };
+  const confirmed = (factor: number) => borneOut(factor, gap) || (borneOut(factor, closeGap) && Math.abs(Math.log(gap / factor)) < 2 * CONFIRM);
+  const terms = actionTerms(context.actions);
+  if (context.offDate) {
+    // Listed for another day: the gap must be the action's, closely (inferRatio's windows) — or, terms missing, fit them as below.
+    if (!terms) return null;
+    const factor = terms.unknown.length ? inferPartial(terms.known, terms.unknown, gap, closeGap) : terms.known;
+    // A move a normal day can make (a 1:10 bonus's 0.91) says nothing about which day it was.
+    if (factor === null || !(wide(factor) || (typeof context.sigma === "number" && beyondNormal(factor, context.sigma)))) return null;
+    const window = wide(factor) ? WIDE : NARROW;
+    return Math.abs(Math.log(gap / factor)) < window.open && Math.abs(Math.log(closeGap / factor)) < window.close ? { ...base, factor, source: "corporate_action" } : null;
+  }
   const nse = row.prev_close > 0 ? row.prev_close / prev.c : 1;
   // An adjusted PREV_CLOSE the opening price doesn't bear out is a slip in the file (seen: VERTOZ, 11 Jul 2025, a 1→10 consolidation printed 9.81 for 9.17).
   // Only between sessions close together: after weeks without a row (FORCEMOT, Oct 2023 – Feb 2024) PREV_CLOSE is a close the store doesn't have.
@@ -261,13 +363,17 @@ export function decideFactor(prev: PairRow, row: PairRow & { symbol: string; pre
   const sameSeries = prev.series === undefined || row.series === undefined || prev.series === row.series;
   const nseAction = context.actions.length > 0 || (prevCloseRatio(nse) !== null && !context.noisyDay);
   if (sameSeries && Math.abs(nse - 1) > SPLIT_TOLERANCE && confirmed(nse) && row.day - prev.day <= INFER_MAX_GAP_MS && nseAction) return { ...base, factor: nse, source: "prev_close" };
-  const ratio = actionRatio(context.actions);
-  if (ratio !== null) return confirmed(ratio) ? { ...base, factor: ratio, source: "corporate_action" } : null;
+  if (terms && !terms.unknown.length) return confirmed(terms.known) ? { ...base, factor: terms.known, source: "corporate_action" } : null;
+  // Named without its terms ("AGM/DIV-RS 29.50/BONUS"; "FV SPLT FRM RS 10/- TO RS", cut off): the usual ratio the gap fits.
+  if (terms) {
+    const factor = inferPartial(terms.known, terms.unknown, gap, closeGap);
+    return factor === null ? null : { ...base, factor, source: "corporate_action" };
+  }
   if (context.actions.some((action) => action.kinds.includes("demerger")) && gap < 1 - SPLIT_TOLERANCE) return { ...base, factor: gap, source: "corporate_action" };
   const rights = rightsFactor(context.actions, prev.c);
   if (rights !== null) return { ...base, factor: rights, source: "corporate_action" };
   if (context.acrossRename || context.listedNear || row.day - prev.day > INFER_MAX_GAP_MS || !inferable(row.symbol, prev.c)) return null;
-  const inferred = inferRatio(gap, row.c / prev.c);
+  const inferred = inferRatio(gap, closeGap) ?? (prev.series === row.series ? inferLooseRatio(gap, closeGap, context.after ?? [], row.c, row.h === undefined ? undefined : row.h / prev.c) : null);
   if (inferred !== null && context.bcCovered && !wide(inferred)) return null;
   return inferred === null || !beyondNormal(inferred, context.sigma) ? null : { ...base, factor: inferred, source: "price_gap" };
 }
@@ -284,7 +390,10 @@ const MIN_INFER_PRICE = 2;
 class Derivation {
   private readonly unchecked: number[];
   private readonly bcDays: number[];
+  /** Each ticker's bc rows, by ex-date. */
   private readonly actions = new Map<string, StoredCorporateAction[]>();
+  /** Ticker|ex-date of listed actions a factor was already taken for: one ex-date, one factor. */
+  private readonly used = new Set<string>();
   /** Each ticker's ex-dates in the bc file (any action), sorted. */
   private readonly listed = new Map<string, number[]>();
   private readonly renameDays = new Map<string, number[]>();
@@ -298,7 +407,7 @@ class Derivation {
     to: number,
   ) {
     // Trading days NSE wasn't asked about (or served another date for): a pair can't span one.
-    const statuses = dayStatuses(db, "cash_bhav");
+    const statuses = coverageStatuses(db, "cash_bhav");
     const days = sorted(statuses.keys());
     const unchecked: number[] = [];
     if (days.length) {
@@ -310,9 +419,10 @@ class Derivation {
     this.unchecked = unchecked;
     this.bcDays = sorted((db.prepare("select day from corporate_action_days").all() as Array<{ day: number }>).map((row) => row.day));
     const near = BC_NEAR_DAYS * DAY_MS;
-    for (const action of readCorporateActions(db, Math.max(MIN_DAY, from - near), Math.min(MAX_DAY, to + near))) {
-      const key = `${action.symbol}|${action.exDay}`;
-      this.actions.set(key, [...(this.actions.get(key) ?? []), action]);
+    // Wide enough for a pair spanning weeks without a session.
+    const span = INFER_MAX_GAP_MS + near;
+    for (const action of readCorporateActions(db, Math.max(MIN_DAY, from - span), Math.min(MAX_DAY, to + near))) {
+      this.actions.set(action.symbol, [...(this.actions.get(action.symbol) ?? []), action]);
       this.listed.set(action.symbol, [...(this.listed.get(action.symbol) ?? []), action.exDay]);
     }
     for (const list of this.listed.values()) list.sort((a, b) => a - b);
@@ -343,15 +453,45 @@ class Derivation {
     return noisy;
   }
 
-  pair(prev: CashRow, row: CashRow, renamedFrom: string | null, sigma?: number | null): Factor | null {
+  /** The bc rows of these tickers with from <= ex-date <= to, not yet used for a factor, grouped by ex-date (nearest `around` first). */
+  private listedBetween(symbols: readonly string[], from: number, to: number, around: number): StoredCorporateAction[][] {
+    const groups = new Map<number, StoredCorporateAction[]>();
+    for (const symbol of symbols) {
+      for (const action of this.actions.get(symbol) ?? []) {
+        if (action.exDay < from || action.exDay > to || this.used.has(`${symbol}|${action.exDay}`)) continue;
+        groups.set(action.exDay, [...(groups.get(action.exDay) ?? []), action]);
+      }
+    }
+    return [...groups.entries()].sort((a, b) => Math.abs(a[0] - around) - Math.abs(b[0] - around)).map(([, actions]) => actions);
+  }
+
+  pair(prev: CashRow, row: CashRow, renamedFrom: string | null, sigma?: number | null, after?: readonly number[]): Factor | null {
     if (!this.consecutive(prev.day, row.day)) return null;
     // A rename of this ticker between the two sessions: they may not even be one company.
     if (renamedFrom === null && anyBetween(this.renameDays.get(row.symbol) ?? [], prev.day + 1, row.day)) return null;
-    const actions = [...(this.actions.get(`${row.symbol}|${row.day}`) ?? []), ...(renamedFrom ? (this.actions.get(`${renamedFrom}|${row.day}`) ?? []) : [])];
+    const symbols = [row.symbol, ...(renamedFrom ? [renamedFrom] : [])];
+    // The bc rows with an ex-date within the pair: on `row`'s day, or on a day the ticker didn't trade (ABMINTLTD's 5:1 bonus, ex 15 Mar 2017, first traded on the 16th) —
+    // not across weeks without a session (a suspension), where the price says little about one action.
+    const close = row.day - prev.day <= INFER_MAX_GAP_MS;
+    const actions = this.listedBetween(symbols, close ? prev.day + DAY_MS : row.day, row.day, row.day).flat();
     const near = BC_NEAR_DAYS * DAY_MS;
-    const listedNear = [row.symbol, ...(renamedFrom ? [renamedFrom] : [])].some((symbol) => anyBetween(this.listed.get(symbol) ?? [], row.day - near, row.day + near));
+    const listedNear = symbols.some((symbol) => anyBetween(this.listed.get(symbol) ?? [], row.day - near, row.day + near));
     const candidate = !actions.length && prev.series === row.series && prev.c > 0 && row.prev_close > 0 && Math.abs(row.prev_close / prev.c - 1) > SPLIT_TOLERANCE;
-    const factor = decideFactor(prev, row, { actions, listedNear, bcCovered: anyBetween(this.bcDays, row.day - near, row.day), acrossRename: renamedFrom !== null, noisyDay: candidate && this.noisyDay(row.day), sigma });
+    const context: PairContext = { actions, listedNear, bcCovered: anyBetween(this.bcDays, row.day - near, row.day), acrossRename: renamedFrom !== null, noisyDay: candidate && this.noisyDay(row.day), sigma, after };
+    let factor = decideFactor(prev, row, context);
+    let usedActions = actions;
+    // Nothing within the pair: a split or bonus listed a few days off whose ratio the gap fits closely.
+    if (!factor && close && !actions.some((action) => action.parts.length)) {
+      for (const group of this.listedBetween(symbols, row.day - near, row.day + near, row.day)) {
+        if (!group.some((action) => action.parts.length)) continue;
+        factor = decideFactor(prev, row, { ...context, actions: group, offDate: true });
+        if (factor) {
+          usedActions = group;
+          break;
+        }
+      }
+    }
+    if (factor?.source === "corporate_action") for (const action of usedActions) this.used.add(`${action.symbol}|${action.exDay}`);
     return factor && renamedFrom ? { ...factor, renamedFrom } : factor;
   }
 }
@@ -382,7 +522,7 @@ export function deriveFactors(db: Db, options: DeriveOptions = {}): DeriveResult
   const derivation = new Derivation(db, renames, from, to);
   const wanted = options.symbols ? new Set(options.symbols) : null;
   const symbols = options.symbols ?? (db.prepare("select distinct symbol from cash_bhav where day between ? and ?").pluck().all(from, to) as string[]);
-  const columns = "symbol, day, series, prev_close, o, c";
+  const columns = "symbol, day, series, prev_close, o, h, c";
   const rowsOf = db.prepare(`select ${columns} from cash_bhav where symbol = ? and day between ? and ? order by day`);
   const before = db.prepare(`select ${columns} from cash_bhav where symbol = ? and day < ? order by day desc limit 1`);
   const firstFrom = db.prepare(`select ${columns} from cash_bhav where symbol = ? and day >= ? order by day limit 1`);
@@ -401,9 +541,10 @@ export function deriveFactors(db: Db, options: DeriveOptions = {}): DeriveResult
       const skip = new Set(earlier.length ? (storedDays.all(symbol, earlier[0].day, earlier[earlier.length - 1].day) as number[]) : []);
       for (let i = 1; i < earlier.length; i += 1) if (!skip.has(earlier[i].day) && earlier[i].c > 0 && earlier[i - 1].c > 0) returns.push(Math.log(earlier[i].c / earlier[i - 1].c));
     }
-    for (const row of rows) {
+    for (const [i, row] of rows.entries()) {
       if (prev) {
-        const factor = derivation.pair(prev, row, null, volatility(returns));
+        const after = rows.slice(i + 1, i + 1 + STAY_SESSIONS).filter((next) => next.day - row.day <= INFER_MAX_GAP_MS).map((next) => next.c);
+        const factor = derivation.pair(prev, row, null, volatility(returns), after);
         if (factor) factors.push(factor);
         // A factor's own move stays out of the volatility, like a move across weeks without a session.
         else if (prev.c > 0 && row.c > 0 && row.day - prev.day <= INFER_MAX_GAP_MS) {
@@ -523,7 +664,7 @@ export function factorStats(db: Db): FactorStats {
 }
 
 /** Bump when the derivation changes: the server derives every factor again on its next start. */
-export const ADJUSTMENT_VERSION = 2;
+export const ADJUSTMENT_VERSION = 3;
 const KV_KEY = "adjustments";
 
 export interface AdjustmentRun {
@@ -544,6 +685,8 @@ export function lastAdjustmentRun(db: Db): AdjustmentRun | null {
  * request rebuilds them). A broker's series don't depend on these factors.
  */
 export function rederiveAll(db: Db, options: { endOfDay: boolean; now: number }): DeriveResult & { reset: string[] } {
+  // The stored kinds and ratios, as today's parser reads the purposes (the derivation reads them afresh anyway).
+  refreshCorporateActions(db);
   const result = deriveFactors(db);
   const reset = new Set<string>();
   if (options.endOfDay && result.changed.length) {

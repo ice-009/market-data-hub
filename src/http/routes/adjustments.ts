@@ -31,6 +31,7 @@ const actionRow = (action: StoredCorporateAction) => ({
   purpose: action.purpose,
   kinds: action.kinds,
   ratio: action.ratio,
+  partial: action.partial,
   series: action.series,
   company: action.company,
 });

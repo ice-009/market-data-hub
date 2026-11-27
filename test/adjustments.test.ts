@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createKey } from "../src/auth/keys.js";
 import { compareSeries } from "../src/history/adjustCheck.js";
 import { checkAdjustments } from "../src/history/adjustCheck.js";
-import { ADJUSTMENT_VERSION, cumulative, decideFactor, deriveFactors, ensureFactors, inferRatio, lastAdjustmentRun, listingFactors, prevCloseRatio, readFactors, rederiveAll, volatility, type Factor, type PairContext } from "../src/history/adjustments.js";
+import { ADJUSTMENT_VERSION, cumulative, decideFactor, deriveFactors, ensureFactors, inferLooseRatio, inferPartial, inferRatio, lastAdjustmentRun, listingFactors, prevCloseRatio, readFactors, rederiveAll, volatility, type Factor, type PairContext } from "../src/history/adjustments.js";
 import { applyCashBhav } from "../src/history/fromBhav.js";
 import { archiveDaily } from "../src/history/fromArchive.js";
 import { readSeries, writeBars } from "../src/history/store.js";
@@ -15,7 +15,7 @@ import { importDay, prUrl, type NseContext } from "../src/nse/datasets.js";
 import { classifyPurpose, corporateActionsFileDay, parseCorporateActions, rightsTerms } from "../src/nse/parsers/corporateActions.js";
 import type { CashBhavRow } from "../src/nse/parsers/cashBhav.js";
 import { parseCmBhav } from "../src/nse/parsers/cmBhav.js";
-import { corporateActionDaysRead, markDay, readCorporateActions, writeCashDay, writeCorporateActions, writeSymbolChanges, type StoredCorporateAction } from "../src/nse/store.js";
+import { corporateActionDaysRead, markDay, readCorporateActions, refreshCorporateActions, writeCashDay, writeCorporateActions, writeSymbolChanges, type StoredCorporateAction } from "../src/nse/store.js";
 import { unzipFile } from "../src/nse/unzip.js";
 import type { Db } from "../src/db.js";
 import { DAY_MS, isWeekday, isoDay, parseIsoDay } from "../src/time.js";
@@ -28,9 +28,11 @@ import { fakeFetch, fakeTime, type Route } from "./support/nse.js";
 // TATASTEEL; the hub's store of the 2025–26 files for the others), the bc
 // fixtures are real PR zips' corporate-actions files (PR011010's Bc011010.csv;
 // PR040425 trimmed to its bm and bc files; bc14112025.csv trimmed to 40 rows;
-// PR100125's Bc100125.csv, its equity rows), and the old-format cm bhavcopies
-// of 28 Feb and 1 Mar 1997 and 11–12 Oct 2001 are NSE's files trimmed to a few
-// tickers.
+// PR100125's Bc100125.csv, its equity rows; PR200910's Bc200910.csv and
+// PR220611's Bc220611.csv, two tickers each), and the old-format cm bhavcopies
+// of 28 Feb and 1 Mar 1997, 11–12 Oct 2001, 20–21 Sep 2010 and 22–23 Jun 2011
+// are NSE's files trimmed to a few tickers. Prices in the pure tests are NSE's
+// rows as the hub stores them (#58).
 
 const d = (iso: string) => parseIsoDay(iso)!;
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
@@ -110,6 +112,22 @@ describe("NSE's corporate-actions file (the PR zip's bc file)", () => {
       ["DIV- FIN RS.3+SPL RS.7.50", ["dividend"], null],
       ["BUY BACK", ["buyback"], null],
       ["Annual General Meeting", ["other"], null],
+      // A bonus and a split on one ex-date multiply; NSE's spellings of both (#58).
+      ["BON1:1/FV SPLT RS10TO RE1", ["bonus", "split"], 0.05], // TITAN, 23 Jun 2011
+      ["BON 1:1/SPLIT RS.10TORS.2", ["bonus", "split"], 0.1], // BAJFINANCE, 8 Sep 2016
+      ["BONUS1:1/FV SPL-RS10TORS5", ["bonus", "split"], 0.25], // TECHM, 19 Mar 2015
+      ["BON 1:1/SPL RS10 TO RS2", ["bonus", "split"], 0.1], // HINDZINC, 7 Mar 2011
+      ["BONS1:1/FV SPLT RS5TO RE1", ["bonus", "split"], 0.1], // BLKASHYAP
+      ["FV SPL-RS10TORS5/BON-2:1", ["bonus", "split"], 1 / 6], // ENGINERSIN
+      ["BONUS 1:1/SPLIT RS10 TO 2", ["bonus", "split"], 0.1], // DEEPAKNTR
+      ["DIV-2.50/FV SPL RS10TORS2", ["split", "dividend"], 0.2], // BHUSANSTL, 21 Sep 2010
+      ["DIV-RS 2/FV-SPTLRS10TORS2", ["split", "dividend"], 0.2], // GREAVESCOT
+      ["SUB DIV FRM RS 10 TO RS 2", ["split"], 0.2], // LAOPALA: a sub-division, not a dividend
+      ["AGM/FV SPLT FRM 10 TO 1", ["split"], 0.1], // CCAVENUE (INFIBEAM)
+      ["FVSPLTFRM 761.25TO76.125", ["split"], 0.1], // an ETF
+      ["DV-FIN 7.5+SPL 7.5/BON1:1", ["bonus", "dividend"], 0.5], // RAJPALAYAM: SPL without face values is a special dividend
+      ["SPL DIV RS 500 PER SHARE", ["dividend"], null],
+      ["BON 1 DVR : 4 EQ SHARES", ["bonus"], null], // DVR shares aren't more of the same shares
     ];
     for (const [purpose, kinds, ratio] of cases) {
       const meaning = classifyPurpose(purpose);
@@ -117,11 +135,28 @@ describe("NSE's corporate-actions file (the PR zip's bc file)", () => {
       if (ratio === null) expect(meaning.ratio, purpose).toBeNull();
       else expect(meaning.ratio, purpose).toBeCloseTo(ratio, 10);
     }
+    // Named without terms — none given, or cut off by NSE's 25-character column: `partial`, the gap decides.
+    expect(classifyPurpose("AGM/DIV-RS 29.50/BONUS")).toMatchObject({ kinds: ["bonus", "dividend"], ratio: null, partial: true }); // INFY, 15 Jun 2015
+    expect(classifyPurpose("FV SPLT FRM RS 10/- TO RS")).toMatchObject({ kinds: ["split"], ratio: null, partial: true, parts: [{ kind: "split", ratio: null, from: 10 }] }); // CONCOR, 26 Jun 2018
+    expect(classifyPurpose("BON 1:1/SPLIT RS.10TORS.2")).toMatchObject({ partial: false, parts: [{ kind: "bonus", ratio: 0.5 }, { kind: "split", ratio: 0.2 }] });
+    expect(classifyPurpose("BON 1 DVR : 4 EQ SHARES").partial).toBe(false);
     expect(rightsTerms("RIGHTS 3:25@PRM RS 1799")).toEqual({ offered: 3, held: 25, price: 1799 });
     expect(rightsTerms("RGHTS 2:7 @PRM RS 3496/-")).toEqual({ offered: 2, held: 7, price: 3496 });
     expect(rightsTerms("RIGHTS 55:91 @PRM RS 121")).toEqual({ offered: 55, held: 91, price: 121 });
     expect(rightsTerms("RIGHTS 5:9")).toEqual({ offered: 5, held: 9, price: null });
     expect(rightsTerms("BONUS 1:1")).toBeNull();
+  });
+
+  it("reads 2010–11 files' combined and FV SPL purposes as NSE printed them (#58)", () => {
+    const june = parseCorporateActions(fixture("Bc220611.csv").toString("utf8")).rows;
+    expect(june.find((row) => row.symbol === "TITAN")).toMatchObject({ series: "EQ", exDay: d("2011-06-23"), purpose: "BON1:1/FV SPLT RS10TO RE1" });
+    expect(classifyPurpose(june.find((row) => row.symbol === "TITAN")!.purpose).ratio).toBeCloseTo(0.05, 12);
+    const september = parseCorporateActions(fixture("Bc200910.csv").toString("utf8")).rows;
+    expect(september.map((row) => [row.symbol, classifyPurpose(row.purpose).kinds, classifyPurpose(row.purpose).ratio])).toEqual([
+      ["BHUSANSTL", ["split", "dividend"], 0.2],
+      // A final and a special dividend: "SPL" here is no split.
+      ["GREAVESCOT", ["dividend"], null],
+    ]);
   });
 });
 
@@ -197,6 +232,49 @@ describe("deriving factors (pure)", () => {
     expect(pair(4.93, 4.93, 4.93, 4.69, { ...none, actions: [action("RIGHTS 5:9")], listedNear: true, bcCovered: true })).toBeNull(); // PRAXIS: no price, nothing to compute
   });
 
+  it("reads a combined, a cut-off and a ratio-less purpose against the gap (#58)", () => {
+    const listed = (purpose: string): PairContext => ({ ...none, actions: [action(purpose)], listedNear: true, bcCovered: true });
+    // TITAN, 23 Jun 2011: a 1:1 bonus and a ₹10 → ₹1 split, 4292.45 → 210 / 228.9.
+    const titan = pair(4292.45, 4292.45, 210, 228.9, listed("BON1:1/FV SPLT RS10TO RE1"))!;
+    expect(titan).toMatchObject({ source: "corporate_action", action: "BON1:1/FV SPLT RS10TO RE1" });
+    expect(titan.factor).toBeCloseTo(0.05, 12);
+    // INFY, 15 Jun 2015: "AGM/DIV-RS 29.50/BONUS", no ratio — the usual bonus the gap fits: 1:1.
+    expect(pair(1975.05, 1975.05, 976.95, 990.45, listed("AGM/DIV-RS 29.50/BONUS"))).toMatchObject({ factor: 0.5, source: "corporate_action" });
+    // CONCOR, 26 Jun 2018: NSE cut "FV SPLT FRM RS 10/- TO RS" off before the new face value: ₹10 → ₹5.
+    expect(pair(1244.4, 1244.4, 613.3, 623.9, listed("FV SPLT FRM RS 10/- TO RS"))).toMatchObject({ factor: 0.5, source: "corporate_action" });
+    // A ratio-less bonus on a day the price didn't move: no guess.
+    expect(pair(1975.05, 1975.05, 1970, 1980, listed("AGM/DIV-RS 29.50/BONUS"))).toBeNull();
+    expect(inferPartial(1, [{ kind: "bonus", ratio: null }], 0.97, 0.96)).toBeNull();
+    // AXITA, 20 Sep 2024, BONUS 1:3: opened at 0.866 — as near 1 as 0.75 — and closed at 0.802: the close bears it out.
+    expect(pair(21.59, 21.59, 18.7, 17.32, listed("BONUS 1:3"))).toMatchObject({ factor: 0.75, source: "corporate_action" });
+  });
+
+  it("takes a split listed a few days off only when the gap fits it closely (#58)", () => {
+    // KRITIKA: the split is listed for 29 Aug 2022; it traded at the old price that day and at a fifth on the 30th.
+    const off: PairContext = { ...none, actions: [action("FVSPLT FRM RS 10 TO RS 2")], listedNear: true, bcCovered: true, offDate: true };
+    expect(pair(140.5, 140.5, 29.5, 29.5, off)).toMatchObject({ factor: 0.2, source: "corporate_action" });
+    expect(pair(140.5, 140.5, 100, 98, off)).toBeNull();
+    // A 1:10 bonus's 0.91 is a move a normal day makes: no telling which day was the bonus.
+    expect(pair(100, 100, 90.9, 90.9, { ...off, actions: [action("BONUS 1:10")], sigma: 0.03 })).toBeNull();
+  });
+
+  it("picks the ratio both open and close fit, and reads old ex-dates whose first trade was off — not crashes (#58)", () => {
+    // SUZLON, 21 Jan 2008, a 1:5 split: opened at 0.224 (a shade nearer 1/4), closed at 0.193.
+    expect(inferRatio(424.4 / 1896.9, 366.05 / 1896.9)).toBe(0.2);
+    expect(pair(1896.9, 1896.9, 424.4, 366.05)).toMatchObject({ factor: 0.2, source: "price_gap" });
+    // DIVISLAB, 30 Jul 2009, a 1:1 bonus: opened at 0.563, closed at 0.495, and stayed there.
+    const divis = { ...none, after: [536.05, 511.7, 499.35, 498.6, 485.95] };
+    expect(pair(1108.55, 1108.55, 624, 549.15)).toBeNull(); // the open alone is too far off
+    expect(pair(1108.55, 1108.55, 624, 549.15, divis)).toMatchObject({ factor: 0.5, source: "price_gap" });
+    // SATYAMCOMP, 7 Jan 2009: opened at the last close and crashed to 0.225 — no split.
+    expect(pair(178.95, 178.95, 179, 40.25, { ...none, after: [23.75, 34.4, 31.05, 29.85] })).toBeNull();
+    // An open at half and a close at half, but a trade back above the old price that day (PASUPATFAB, 9 May 2000).
+    expect(inferLooseRatio(4 / 7, 3.5 / 7, [3.5, 3.6, 3.4], 3.5, 9.9 / 7)).toBeNull();
+    expect(inferLooseRatio(4 / 7, 3.5 / 7, [3.5, 3.6, 3.4], 3.5, 4 / 7)).toBe(0.5);
+    // Moving on from there: a halving that doesn't hold.
+    expect(inferLooseRatio(624 / 1108.55, 549.15 / 1108.55, [900, 950, 1000], 549.15)).toBeNull();
+  });
+
   it("multiplies factors after a bar", () => {
     const factors = [{ day: d("2026-01-10"), factor: 0.5 }, { day: d("2026-02-10"), factor: 0.2 }] as Factor[];
     const at = cumulative(factors);
@@ -246,6 +324,51 @@ describe("deriving factors from the store", () => {
     expect(factorsOf(t.db, "SIEMENS")).toEqual([{ date: "2025-04-07", factor: Number((2450 / 4928.15).toFixed(5)), source: "corporate_action" }]);
     expect(readFactors(t.db, "SIEMENS")[0].action).toBe("DEMERGER");
     expect(factorsOf(t.db, "CRASHCO")).toEqual([]);
+  });
+
+  it("derives TITAN's bonus-and-split and BHUSANSTL's FV SPL from NSE's own files, and refreshes what was stored under the old parser (#58)", () => {
+    t = makeHub();
+    for (const name of ["cm20SEP2010bhav.csv", "cm21SEP2010bhav.csv", "cm22JUN2011bhav.csv", "cm23JUN2011bhav.csv"]) {
+      const parsed = parseCmBhav(fixture(name).toString("utf8"));
+      writeCashDay(t.db, parsed.tradeDate!, parsed.rows, 0);
+    }
+    storeBc(t.db, "Bc200910.csv", fixture("Bc200910.csv").toString("utf8"));
+    storeBc(t.db, "Bc220611.csv", fixture("Bc220611.csv").toString("utf8"));
+    deriveFactors(t.db);
+    const all = t.db.prepare("select symbol, day, factor, source, action from adjustment_factors order by day").all() as Array<{ symbol: string; day: number; factor: number; source: string; action: string }>;
+    expect(all.map((row) => [row.symbol, isoDay(row.day), Number(row.factor.toFixed(6)), row.source, row.action])).toEqual([
+      ["BHUSANSTL", "2010-09-21", 0.2, "corporate_action", "DIV-2.50/FV SPL RS10TORS2"],
+      ["TITAN", "2011-06-23", 0.05, "corporate_action", "BON1:1/FV SPLT RS10TO RE1"],
+    ]);
+    // 22 Jun's 4292.45 in 23 Jun's shares: 20 for one.
+    expect(archiveDaily(t.db, "TITAN", d("2011-06-22"), d("2011-06-23")).bars.map((bar) => bar.c)).toEqual([214.62, 228.9]);
+
+    // A row stored by the old parser (a split only, 0.1): rewritten as today's parser reads it.
+    t.db.prepare("update corporate_actions set kinds = 'split', ratio = 0.1 where symbol = 'TITAN'").run();
+    expect(refreshCorporateActions(t.db)).toBe(1);
+    expect(t.db.prepare("select kinds, ratio from corporate_actions where symbol = 'TITAN'").get()).toEqual({ kinds: "bonus,split", ratio: 0.05 });
+    expect(refreshCorporateActions(t.db)).toBe(0);
+  });
+
+  it("takes an action listed for a day the ticker didn't trade, or a few days off, once (#58)", () => {
+    t = makeHub();
+    const bc = (lines: string[]) => parseCorporateActions(`SERIES,SYMBOL,SECURITY,RECORD_DT,BC_STRT_DT,BC_END_DT,EX_DT,ND_STRT_DT,ND_END_DT,PURPOSE\n${lines.join("\n")}\n`).rows;
+    // ABMINTLTD: BONUS 5:1, ex 15 Mar 2017 — no trade that day; at a sixth on the 16th.
+    seed(t.db, { ABMINTLTD: [["2017-03-10", 193.8, 203.45, 203.45], ["2017-03-14", 203.45, 213.35, 213.6], ["2017-03-16", 213.6, 37.35, 37.35], ["2017-03-17", 37.35, 39.2, 39.2]] });
+    writeCorporateActions(t.db, d("2017-03-14"), bc(["BE,ABMINTLTD,ABM International Ltd,16/03/2017, , ,15/03/2017, , ,BONUS 5:1"]));
+    deriveFactors(t.db);
+    expect(factorsOf(t.db, "ABMINTLTD")).toEqual([{ date: "2017-03-16", factor: Number((1 / 6).toFixed(5)), source: "corporate_action" }]);
+
+    t.cleanup();
+    t = makeHub();
+    // KRITIKA: the split is listed for 29 Aug 2022, which traded at the old price; the 30th at a fifth.
+    seed(t.db, {
+      KRITIKA: [["2022-08-24", 116.3, 122.1, 121.45], ["2022-08-25", 121.45, 127.5, 127.5], ["2022-08-26", 127.5, 133.85, 133.85], ["2022-08-29", 133.85, 140.5, 140.5], ["2022-08-30", 140.5, 29.5, 29.5], ["2022-09-01", 29.5, 30.95, 30.95], ["2022-09-02", 30.95, 32.4, 32.4]],
+    });
+    writeCorporateActions(t.db, d("2022-08-26"), bc(["EQ,KRITIKA,Kritika Wires Ltd,29/08/2022, , ,29/08/2022, , ,FVSPLT FRM RS 10 TO RS 2"]));
+    deriveFactors(t.db);
+    expect(factorsOf(t.db, "KRITIKA")).toEqual([{ date: "2022-08-30", factor: 0.2, source: "corporate_action" }]);
+    expect(readFactors(t.db, "KRITIKA")[0].action).toBe("FVSPLT FRM RS 10 TO RS 2");
   });
 
   it("reads no action into the 1997 and 2001 files' PREV_CLOSE: another series' close, or a whole file off (#53)", () => {

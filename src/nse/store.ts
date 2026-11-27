@@ -1,9 +1,11 @@
+import { calendar, type Calendar } from "../calendar/calendar.js";
+import { isListedHoliday } from "../calendar/store.js";
 import type { Db } from "../db.js";
 import type { CashBhavRow } from "./parsers/cashBhav.js";
 import { indexSymbolForName } from "../reference/indices.js";
 import type { FoDayRecord, FoLeg } from "./parsers/foBhav.js";
 import type { IndexCloseRow } from "./parsers/indexClose.js";
-import { classifyPurpose, type ActionKind, type CorporateActionRow } from "./parsers/corporateActions.js";
+import { classifyPurpose, type ActionKind, type CorporateActionRow, type PricePart } from "./parsers/corporateActions.js";
 import type { ResultsEvent } from "./parsers/results.js";
 import type { SymbolChangeRow } from "./parsers/symbolChange.js";
 
@@ -39,6 +41,22 @@ export function dayStatuses(db: Db, dataset: DayDataset, from = Number.MIN_SAFE_
   if (dataset === "fo_bhav") return days;
   const fo = checkedDays(db, "fo_bhav", from);
   for (const [day, status] of days) if (status === "mismatch" && fo.get(day) === "holiday") days.set(day, "holiday");
+  return days;
+}
+
+/**
+ * What archive coverage and the adjustment factors count as checked: the day
+ * statuses, plus every day the trading calendar names a holiday on the word of
+ * NSE's list or a person (`hub data calendar holiday`; src/calendar/store.ts),
+ * stored or not — a weekday NSE's archive can't settle is settled by hand, and
+ * daily candles and pairs of sessions run across it (#59). Not for deciding
+ * what to ask NSE: importDay records a listed holiday itself.
+ */
+export function coverageStatuses(db: Db, dataset: DayDataset, from = Number.MIN_SAFE_INTEGER, cal: Calendar = calendar()): Map<number, DayStatus> {
+  const days = dayStatuses(db, dataset, from);
+  for (const day of new Set([...cal.overrides.keys(), ...cal.listedHolidays.keys()])) {
+    if (day >= from && days.get(day) !== "ok" && isListedHoliday(cal, day)) days.set(day, "holiday");
+  }
   return days;
 }
 
@@ -362,6 +380,10 @@ export interface StoredCorporateAction {
   recordDay: number | null;
   kinds: ActionKind[];
   ratio: number | null;
+  /** The bonus, split and consolidation the purpose names (classifyPurpose). */
+  parts: PricePart[];
+  /** One of them without its terms: the ratio comes from the price gap. */
+  partial: boolean;
   firstDay: number;
   lastDay: number;
 }
@@ -379,18 +401,47 @@ interface CorporateActionDbRow {
   last_day: number;
 }
 
-const toAction = (row: CorporateActionDbRow): StoredCorporateAction => ({
-  symbol: row.symbol,
-  exDay: row.ex_day,
-  purpose: row.purpose,
-  series: row.series,
-  company: row.company,
-  recordDay: row.record_day,
-  kinds: row.kinds.split(",") as ActionKind[],
-  ratio: row.ratio,
-  firstDay: row.first_day,
-  lastDay: row.last_day,
-});
+// The purpose is read again on every read, so what the stored kinds and ratio
+// say never lags the parser (refreshCorporateActions rewrites them for SQL readers).
+const toAction = (row: CorporateActionDbRow): StoredCorporateAction => {
+  const meaning = classifyPurpose(row.purpose);
+  return {
+    symbol: row.symbol,
+    exDay: row.ex_day,
+    purpose: row.purpose,
+    series: row.series,
+    company: row.company,
+    recordDay: row.record_day,
+    kinds: meaning.kinds,
+    ratio: meaning.ratio,
+    parts: meaning.parts,
+    partial: meaning.partial,
+    firstDay: row.first_day,
+    lastDay: row.last_day,
+  };
+};
+
+/**
+ * Classify every stored purpose again with today's parser and rewrite the
+ * stored kinds and ratio where they changed (after a parser fix: "BON
+ * 1:1/SPLIT RS.10TORS.2" was stored as 0.5, is 0.1). Returns how many rows changed.
+ */
+export function refreshCorporateActions(db: Db): number {
+  const rows = db.prepare("select symbol, ex_day, purpose, kinds, ratio from corporate_actions").all() as Array<Pick<CorporateActionDbRow, "symbol" | "ex_day" | "purpose" | "kinds" | "ratio">>;
+  const update = db.prepare("update corporate_actions set kinds = ?, ratio = ? where symbol = ? and ex_day = ? and purpose = ?");
+  let changed = 0;
+  db.transaction(() => {
+    for (const row of rows) {
+      const meaning = classifyPurpose(row.purpose);
+      const kinds = meaning.kinds.join(",");
+      const same = kinds === row.kinds && (meaning.ratio === null ? row.ratio === null : row.ratio !== null && Math.abs(meaning.ratio - row.ratio) < 1e-12);
+      if (same) continue;
+      update.run(kinds, meaning.ratio, row.symbol, row.ex_day, row.purpose);
+      changed += 1;
+    }
+  })();
+  return changed;
+}
 
 /** Stored corporate actions with from <= ex-date <= to, for `symbols` (all when absent); by ex-date. */
 export function readCorporateActions(db: Db, from: number, to: number, symbols?: readonly string[]): StoredCorporateAction[] {

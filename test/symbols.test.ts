@@ -273,6 +273,40 @@ describe("ticker renames in the hub", () => {
       expect((await get("/v1/symbols/history?symbol=INFY")).body.changes[0].continuous).toBe(false);
     });
 
+    it("lists every ticker in the stored cash archive, a renamed one with its listing, in pages (#60)", async () => {
+      const ctx = await stored();
+      const get = withKey();
+      // Before NSE's list of renames is in: every ticker, no listings yet.
+      expect((await get("/v1/symbols/archive")).body).toMatchObject({ from: null, to: null, series: null, count: 5, returned: 5, next: null, renamesFetchedAt: null });
+      await refreshSymbolChanges(ctx);
+      const all = (await get("/v1/symbols/archive")).body;
+      expect(all.renamesFetchedAt).toBe(readRuns(ctx.db).get("symbol_changes")!.lastSuccessAt);
+      expect(all.symbols.map((row: { symbol: string }) => row.symbol)).toEqual(["20MICRONS", "INFOSYSTCH", "INFY", "SBIN", "TATAMOTORS"]);
+      const infosys = { current: "INFY", names: [{ symbol: "INFOSYSTCH", from: null, to: "2011-06-28" }, { symbol: "INFY", from: "2011-06-29", to: null }] };
+      expect(all.symbols[1]).toEqual({ symbol: "INFOSYSTCH", first: "2011-06-28", last: "2011-06-28", sessions: 1, series: ["EQ"], listing: infosys });
+      expect(all.symbols[2]).toMatchObject({ symbol: "INFY", first: "2011-06-29", listing: infosys });
+      expect(all.symbols[3]).toEqual({ symbol: "SBIN", first: "2011-06-28", last: "2011-06-29", sessions: 2, series: ["EQ"], listing: null });
+      expect(all.symbols[4].listing).toEqual({ current: "TMPV", names: [{ symbol: "TELCO", from: null, to: "2003-12-25" }, { symbol: "TATAMOTORS", from: "2003-12-26", to: "2025-10-23" }, { symbol: "TMPV", from: "2025-10-24", to: null }] });
+      // One day's universe.
+      expect((await get("/v1/symbols/archive?from=2011-06-29&to=2011-06-29")).body.symbols.map((row: { symbol: string }) => row.symbol)).toEqual(["20MICRONS", "INFY", "SBIN", "TATAMOTORS"]);
+      // Pages: `next` is the `after` of the next one.
+      const pages: string[][] = [];
+      let after: string | null = "";
+      while (after !== null) {
+        const page: { count: number; next: string | null; symbols: Array<{ symbol: string }> } = (await get(`/v1/symbols/archive?limit=2${after ? `&after=${after}` : ""}`)).body;
+        expect(page.count).toBe(5);
+        pages.push(page.symbols.map((row) => row.symbol));
+        after = page.next;
+      }
+      expect(pages).toEqual([["20MICRONS", "INFOSYSTCH"], ["INFY", "SBIN"], ["TATAMOTORS"]]);
+      // A day stored since: the list follows.
+      writeCashDay(ctx.db, d("2011-06-30"), [{ symbol: "NEWCO", series: "BE", prevClose: 1, open: 1, high: 1, low: 1, close: 1, volume: 1, deliveryPct: null }], 1);
+      expect((await get("/v1/symbols/archive")).body.count).toBe(6);
+      expect((await get("/v1/symbols/archive?series=be")).body.symbols.map((row: { symbol: string }) => row.symbol)).toEqual(["NEWCO"]);
+      for (const bad of ["series=N1", "limit=0", "limit=10001", "after=no%20such", "from=2011-07-01&to=2011-06-01"]) expect((await get(`/v1/symbols/archive?${bad}`)).status).toBe(400);
+      expect((await withKey(["fo"])("/v1/symbols/archive")).status).toBe(403);
+    });
+
     it("lists the renames, by date range or ticker", async () => {
       const ctx = await stored();
       await refreshSymbolChanges(ctx);
