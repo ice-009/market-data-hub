@@ -75,7 +75,7 @@ export interface Health {
   warnings: string[];
 }
 
-const LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip (results calendar)", index_close: "Index file" };
+const LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip (results calendar)", index_close: "Index file", fo_ban: "F&O ban list" };
 const REFRESHED_LABEL = { lots: "Lot sizes", fo_ban: "F&O ban list" } as const;
 const RUN_LABEL: Record<DatasetName, string> = { ...LABEL, ...REFRESHED_LABEL, symbol_changes: "Ticker renames (symbolchange.csv)" };
 const age = (ms: number) => (ms >= 2 * DAY_MS ? `${Math.floor(ms / DAY_MS)} days` : `${Math.max(1, Math.round(ms / 3_600_000))} hours`);

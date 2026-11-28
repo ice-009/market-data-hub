@@ -3,6 +3,7 @@ import { normalizeSymbol } from "../../broker/symbols.js";
 import type { Db } from "../../db.js";
 import { lastAdjustmentRun, readListingFactors } from "../../history/adjustments.js";
 import type { Hub } from "../../hub.js";
+import { lotSources, lotsKnownFrom, lotHistory } from "../../nse/lotHistory.js";
 import { lastOkDay } from "../../nse/store.js";
 import { loadRenames, storedTraded } from "../../reference/renames.js";
 import { isoDay, istDayKey } from "../../time.js";
@@ -12,7 +13,10 @@ import { ParamError, parseTime } from "../params.js";
 // Reference data as it was on past days, for point-in-time readers (Tradex's
 // asOf, ice-009/tradex-public#19). All from what the hub already stores:
 //   GET /v1/lots/history[?symbol][&from&to]   history  lot per stock per F&O day, as change points
+//                                                      (NSE's lot column from 8 Jul 2024, derived from
+//                                                      the open interest before: src/nse/lotHistory.ts)
 //   GET /v1/fo/ban/history[?from&to]          fo       the stored F&O ban list of every trade date
+//                                                      (NSE's archive from 2008), and the sessions without one
 //   GET /v1/adjustments/batch?symbols=A,B     history  many listings' split/bonus factors in one request
 // Each history answer says from when it is known (`knownFrom`): before that day
 // the hub has no record, and a reader must not assume today's value.
@@ -28,29 +32,6 @@ function dayRange(from: string | undefined, to: string | undefined, today: numbe
   return range;
 }
 
-/** First F&O day whose bhavcopy carries a lot column (NSE's format from 8 Jul 2024); older files don't. */
-export function lotsKnownFrom(db: Db): number | null {
-  return (db.prepare("select min(day) as day from fo_futures where lot is not null").get() as { day: number | null }).day;
-}
-
-/**
- * Lot per stock between `from` and `to` as change points: each stock's first
- * stored day in the range, then every day its lot differs from the day before.
- */
-export function lotHistory(db: Db, from: number, to: number, symbol?: string): Record<string, Array<{ day: number; lot: number }>> {
-  const rows = (
-    symbol
-      ? db.prepare("select symbol, day, lot from fo_futures where symbol = ? and day between ? and ? and lot is not null order by day").all(symbol, from, to)
-      : db.prepare("select symbol, day, lot from fo_futures where day between ? and ? and lot is not null order by symbol, day").all(from, to)
-  ) as Array<{ symbol: string; day: number; lot: number }>;
-  const out: Record<string, Array<{ day: number; lot: number }>> = {};
-  for (const row of rows) {
-    const list = (out[row.symbol] ??= []);
-    if (list.at(-1)?.lot !== row.lot) list.push({ day: row.day, lot: row.lot });
-  }
-  return out;
-}
-
 /** Stored ban lists with from <= trade date <= to, oldest first. */
 export function banHistory(db: Db, from: number, to: number): Array<{ tradeDate: number; symbols: string[]; fetchedAt: number }> {
   const rows = db.prepare("select trade_date, symbols, fetched_at from fo_ban where trade_date between ? and ? order by trade_date").all(from, to) as Array<{ trade_date: number; symbols: string; fetched_at: number }>;
@@ -59,6 +40,24 @@ export function banHistory(db: Db, from: number, to: number): Array<{ tradeDate:
 
 export function banKnownFrom(db: Db): number | null {
   return (db.prepare("select min(trade_date) as day from fo_ban").get() as { day: number | null }).day;
+}
+
+/**
+ * F&O sessions (stored F&O bhavcopy days) from..to with no stored ban list,
+ * and whether NSE was asked for one: "no_file" (its archive has none for
+ * that day) or "not_downloaded".
+ */
+export function banGaps(db: Db, from: number, to: number): Array<{ day: number; reason: "no_file" | "not_downloaded" }> {
+  const rows = db
+    .prepare(
+      `select f.day, b.status from nse_days f
+       left join nse_days b on b.dataset = 'fo_ban' and b.day = f.day
+       where f.dataset = 'fo_bhav' and f.status = 'ok' and f.day between ? and ?
+         and not exists (select 1 from fo_ban where trade_date = f.day)
+       order by f.day`,
+    )
+    .all(from, to) as Array<{ day: number; status: string | null }>;
+  return rows.map((row) => ({ day: row.day, reason: row.status === null ? "not_downloaded" : "no_file" }));
 }
 
 export function pointInTimeRoutes(app: Hono<HubEnv>, hub: Hub) {
@@ -82,7 +81,14 @@ export function pointInTimeRoutes(app: Hono<HubEnv>, hub: Hub) {
     if (lastDay === null) return c.json(errorBody("No F&O bhavcopy is stored yet; the hub fetches it in the evening and on start.", "not_ready"), 503);
     const knownFrom = lotsKnownFrom(hub.db);
     const history = knownFrom === null ? {} : lotHistory(hub.db, Math.max(range.from, knownFrom), range.to, symbol ?? undefined);
-    const lots = Object.fromEntries(Object.entries(history).map(([name, changes]) => [name, changes.map((change) => ({ date: isoDay(change.day), day: change.day, lot: change.lot }))]));
+    const lots = Object.fromEntries(
+      Object.entries(history).map(([name, changes]) => [
+        name,
+        changes.map((change) => ({ date: isoDay(change.day), day: change.day, lot: change.lot, source: change.source, ...(change.confidence === "low" ? { confidence: "low" as const } : {}) })),
+      ]),
+    );
+    const sources = lotSources(hub.db);
+    const span = (value: { from: number; to: number } | null) => (value ? { from: isoDay(value.from), to: isoDay(value.to), fromDay: value.from, toDay: value.to } : null);
     return c.json({
       from: range.from === Number.MIN_SAFE_INTEGER ? null : isoDay(range.from),
       to: isoDay(range.to),
@@ -90,6 +96,7 @@ export function pointInTimeRoutes(app: Hono<HubEnv>, hub: Hub) {
       knownFromDay: knownFrom,
       lastDate: isoDay(lastDay),
       lastDay,
+      sources: { bhavcopy: span(sources.bhavcopy), derived: span(sources.derived) },
       lots,
     });
   });
@@ -104,7 +111,8 @@ export function pointInTimeRoutes(app: Hono<HubEnv>, hub: Hub) {
     const knownFrom = banKnownFrom(hub.db);
     if (knownFrom === null) return c.json(errorBody("The F&O ban list hasn't been downloaded from NSE yet; the hub fetches it in the evening and on start.", "not_ready"), 503);
     const days = banHistory(hub.db, range.from, range.to).map((ban) => ({ date: isoDay(ban.tradeDate), day: ban.tradeDate, symbols: ban.symbols, fetchedAt: ban.fetchedAt }));
-    return c.json({ knownFrom: isoDay(knownFrom), knownFromDay: knownFrom, days });
+    const missing = banGaps(hub.db, Math.max(range.from, knownFrom), range.to).map((gap) => ({ date: isoDay(gap.day), day: gap.day, reason: gap.reason }));
+    return c.json({ knownFrom: isoDay(knownFrom), knownFromDay: knownFrom, days, missing });
   });
 
   app.get("/v1/adjustments/batch", requireScope("history"), (c) => {

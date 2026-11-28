@@ -17,6 +17,7 @@ import Database from "better-sqlite3";
 //   7  adjustments             corporate_actions, corporate_action_days, adjustment_factors; see src/history/adjustments.ts
 //   8  data quality            quality_findings, quality_checked; datasets.failures; see src/quality/store.ts
 //  11  trading calendar        calendar_days (holidays and sessions added by hand); see src/calendar/store.ts
+//  12  past reference data     lot_derived (lots before 8 Jul 2024); the ban list's days in nse_days; see src/nse/lotHistory.ts
 //  13  option summaries        option_summaries, option_days (from the F&O bhavcopy); see src/nse/optionStore.ts
 
 export type Db = Database.Database;
@@ -290,8 +291,24 @@ const MIGRATIONS: Array<string | undefined> = [
      close_min integer,
      updated_at integer not null
    );`,
-  // 12: reserved for work in review (NSE reference history, market-data-hub#49/#50).
-  undefined,
+  // Past reference data (market-data-hub#49, #50, #57). lot_derived: the lot of
+  // each old-format F&O day (no lot column before 8 Jul 2024), worked out from
+  // the open interest (src/nse/lotDerive.ts) and rebuilt whole when F&O days
+  // are stored. The ban list becomes a day-by-day dataset (`hub data
+  // nse-history --only ban` downloads NSE's archive of it): every stored trade
+  // date is recorded in nse_days, so a day asked for and not found stays
+  // distinct from one never asked for. Index files of Jun 2014 to Jun 2015 print
+  // their date with slashes, which the parser now reads: they're asked for again.
+  `create table lot_derived (
+     symbol text not null,
+     day integer not null,
+     lot integer not null,
+     confidence text not null check (confidence in ('high', 'low')),
+     primary key (symbol, day)
+   ) without rowid;
+   insert or ignore into nse_days (dataset, day, status, rows, checked_at, note)
+     select 'fo_ban', trade_date, 'ok', json_array_length(symbols), fetched_at, null from fo_ban;
+   delete from nse_days where dataset = 'index_close' and status = 'mismatch' and note = 'file is for no date';`,
   // Daily option summaries (market-data-hub#30): one row per underlying per F&O
   // day, read from every option row of the bhavcopy (src/nse/optionSummary.ts).
   // Totals cover every listed expiry; near_* and next_* the first two expiries

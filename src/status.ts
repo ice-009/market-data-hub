@@ -40,7 +40,7 @@ export function dataFreshness(db: Db) {
     })(),
     indexFile: { lastSession: day(lastOkDay(db, "index_close")), ...archive("index_close"), unmappedNames: unmappedIndexNames(db).length, ...run("index_close") },
     lots: { count: (lots?.count as number | undefined) ?? 0, source: (lots?.source as string | undefined) ?? null, ...run("lots") },
-    foBan: { tradeDate: ban ? isoDay(ban.tradeDate) : null, ...run("fo_ban") },
+    foBan: { tradeDate: ban ? isoDay(ban.tradeDate) : null, ...archive("fo_ban"), ...run("fo_ban") },
     // From the PR zip's board meetings: `upcoming` counts events dated today or later.
     resultsCalendar: { upcoming: countResults(db, istParts().day), lastSession: day(lastOkDay(db, "pr")), ...archive("pr"), ...run("pr") },
     symbolChanges: { count: (renames?.count as number | undefined) ?? 0, isins: isinStats(db), ...run("symbol_changes") },

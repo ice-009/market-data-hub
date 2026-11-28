@@ -5,8 +5,8 @@
 // (the header has been seen cut short: "…,P/B," with no "Div Yield" in Mar
 // 2012). Indices NSE only computes a close for print "-" for open/high/low;
 // unknown numbers are null. The file's own trade date (Index Date,
-// DD-MM-YYYY) is returned so the caller can reject a file served for another
-// day. Some files print it month first instead (6, 10 and 11 Apr 2023 say
+// DD-MM-YYYY; DD/MM/YYYY in the files of Jun 2014 to Jun 2015) is returned so
+// the caller can reject a file served for another day. Some files print it month first instead (6, 10 and 11 Apr 2023 say
 // "04-06-2023", "04-10-2023", "04-11-2023"): given the day asked for, a date
 // that reads as that day month first is that day. Pure.
 
@@ -41,14 +41,14 @@ function utcDay(year: number, month: number, day: number): number | null {
 }
 
 /**
- * "17-11-2026" → day key, or null. With `expected` (the day asked for), a
+ * "17-11-2026" (or "09/06/2014": files from Jun 2014 to Jun 2015 use slashes) → day key, or null. With `expected` (the day asked for), a
  * date that is `expected` read month first ("04-06-2023" for 6 Apr 2023) is
  * `expected`; one that is neither reads day first where it can.
  */
 export function parseDdMmYyyy(value: string, expected?: number): number | null {
-  const match = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(value.trim());
+  const match = /^(\d{1,2})([-/])(\d{1,2})\2(\d{4})$/.exec(value.trim());
   if (!match) return null;
-  const [first, second, year] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const [first, second, year] = [Number(match[1]), Number(match[3]), Number(match[4])];
   const dayFirst = utcDay(year, second, first);
   if (expected === undefined || dayFirst === expected) return dayFirst;
   const monthFirst = utcDay(year, first, second);

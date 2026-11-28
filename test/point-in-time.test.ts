@@ -49,17 +49,18 @@ describe("GET /v1/lots/history", () => {
     expect(all.status).toBe(200);
     expect(all.body).toMatchObject({ from: null, to: "2026-11-20", knownFrom: "2024-07-08", knownFromDay: d("2024-07-08"), lastDate: "2025-01-02" });
     expect(all.body.lots).toEqual({
-      HAL: [{ date: "2024-12-27", day: d("2024-12-27"), lot: 150 }],
+      HAL: [{ date: "2024-12-27", day: d("2024-12-27"), lot: 150, source: "bhavcopy" }],
       SBIN: [
-        { date: "2024-07-08", day: d("2024-07-08"), lot: 1500 },
-        { date: "2024-12-27", day: d("2024-12-27"), lot: 750 },
+        { date: "2024-07-08", day: d("2024-07-08"), lot: 1500, source: "bhavcopy" },
+        { date: "2024-12-27", day: d("2024-12-27"), lot: 750, source: "bhavcopy" },
       ],
     });
+    expect(all.body.sources).toEqual({ bhavcopy: { from: "2024-07-08", to: "2025-01-02", fromDay: d("2024-07-08"), toDay: d("2025-01-02") }, derived: null });
     // The range's first day is a change point even when it isn't the stock's first.
     expect((await get("/v1/lots/history?symbol=sbin&from=2024-07-09&to=2024-12-31")).body.lots).toEqual({
       SBIN: [
-        { date: "2024-07-09", day: d("2024-07-09"), lot: 1500 },
-        { date: "2024-12-27", day: d("2024-12-27"), lot: 750 },
+        { date: "2024-07-09", day: d("2024-07-09"), lot: 1500, source: "bhavcopy" },
+        { date: "2024-12-27", day: d("2024-12-27"), lot: 750, source: "bhavcopy" },
       ],
     });
     // Before the lot column there is nothing, never an earlier or later day's lot.
@@ -105,6 +106,7 @@ describe("the F&O ban list of past trade dates", () => {
         { date: "2026-11-10", day: d("2026-11-10"), symbols: ["ABFRL"], fetchedAt: 1 },
         { date: "2026-11-12", day: d("2026-11-12"), symbols: [], fetchedAt: 2 },
       ],
+      missing: [],
     });
     expect((await get("/v1/fo/ban/history?from=2026-11-11")).body.days.map((day: { date: string }) => day.date)).toEqual(["2026-11-12"]);
     expect((await get("/v1/lots/history")).status).toBe(403); // lots need history
