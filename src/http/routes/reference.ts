@@ -22,6 +22,7 @@ import { ParamError, parseRange, parseTime } from "../params.js";
 //   GET /v1/fo/members?from&to             fo       F&O list on every stored trade day in a range
 //   GET /v1/fo/contracts?symbol            fo       a stock's near/next futures contracts (hub tickers)
 //   GET /v1/fo/ban[?date]                  fo       the F&O ban list (newest, or a stored trade date's)
+//   (GET /v1/fo/participants: ./participants.ts)
 //   GET /v1/lots[?symbol][&date]           history  stock-futures lot sizes (today's, or a past F&O day's)
 //   GET /v1/results-calendar?from&to       history  results dates from the PR zip's board meetings
 //   GET /v1/market/regime[?universe]       history  NIFTY trend + breadth

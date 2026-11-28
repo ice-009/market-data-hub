@@ -13,6 +13,7 @@ import { adjustmentRoutes } from "./routes/adjustments.js";
 import { calendarRoutes } from "./routes/calendar.js";
 import { candleRoutes } from "./routes/candles.js";
 import { optionRoutes } from "./routes/options.js";
+import { participantRoutes } from "./routes/participants.js";
 import { pointInTimeRoutes } from "./routes/pointInTime.js";
 import { qualityRoutes } from "./routes/quality.js";
 import { liveRoutes, liveStatus, type LiveDeps } from "./routes/live.js";
@@ -107,6 +108,7 @@ export function createApp(deps: AppDeps) {
   symbolRoutes(app, deps.hub);
   qualityRoutes(app, deps.hub);
   optionRoutes(app, deps.hub);
+  participantRoutes(app, deps.hub);
   // The live routes share one fan-out per hub (keyed on hub.live.deps); the hub closes their streams at shutdown.
   deps.hub.live.attach(liveRoutes(app, live));
 

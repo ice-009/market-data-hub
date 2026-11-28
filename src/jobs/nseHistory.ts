@@ -60,7 +60,12 @@ import { getJob, resumeTime, updateJob, type HistoryDataset, type Job, type NseH
 //   - when a run that includes F&O ends, the lots of the old-format days (no
 //     lot column before 8 Jul 2024) are derived again from the stored open
 //     interest (src/nse/lotDerive.ts): a few seconds, no requests.
-
+//
+// Participant-wise open interest (market-data-hub#28, `--only participants`):
+// NSE's fao_participant_oi file of every session from 2 Jan 2012, about 3,700
+// requests (~70 minutes), ~2 MB in hub.db. Like the F&O file, it's asked for the
+// weekend days the cash market traded.
+//
 // Option summaries (market-data-hub#30, src/nse/optionImport.ts): an F&O day
 // downloaded here stores them with its futures. Stored F&O days whose options
 // weren't read (downloaded before the hub kept them), and the options-only
@@ -68,7 +73,7 @@ import { getJob, resumeTime, updateJob, type HistoryDataset, type Job, type NseH
 // "options" dataset, after each year's F&O files: about 6,300 requests for
 // 2001 → 2026 (~2 hours).
 
-export const HISTORY_DATASETS: readonly HistoryDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close", "fo_ban", "options"];
+export const HISTORY_DATASETS: readonly HistoryDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close", "fo_ban", "fo_participants", "options"];
 
 /** A message for invalid parameters, or null. `today` is the IST day key (the evening run owns it). */
 export function validateNseHistory(params: NseHistoryParams, today: number): string | null {
@@ -77,7 +82,7 @@ export function validateNseHistory(params: NseHistoryParams, today: number): str
   if (from === null || to === null) return "--from and --to must be dates like 1994-11-03.";
   if (from > to) return "--from must be on or before --to.";
   if (to >= today) return "--to must be before today (the evening run fetches today's files).";
-  if (!params.datasets.length || params.datasets.some((dataset) => !HISTORY_DATASETS.includes(dataset))) return "--only must be cash, fo, pr, indices, ban or options.";
+  if (!params.datasets.length || params.datasets.some((dataset) => !HISTORY_DATASETS.includes(dataset))) return "--only must be cash, fo, pr, indices, ban, participants or options.";
   return null;
 }
 
@@ -125,7 +130,7 @@ export function corporateActionDays(db: Db, from: number, to: number): number[] 
     .sort((a, b) => a - b);
 }
 
-export const HISTORY_LABEL: Record<HistoryDataset, string> = { cash_bhav: "cash", fo_bhav: "F&O", pr: "PR", index_close: "indices", fo_ban: "ban list", options: "options" };
+export const HISTORY_LABEL: Record<HistoryDataset, string> = { cash_bhav: "cash", fo_bhav: "F&O", pr: "PR", index_close: "indices", fo_ban: "ban list", fo_participants: "participant OI", options: "options" };
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 type Counts = Record<"ok" | "holiday" | "mismatch" | "isins" | "actions" | "indices" | "options", number>;
 const tally = (counts: Counts) =>

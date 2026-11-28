@@ -20,7 +20,7 @@ import { runNseHistory } from "./nseHistory.js";
 //     stored yet — on start that's the catch-up, in the evening it's normally
 //     just today's files once NSE has published them. New cash days extend the
 //     synthetic baskets (src/history/baskets.ts); index days extend the index
-//     candles. The PR zip, whose board meetings make the
+//     candles. NSE's participant-wise OI file likewise (from 18:00). The PR zip, whose board meetings make the
 //     results calendar, likewise for the last RESULTS_LOOKBACK_DAYS (meetings
 //     are announced up to weeks ahead, one day's announcements per file). Lots,
 //     the F&O ban list and NSE's ticker renames (symbolchange.csv) are refreshed
@@ -60,7 +60,7 @@ export interface ScheduleInput {
   now: number;
   runs: ReadonlyMap<DatasetName, Pick<DatasetRun, "lastAttemptAt" | "lastSuccessAt">>;
   /** Days each day-dataset still lacks among the recent ones. */
-  missing: Record<"cash_bhav" | "fo_bhav" | "pr", number> & { index_close?: number };
+  missing: Record<"cash_bhav" | "fo_bhav" | "pr", number> & { index_close?: number; fo_participants?: number };
   /** Trade date of the newest stored ban list. */
   banTradeDate: number | null;
 }
@@ -92,6 +92,7 @@ export function dueTasks(input: ScheduleInput): Task[] {
   if (input.missing.cash_bhav > 0 && rested("cash_bhav")) due.push("cash_bhav");
   if (input.missing.fo_bhav > 0 && rested("fo_bhav")) due.push("fo_bhav");
   if ((input.missing.index_close ?? 0) > 0 && rested("index_close")) due.push("index_close");
+  if ((input.missing.fo_participants ?? 0) > 0 && rested("fo_participants")) due.push("fo_participants");
   if (daily("lots") && rested("lots")) due.push("lots");
   if ((input.banTradeDate === null || input.banTradeDate < banTarget(now)) && minutes >= 7 * 60 && minutes < EVENING_TO_MIN && rested("fo_ban")) due.push("fo_ban");
   if (input.missing.pr > 0 && rested("pr")) due.push("pr");
@@ -188,7 +189,8 @@ export class Scheduler {
       const fo = recentDays(ctx, "fo_bhav", RECENT_DAYS);
       const pr = recentDays(ctx, "pr", RESULTS_LOOKBACK_DAYS, RECENT_DAYS);
       const indices = recentDays(ctx, "index_close", RECENT_DAYS);
-      const tasks = dueTasks({ now: ctx.clock(), runs: readRuns(ctx.db), missing: { cash_bhav: cash.length, fo_bhav: fo.length, pr: pr.length, index_close: indices.length }, banTradeDate: latestBan(ctx.db)?.tradeDate ?? null });
+      const participants = recentDays(ctx, "fo_participants", RECENT_DAYS);
+      const tasks = dueTasks({ now: ctx.clock(), runs: readRuns(ctx.db), missing: { cash_bhav: cash.length, fo_bhav: fo.length, pr: pr.length, index_close: indices.length, fo_participants: participants.length }, banTradeDate: latestBan(ctx.db)?.tradeDate ?? null });
       for (const task of tasks) {
         if (this.stopping) break;
         if (task === "cash_bhav") {
@@ -196,6 +198,7 @@ export class Scheduler {
           if (result.stored) this.refreshDerived(false);
         } else if (task === "fo_bhav") await syncDays(ctx, "fo_bhav", fo, () => this.stopping);
         else if (task === "index_close") await syncDays(ctx, "index_close", indices, () => this.stopping);
+        else if (task === "fo_participants") await syncDays(ctx, "fo_participants", participants, () => this.stopping);
         else if (task === "lots") await refreshLots(ctx);
         else if (task === "fo_ban") await refreshBan(ctx);
         else if (task === "pr") await syncDays(ctx, "pr", pr, () => this.stopping);

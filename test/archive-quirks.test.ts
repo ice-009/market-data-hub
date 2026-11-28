@@ -115,6 +115,7 @@ describe("the session calendar (#43, #44)", () => {
       fo_bhav: records([["2021-03-30", "holiday"], ["2021-03-31", "holiday"]]),
       index_close: records([["2021-03-30", "ok"], ["2021-03-31", "ok"]]),
       pr: new Map(),
+      fo_participants: new Map(),
     };
     const findings = calendarFindings({ days, weekendSessions: [], recentFrom: 0, archiveGaps: ARCHIVE_GAPS });
     expect(findings.map((f) => [f.check, f.day, f.subject, f.severity])).toEqual([

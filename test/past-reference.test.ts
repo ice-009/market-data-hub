@@ -304,6 +304,7 @@ describe("index closes where NSE's index file is missing", () => {
       fo_bhav: records([["2015-09-04", ok], ["2015-09-07", ok], ["2018-01-02", ok]]),
       index_close: records([["2015-09-04", { status: "holiday", note: INDEX_GAP_NOTE }], ["2015-09-07", { status: "holiday", note: null }], ["2018-01-02", ok]]),
       pr: records([["2015-09-04", ok], ["2015-09-07", ok], ["2018-01-02", { status: "mismatch", note: "file is for 2019-01-02" }]]),
+      fo_participants: new Map(),
     };
     const findings = calendarFindings({ days, weekendSessions: [], recentFrom: 0, archiveGaps: ARCHIVE_GAPS, gapNotes: [INDEX_GAP_NOTE] });
     expect(findings.map((f) => [isoDay(f.day), f.subject, f.severity])).toEqual([

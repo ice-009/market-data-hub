@@ -23,6 +23,7 @@ symbols).
 | `GET /v1/fo/members?date` / `?from&to` | fo | NSE F&O bhavcopy |
 | `GET /v1/fo/contracts?symbol` | fo | NSE F&O bhavcopy |
 | `GET /v1/fo/ban` | fo | NSE `fo_secban.csv` |
+| `GET /v1/fo/participants[?from&to]` | fo | NSE's participant-wise open interest (`fao_participant_oi`), from 2012 |
 | `GET /v1/options/summary?symbol[&from&to]` | fo | daily option summaries from the NSE F&O bhavcopy |
 | `GET /v1/options/day[?date][&kind]` | fo | daily option summaries from the NSE F&O bhavcopy |
 | `GET /v1/lots[?symbol]` | history | NSE `fo_mktlots.csv` (fallback: F&O bhavcopy lots) |
@@ -371,6 +372,52 @@ unknown (the hub didn't download it), not "nobody banned"; a day with nobody ban
 ```json
 { "knownFrom": "2026-11-10", "knownFromDay": 1794268800000,
   "days": [ { "date": "2026-11-10", "day": 1794268800000, "symbols": ["ABFRL"], "fetchedAt": 1794227000000 } ] }
+```
+
+## GET /v1/fo/participants[?from&to]
+
+Who holds the F&O market's open positions, per trade day, oldest first (market-data-hub#28):
+NSE's participant-wise open interest file (`content/nsccl/fao_participant_oi_DDMMYYYY.csv`), back
+to its first day on **2 Jan 2012**. For each participant type (`client`: retail and other
+non-institutional accounts, `dii`, `fii`, `pro`: brokers' own books) and NSE's own `total`: long
+and short positions in index futures, stock futures, index calls and puts and stock calls and puts,
+and NSE's total long and short. Every figure is a number of **contracts**, as NSE printed it: not
+shares, not lots, not rupees, so a lot-size change changes what a contract is (after NIFTY's lot
+went from 25 to 75 in Oct 2015, NSE counted old contracts as thirds: figures like `909608.3333`).
+The hub adds the nets: `…Net` = long − short, and `indexFuturesLongShare` = long / (long + short),
+the "long–short ratio" often quoted for FIIs (null with no position).
+
+A day's file is the positions at that day's close, published that evening (the hub asks from
+18:00 IST): a day's row comes from its own file only. Default range: the year up to today.
+`knownFrom` / `lastDate`: the first and newest stored days. `note` appears on a day the hub
+corrected: on 2 Jan 2012 NSE's file has the FII and DII rows under each other's labels, and the hub
+swaps them back (`PARTICIPANT_FII_DII_SWAPPED` in `src/nse/datasets.ts`). `missing` lists the F&O
+sessions in the range (stored F&O bhavcopy days) without a participant file, with `reason`:
+`no_file` (NSE's archive has none for the day, or only another day's) or `not_downloaded`.
+`400` for a bad range, `503 not_ready` before anything is stored. The whole history is about
+3,700 days (~2.6 KB of JSON a day, ~10 MB in all).
+
+Within NSE's rounding the four participants add up to its total row and longs equal shorts for
+every instrument (off by up to 2 contracts on most days since 2016; exact in 2012 and 2013); the
+[`participant_oi`](#get-v1quality) check reports a day that doesn't.
+
+```json
+GET /v1/fo/participants?from=2025-11-03&to=2025-11-03
+{ "from": "2025-11-03", "to": "2025-11-03", "unit": "contracts",
+  "knownFrom": "2012-01-02", "knownFromDay": 1325462400000, "lastDate": "2026-11-27", "lastDay": 1795737600000,
+  "days": [ { "date": "2025-11-03", "day": 1762128000000,
+      "participants": {
+        "client": { … }, "dii": { … },
+        "fii": { "indexFuturesLong": 28322, "indexFuturesShort": 153149, "indexFuturesNet": -124827, "indexFuturesLongShare": 0.1561,
+                 "stockFuturesLong": 3645001, "stockFuturesShort": 2275219, "stockFuturesNet": 1369782,
+                 "indexCallLong": 618499, "indexCallShort": 608823, "indexCallNet": 9676,
+                 "indexPutLong": 630742, "indexPutShort": 411798, "indexPutNet": 218944,
+                 "stockCallLong": 73144, "stockCallShort": 105505, "stockCallNet": -32361,
+                 "stockPutLong": 103571, "stockPutShort": 61658, "stockPutNet": 41913,
+                 "totalLong": 5099279, "totalShort": 3616152, "totalNet": 1483127 },
+        "pro": { … } },
+      "total": { "indexFuturesLong": 313144, "indexFuturesShort": 313144, "indexFuturesNet": 0, … } } ],
+  "missing": [] }
 ```
 
 ## GET /v1/lots
@@ -1054,6 +1101,7 @@ the last tick and heartbeat the previous run left, which is where restart recove
     "cashBhav": { "lastSession": "2026-11-05", "firstSession": "1994-11-03", "sessions": …, "lastSuccessAt": …, "lastAttemptAt": …, "lastError": null },
     "foBhav": { "lastSession": "2026-11-05", "firstSession": "2001-11-09", "sessions": …, … }, "lots": { "count": 224, "source": "nse_mktlots", … },
     "foBan": { "tradeDate": "2026-11-06", … },
+    "participants": { "lastSession": "2026-11-05", "firstSession": "2012-01-02", "sessions": …, "lastSuccessAt": …, "lastAttemptAt": …, "lastError": null },
     "resultsCalendar": { "upcoming": 41, "lastSession": "2026-11-05", "firstSession": "2026-09-08", "sessions": 42, "lastSuccessAt": …, "lastAttemptAt": …, "lastError": null },
     "symbolChanges": { "count": 1071, "isins": { "pairs": 1484, "days": 2 }, "lastSuccessAt": …, … },
     "candles": [ { "tf": "1d", "series": 2, "candles": 310, "lastSession": "2026-11-06" } ] },
@@ -1080,7 +1128,7 @@ missing or wrong: worth an alert), `warning` (worth a look) or `info` (a change 
 
 | Check | Finds | Severity |
 |---|---|---|
-| `missing_session` | a session (another NSE file of that day is stored: cash, F&O or index) whose file NSE answered with 404 or another day's file: a day with any of those files stored is a session. A known gap in NSE's archive (`ARCHIVE_GAPS` in `src/nse/datasets.ts`: the F&O bhavcopy of 30 Mar 2021) is info | problem (info for a known gap) |
+| `missing_session` | a session (another NSE file of that day is stored: cash, F&O or index) whose file (those, the PR zip or the participant OI file) NSE answered with 404 or another day's file: a day with any of those files stored is a session. A known gap in NSE's archive (`ARCHIVE_GAPS` in `src/nse/datasets.ts`: the F&O bhavcopy of 30 Mar 2021) is info | problem (info for a known gap) |
 | `unlisted_session` | a weekend session (cash/F&O files stored) that the [calendar](#get-v1calendar) doesn't list (`reference/holidays/<year>.json` sessions, or `hub data calendar session`), so the evening run won't ask for its files and the next session's cash file extends stored daily series past it (add it; the next `hub data nse-history` run fills the skipped bars from the stored bhavcopy) | warning (info over a year back) |
 | `calendar_mismatch` | NSE's archive disagrees with the holiday list: files stored for a day the list calls a holiday (a special session the list lacks?), or no files (404) for a weekday of a listed year that the list doesn't name (an unlisted holiday?). Fix the list or add the day with `hub data calendar` | warning |
 | `wrong_date` | NSE served another day's file for a weekday and neither another dataset's 404 nor the holiday list confirms a holiday (resolved once one does) | warning |
@@ -1091,6 +1139,7 @@ missing or wrong: worth an alert), `warning` (worth a look) or `info` (a change 
 | `lot_change` | lot sizes that changed between two consecutive F&O sessions (one finding per day, `detail.changes`) | info |
 | `fo_list_change` | stocks that joined or left the F&O list (`detail.added`, `detail.removed`) | info; problem when a tenth or more (≥ 10) leave at once, not counting stocks whose last contract expired the session before (NSE drops stocks from F&O after an expiry: 34 on 28 Jun 2019) — a cut-off file |
 | `lot_file_mismatch` | NSE's `fo_mktlots.csv` (what `/v1/lots` serves) disagreeing with the newest F&O bhavcopy's lots | warning |
+| `participant_oi` | a participant OI file that doesn't add up beyond rounding (5 contracts, or 0.01% of the figure): a participant's positions against its own totals, the four participants against NSE's TOTAL row, or longs against shorts (subject `totals`); or a DII row with more index options written (short) than the FII row, a sign the two rows carry each other's labels as on 2 Jan 2012 (subject `fii_dii`). Recomputed over every stored day whenever one is stored | warning |
 
 The session checks are recomputed whenever `nse_days` changes; the per-day ones (outliers, repeated
 files, lots and the F&O list) look at each stored day once, newest first, in runs of 100 sessions —
@@ -1125,7 +1174,7 @@ What the hub does by itself when it starts again (details in [h2-design.md](h2-d
 
 ## Background jobs (in the server)
 
-- **NSE files**, in the evening IST: cash bhavcopy (after 17:30) and F&O bhavcopy (after 18:00)
+- **NSE files**, in the evening IST: cash bhavcopy (after 17:30), F&O bhavcopy, index file and participant OI file (after 18:00)
   for any of the last 10 trading days not stored yet (exchange holidays the [calendar](#get-v1calendar)
   lists are recorded without asking NSE) — on start that is the catch-up — then lots,
   the ban list (from 18:00 the next session's) and NSE's ticker renames (`symbolchange.csv`) once
@@ -1160,6 +1209,7 @@ npm run hub -- data backfill --tf 15m --years 1 --symbols SBIN,INFY
 npm run hub -- data nse-history                                 # NSE's archive since 1994 (cash), 2001 (F&O), 2010 (PR zip), 2012 (indices)
 npm run hub -- data nse-history --from 2015-01-01 --only cash
 npm run hub -- data nse-history --only indices                  # just the index file (~3,900 requests, 70 minutes)
+npm run hub -- data nse-history --only participants             # just participant OI, from 2012 (~3,700 requests, 70 minutes)
 npm run hub -- data status
 npm run hub -- data symbols                                     # every F&O stock's history across its renames
 npm run hub -- data symbols INFY TMPV [--date 2005-01-03] [--refresh]
@@ -1214,7 +1264,7 @@ stops, the index candles and the synthetic baskets are rebuilt from what is stor
 [split and bonus factor](#split-and-bonus-adjustment) is derived again.
 
 - `--from` defaults to 1994-11-03, `--to` to yesterday (IST); `--only cash`, `--only fo`,
-  `--only pr`, `--only indices` or `--only options` for one dataset. Days already checked (`nse_days`) are never asked for again, so a later run only fills
+  `--only pr`, `--only indices`, `--only ban`, `--only participants` or `--only options` for one dataset. Days already checked (`nse_days`) are never asked for again, so a later run only fills
   what's missing: run it once for the whole archive, then again whenever you like.
 - NSE changed formats on **8 Jul 2024**. Before that the hub reads the old files:
   `cmDDMONYYYYbhav.csv.zip` + `MTO_DDMMYYYY.DAT` (delivery %) for cash, `foDDMONYYYYbhav.csv.zip`
@@ -1237,13 +1287,18 @@ stops, the index candles and the synthetic baskets are rebuilt from what is stor
   again, once — `--only options`, or any run that includes it (the default does): about 6,300
   requests (~2 hours) for 2001 → 2026, ~275 MB in `hub.db`. `fo_futures` and `nse_days` are left
   alone; days read are recorded in `option_days`.
+- **Participant OI** ([/v1/fo/participants](#get-v1foparticipantsfromto)): NSE's
+  `fao_participant_oi` file of every session from **2 Jan 2012** (30 Dec 2011 answers 404), into
+  `fo_participants`: about 3,700 requests (~70 minutes), ~2 MB. Every layout NSE has used is read
+  (checked on the first session of every month 2012 → 2026 and every day of Jan 2012).
 - **Corporate actions.** Likewise stored PR days whose `bc` file wasn't read (downloaded before the
   hub kept it) have their PR zip read again, once, whenever the PR zip is included: about 4,200
   requests (1.3 hours) for 2010 on. Results already stored are left alone.
 - Every weekend day is asked for in the cash market: NSE held Budget-day, Muhurat and special
   sessions on weekends (e.g. 1 Feb 2020, 12 Nov 2023, 20 Jan 2024). F&O, the PR zip and the index
   file are asked for the weekend days the cash market traded.
-- One request per 1.1 s, like every NSE request: the whole archive is about 32,000 requests,
+- One request per 1.1 s, like every NSE request: the whole archive is about 32,000 requests (plus
+  ~3,700 for participant OI),
   **nine to ten hours** (PR zips are 0.3–0.7 MB each; only their results rows are kept), and about
   **1.5 GB** in `hub.db` (~0.5 GB per gzipped backup; [Disk space](#disk-space)). Years go newest
   first.
@@ -1421,7 +1476,7 @@ free space and what the backups take.
 | `api_keys` | key hashes, scopes, last use (H0) |
 | `series` | per (symbol, tf ∈ 1d/15m/5m/1m): coverage `[covered_from, covered_to)` of final bars, `synced_at`, count, first/last bar |
 | `candles` | (symbol, tf, t) → o, h, l, c, v |
-| `nse_days` | per (dataset ∈ cash_bhav/fo_bhav/pr/index_close, day): `ok` / `holiday` / `mismatch`, rows (for `pr`: results events), checked time, note (`imported from Tradex` for imported days; `listed exchange holiday: not asked` for a calendar holiday recorded without a request) |
+| `nse_days` | per (dataset ∈ cash_bhav/fo_bhav/pr/index_close/fo_ban/fo_participants, day): `ok` / `holiday` / `mismatch`, rows (for `pr`: results events), checked time, note (`imported from Tradex` for imported days; `listed exchange holiday: not asked` for a calendar holiday recorded without a request) |
 | `cash_bhav` | (symbol, day) → series (`EQ`/`BE`; `EQ/BE` on days imported from Tradex), prev close, OHLC, volume, delivery % |
 | `fo_futures` | (day, symbol) → near/next month close, settle, prev close, volume, OI, ΔOI; combined OI and ΔOI; lot; underlying |
 | `lot_sizes` | symbol → lot |
@@ -1443,6 +1498,7 @@ free space and what the backups take.
 | `quality_checked` | (check, trade day) → when the per-day checks looked at it |
 | `option_summaries` | (symbol, day) → kind, spot, lot, expiries; call/put OI, ΔOI and contracts over every expiry; iv30; flags; for the near and next expiry: expiry, forward, ATM strike, straddle, ATM/call/put IV, call–put IV spread, 25-delta put/call IV, max pain, call/put walls and their OI, call/put OI, strikes listed and usable, flags (migration 13; 12 is held for NSE reference history in review) |
 | `option_days` | F&O days whose option rows were read: `ok` / `holiday` / `mismatch`, rows, checked time, note |
+| `fo_participants` | (day, participant ∈ client/dii/fii/pro/total) → long and short contracts in index and stock futures, index and stock calls and puts, total long and short, as NSE printed them (migration 14); days asked for are in `nse_days` as `fo_participants` |
 | `calendar_days` | trading-calendar days added by hand (`hub data calendar`): day → `holiday` / `session`, name, session hours (minutes after IST midnight; null = regular) (migration 11; 10 is held for split/bonus work in review) |
 
 Other files in the data directory: `fyers-token.json` (mode 600, the broker access token),

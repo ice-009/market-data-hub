@@ -4,9 +4,10 @@ import type { Calendar } from "../calendar/calendar.js";
 import { CALENDAR_NOTE, isListedHoliday, syncCalendar } from "../calendar/store.js";
 import { ARCHIVE_FROM, ARCHIVE_GAPS, INDEX_GAP_NOTE } from "../nse/datasets.js";
 import { lastOkDay, readLots, readRuns, type DayDataset } from "../nse/store.js";
+import { participantSignature, readParticipants } from "../nse/participantStore.js";
 import type { Logger } from "../log.js";
 import { DAY_MS, MINUTE_MS, isoDay, isWeekday, istParts } from "../time.js";
-import { CashScanner, VOL_WINDOW, brokerFindings, calendarFindings, candleGapFindings, foFindings, lotFileFindings, type CalendarDataset, type CashRow, type ComparedDay, type CorporateActionHook, type DayRecord, type PriceAdjuster } from "./checks.js";
+import { CashScanner, VOL_WINDOW, brokerFindings, calendarFindings, candleGapFindings, foFindings, lotFileFindings, participantFindings, type CalendarDataset, type CashRow, type ComparedDay, type CorporateActionHook, type DayRecord, type PriceAdjuster } from "./checks.js";
 import { checkedQualityDays, forgetQualityDays, markQualityDays, saveFindings, type CheckName, type Finding } from "./store.js";
 
 // Runs the data-quality checks (./checks.ts) over what's stored, cheaply and
@@ -22,8 +23,9 @@ import { checkedQualityDays, forgetQualityDays, markQualityDays, saveFindings, t
 //     consecutive sessions that load their warm-up window once. A day waits
 //     until the sessions before it are known (an archive download fills years
 //     newest first), and is checked again if its file is stored again;
-//   - stored candles against the bhavcopy (broker_mismatch, candle_gap) and the
-//     lot file (lot_file_mismatch) are recomputed when what they read changes,
+//   - stored candles against the bhavcopy (broker_mismatch, candle_gap), the
+//     lot file (lot_file_mismatch) and the participant OI files (participant_oi)
+//     are recomputed when what they read changes,
 //     the candles at most every CANDLES_EVERY_MS.
 // `hub data quality --full` forgets what was checked and checks everything again.
 
@@ -61,6 +63,7 @@ export interface QualityState {
   lastRunAt?: number;
   calendar?: string;
   lotFile?: string;
+  participants?: string;
   candles?: { signature: string; at: number };
   pendingDays?: number;
   waitingDays?: number;
@@ -80,7 +83,7 @@ export const RECENT_GAP_DAYS = 14;
 /** Weekend sessions further back than this are info, not warnings. */
 const UNLISTED_RECENT_DAYS = 365;
 
-const DATASETS: readonly CalendarDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close"];
+const DATASETS: readonly CalendarDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close", "fo_participants"];
 /** The hub's own calendar: a change (a holiday, session or archive gap added) recomputes the calendar findings. */
 const calendarVersion = (cal: Calendar) => [cal.signature(), ...Object.entries(ARCHIVE_GAPS).map(([dataset, days]) => `${dataset}:${days.join(",")}`)].join("|");
 
@@ -254,6 +257,13 @@ export function runQuality(db: Db, options: QualityOptions = {}): QualityResult 
     const foLots = lastFo === null ? null : { day: lastFo, lots: new Map((db.prepare("select symbol, lot from fo_futures where day = ?").all(lastFo) as Array<{ symbol: string; lot: number | null }>).map((row) => [row.symbol, row.lot])) };
     save("lot_file_mismatch", null, lotFileFindings(readLots(db), foLots));
     state.lotFile = lotSignature;
+  }
+
+  // Participant OI files: every stored day (a few thousand small rows), whenever one is stored.
+  const participantsSignature = participantSignature(db);
+  if (state.participants !== participantsSignature) {
+    save("participant_oi", null, participantFindings(readParticipants(db)));
+    state.participants = participantsSignature;
   }
 
   // Stored candles against the bhavcopy: when the candles or the bhavcopy changed, at most every CANDLES_EVERY_MS.
