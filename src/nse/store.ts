@@ -23,9 +23,10 @@ import type { SymbolChangeRow } from "./parsers/symbolChange.js";
  * `pr` is the daily PR zip (its board meetings fill the results calendar);
  * `index_close` NSE's index file; `fo_ban` the F&O ban list of each trade date
  * (the evening run stores the next session's, `hub data nse-history --only ban`
- * the archive's).
+ * the archive's); `fo_participants` NSE's participant-wise F&O open interest
+ * (src/nse/participantStore.ts).
  */
-export type DayDataset = "cash_bhav" | "fo_bhav" | "pr" | "index_close" | "fo_ban";
+export type DayDataset = "cash_bhav" | "fo_bhav" | "pr" | "index_close" | "fo_ban" | "fo_participants";
 export type DayStatus = "ok" | "holiday" | "mismatch";
 export type DatasetName = DayDataset | "lots" | "fo_ban" | "symbol_changes";
 

@@ -19,6 +19,7 @@ import Database from "better-sqlite3";
 //  11  trading calendar        calendar_days (holidays and sessions added by hand); see src/calendar/store.ts
 //  12  past reference data     lot_derived (lots before 8 Jul 2024); the ban list's days in nse_days; see src/nse/lotHistory.ts
 //  13  option summaries        option_summaries, option_days (from the F&O bhavcopy); see src/nse/optionStore.ts
+//  14  participant OI          fo_participants (NSE's participant-wise open interest); see src/nse/participantStore.ts
 
 export type Db = Database.Database;
 
@@ -347,6 +348,24 @@ const MIGRATIONS: Array<string | undefined> = [
      checked_at integer not null,
      note text
    );`,
+  // Participant-wise F&O open interest (market-data-hub#28): NSE's
+  // fao_participant_oi file, one row per participant type (client, dii, fii,
+  // pro, and NSE's own total) per trade day, as NSE printed it. Every column
+  // is a number of contracts, long and short apart (real: after a lot change
+  // NSE counts old contracts as fractions of new ones). Days asked for are in
+  // nse_days (dataset 'fo_participants').
+  `create table fo_participants (
+     day integer not null,
+     participant text not null check (participant in ('client', 'dii', 'fii', 'pro', 'total')),
+     fut_idx_long real not null, fut_idx_short real not null,
+     fut_stk_long real not null, fut_stk_short real not null,
+     opt_idx_call_long real not null, opt_idx_put_long real not null,
+     opt_idx_call_short real not null, opt_idx_put_short real not null,
+     opt_stk_call_long real not null, opt_stk_put_long real not null,
+     opt_stk_call_short real not null, opt_stk_put_short real not null,
+     total_long real not null, total_short real not null,
+     primary key (day, participant)
+   ) without rowid;`,
 ];
 
 /** Small JSON values the hub keeps between restarts (e.g. the broker budget). */

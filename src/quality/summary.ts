@@ -27,6 +27,7 @@ export const CHECK_HELP: Record<(typeof CHECKS)[number], string> = {
   lot_change: "Lot sizes that changed between two F&O sessions.",
   fo_list_change: "Stocks that joined or left the F&O list (a problem when a tenth or more leave at once other than after their last expiry: a cut-off file).",
   lot_file_mismatch: "NSE's lot file (fo_mktlots.csv) disagrees with the newest F&O bhavcopy.",
+  participant_oi: "A participant-wise OI file whose rows don't add up beyond rounding, or whose DII row writes more index options than the FII row (labels swapped?).",
 };
 
 export function findingJson(finding: StoredFinding) {

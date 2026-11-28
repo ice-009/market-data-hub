@@ -22,7 +22,7 @@ import { fakeFetch } from "./support/nse.js";
 // and what uses them — health, the evening run, live bars, /v1/calendar.
 
 const d = (iso: string) => parseIsoDay(iso)!;
-const DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "index_close", "pr"];
+const DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "index_close", "pr", "fo_participants"];
 
 const listed = calendar();
 afterEach(() => setCalendar(listed));

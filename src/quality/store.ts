@@ -6,7 +6,7 @@ import type { Db } from "../db.js";
 // the findings it no longer produces (resolved_at), so the table keeps history
 // without repeating itself.
 
-export const CHECKS = ["missing_session", "unlisted_session", "calendar_mismatch", "wrong_date", "repeated_file", "candle_gap", "price_outlier", "broker_mismatch", "lot_change", "fo_list_change", "lot_file_mismatch"] as const;
+export const CHECKS = ["missing_session", "unlisted_session", "calendar_mismatch", "wrong_date", "repeated_file", "candle_gap", "price_outlier", "broker_mismatch", "lot_change", "fo_list_change", "lot_file_mismatch", "participant_oi"] as const;
 export type CheckName = (typeof CHECKS)[number];
 export type Severity = "problem" | "warning" | "info";
 

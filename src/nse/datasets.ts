@@ -17,12 +17,14 @@ import { parsePdIndices, priceFileDay } from "./parsers/prIndices.js";
 import { mtoKey, parseMto } from "./parsers/mto.js";
 import { parseFnoBan } from "./parsers/ban.js";
 import { parseNseLots } from "./parsers/lots.js";
+import { PARTICIPANTS, parseParticipantOi, type ParticipantPositions, type ParticipantRow } from "./parsers/participantOi.js";
 import { boardMeetingsFileDay, parseBoardMeetings, resultsEvents } from "./parsers/results.js";
 import { parseSymbolChanges } from "./parsers/symbolChange.js";
 import type { IndexCloseRow } from "./parsers/indexClose.js";
 import { dayStatuses, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeCorporateActions, writeFoDay, writeIndexDay, writeIsins, writeLots, writePrDay, writeSymbolChanges, type DayDataset, type DayStatus } from "./store.js";
 import { ZipError, isZip, unzipFile, unzipSingle } from "./unzip.js";
 import { writeOptionDay } from "./optionStore.js";
+import { writeParticipantDay } from "./participantStore.js";
 import { summarizeFoCsv } from "./optionFile.js";
 
 // NSE's daily files, downloaded from its free public archive — no broker calls:
@@ -37,6 +39,8 @@ import { summarizeFoCsv } from "./optionFile.js";
 //              bmDDMMYYYY.txt fills the results calendar, its corporate-actions file
 //              bcDDMMYYYY.csv the corporate actions (bonus, split, dividend… with ex-dates)
 //   symbol_changes  content/equities/symbolchange.csv: every ticker rename since 1999
+//   fo_participants  content/nsccl/fao_participant_oi_DDMMYYYY.csv (from 2 Jan 2012): open
+//              interest by participant type (client, DII, FII, pro), in contracts
 // Nothing comes from www.nseindia.com: its JSON API (the event calendar the
 // results used to come from) hangs behind bot protection since Nov 2026.
 // Days up to 5 Jul 2024 come from the archive's older formats (src/jobs/nseHistory.ts
@@ -60,7 +64,7 @@ export interface NseContext {
 }
 
 /** Don't ask for today's file before this (minutes after IST midnight). */
-export const PUBLISH_MIN: Record<DayDataset, number> = { cash_bhav: 17 * 60 + 30, fo_bhav: 18 * 60, pr: 17 * 60 + 30, index_close: 18 * 60, fo_ban: 18 * 60 };
+export const PUBLISH_MIN: Record<DayDataset, number> = { cash_bhav: 17 * 60 + 30, fo_bhav: 18 * 60, pr: 17 * 60 + 30, index_close: 18 * 60, fo_ban: 18 * 60, fo_participants: 18 * 60 };
 
 /**
  * Weekend days NSE held a session on (cash, F&O and index files all stored),
@@ -90,6 +94,7 @@ export const ARCHIVE_GAPS: Readonly<Record<DayDataset, readonly number[]>> = {
   pr: [Date.UTC(2018, 0, 2)],
   index_close: [],
   fo_ban: [],
+  fo_participants: [],
 };
 
 /** nse_days note of an index day read from the PR zip's price file (ind_close_all 404s). */
@@ -107,13 +112,33 @@ export const LEGACY_LAST_DAY = Date.UTC(2024, 6, 5);
 export const FO_BAN_FROM = Date.UTC(2007, 9, 1);
 
 /**
+ * NSE's participant-wise OI file starts on Mon 2 Jan 2012 (30 Dec 2011 and
+ * 1 Nov 2011 answer 404).
+ */
+export const PARTICIPANTS_FROM = Date.UTC(2012, 0, 2);
+
+/**
+ * Participant files whose FII and DII rows carry each other's label, checked
+ * by hand; the hub swaps them back (noted in nse_days and served as `note`).
+ *   2 Jan 2012: the "FII " row (55,396 index futures long, 1,387 short, no
+ *   option written) is the DII row of 3 Jan (60,612 / 639, none written) and
+ *   of every later day, and the "DII" row is the FII one; the file also lists
+ *   them in the other order (Client, FII, DII, Pro) and is the only one seen
+ *   with a trailing space in "FII ".
+ * The data-quality check participant_oi flags any other day whose DII row
+ * writes more index options than its FII row (a sign of the same swap).
+ */
+export const PARTICIPANT_FII_DII_SWAPPED: readonly number[] = [Date.UTC(2012, 0, 2)];
+export const PARTICIPANT_SWAP_NOTE = "NSE's file labels the FII and DII rows the other way round: swapped back";
+
+/**
  * The first session worth asking NSE's archive for: the cash market's first (3
  * Nov 1994), the first with stock futures (9 Nov 2001; F&O files from 12 Jun
  * 2000 have index futures only, and only stock futures are stored), the PR
  * zip's first year (2010; 2008 and 2009 answer 404) and NSE's index file's
  * start in the second half of Feb 2012 (15 Feb: none; 1 Mar: there).
  */
-export const ARCHIVE_FROM: Record<DayDataset, number> = { cash_bhav: Date.UTC(1994, 10, 3), fo_bhav: Date.UTC(2001, 10, 9), pr: Date.UTC(2010, 0, 1), index_close: Date.UTC(2012, 1, 16), fo_ban: FO_BAN_FROM };
+export const ARCHIVE_FROM: Record<DayDataset, number> = { cash_bhav: Date.UTC(1994, 10, 3), fo_bhav: Date.UTC(2001, 10, 9), pr: Date.UTC(2010, 0, 1), index_close: Date.UTC(2012, 1, 16), fo_ban: FO_BAN_FROM, fo_participants: PARTICIPANTS_FROM };
 
 /** Delivery positions (MTO files) start in 2002 (none in 2001 when checked); earlier days have no delivery %. */
 export const MTO_FROM = Date.UTC(2002, 0, 1);
@@ -183,6 +208,8 @@ export const mtoUrl = (archiveUrl: string, day: number) => `${archiveUrl}/archiv
 export const prUrl = (archiveUrl: string, day: number) => `${archiveUrl}/archives/equities/bhavcopy/pr/PR${ddmmyy(day)}.zip`;
 
 export const banUrl = (archiveUrl: string, day: number) => `${archiveUrl}/archives/fo/sec_ban/fo_secban_${ddmmyyyy(day)}.csv`;
+
+export const participantsUrl = (archiveUrl: string, day: number) => `${archiveUrl}/content/nsccl/fao_participant_oi_${ddmmyyyy(day)}.csv`;
 
 export type DayOutcome = DayStatus | "not_yet";
 
@@ -308,6 +335,35 @@ export function readIndexFile(ctx: NseContext, day: number, body: Buffer, option
 }
 
 /**
+ * Parse NSE's participant-wise OI file for `day` (src/nse/parsers/participantOi.ts).
+ * A file without the four participant types and NSE's total, or without a
+ * known column, is a format change: it throws, and the day is asked again.
+ */
+export function readParticipantsFile(ctx: NseContext, day: number, body: Buffer): DayParse {
+  const parsed = parseParticipantOi(body.toString("utf8"));
+  const wrong = checkDate(parsed.tradeDate, false, day);
+  if (wrong) return { kind: "mismatch", note: wrong };
+  if (parsed.missingColumns.length) throw new NseError(`participant OI file lacks ${parsed.missingColumns.join(", ")} (format change?)`, null, false);
+  const missing = [...PARTICIPANTS, "total"].filter((row) => !parsed.rows.has(row as ParticipantRow));
+  if (missing.length) throw new NseError(`participant OI file has no ${missing.join(", ")} row (format change?)`, null, false);
+  if (parsed.extraColumns.length) ctx.log.warn("participant OI file has columns the hub doesn't read", { day: isoDay(day), columns: parsed.extraColumns });
+  let rows: Map<ParticipantRow, ParticipantPositions> = parsed.rows;
+  let note: string | null = null;
+  if (PARTICIPANT_FII_DII_SWAPPED.includes(day)) {
+    rows = new Map([...parsed.rows].map(([label, positions]) => [label === "fii" ? "dii" : label === "dii" ? "fii" : label, positions]));
+    note = PARTICIPANT_SWAP_NOTE;
+  }
+  return {
+    kind: "ok",
+    badRows: parsed.badRows,
+    store: () => {
+      writeParticipantDay(ctx.db, day, rows, ctx.clock(), note);
+      return rows.size;
+    },
+  };
+}
+
+/**
  * Read a PR zip for `day`: the financial-results meetings in its board-meetings
  * file (the results calendar) and the rows of its corporate-actions file. The
  * date in the board-meetings file's name must be `day`.
@@ -418,7 +474,7 @@ const cashSession = (db: Db, day: number) => (db.prepare("select status from nse
 /** nse_days note of a past day NSE answered with an empty file (HTTP 200, no bytes). */
 export const EMPTY_FILE_NOTE = "NSE served an empty file";
 
-const DAY_URL: Record<DayDataset, (archiveUrl: string, day: number) => string> = { cash_bhav: cashBhavUrl, fo_bhav: foBhavUrl, pr: prUrl, index_close: indexCloseUrl, fo_ban: banUrl };
+const DAY_URL: Record<DayDataset, (archiveUrl: string, day: number) => string> = { cash_bhav: cashBhavUrl, fo_bhav: foBhavUrl, pr: prUrl, index_close: indexCloseUrl, fo_ban: banUrl, fo_participants: participantsUrl };
 
 /**
  * Download, check and store one day. A day the calendar lists as an exchange
@@ -456,6 +512,7 @@ export async function importDay(ctx: NseContext, dataset: DayDataset, day: numbe
   else if (dataset === "pr") parsed = readPrFile(ctx, day, response.body);
   else if (dataset === "index_close") parsed = readIndexFile(ctx, day, response.body, options);
   else if (dataset === "fo_ban") parsed = readBanFile(ctx, day, response.body);
+  else if (dataset === "fo_participants") parsed = readParticipantsFile(ctx, day, response.body);
   else {
     parsed = readCashFile(ctx, day, response.body, options);
     // An old-format day's delivery % is a second file, asked for only once the prices check out.

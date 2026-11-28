@@ -34,7 +34,7 @@ import { DAY_MS, isoDay, istParts, parseIsoDay } from "./time.js";
 //   npm run hub -- keys list
 //   npm run hub -- keys revoke key_1a2b3c4d5e6f
 //   npm run hub -- data backfill --tf 1d --years 5 [--symbols SBIN,INFY]
-//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr|indices|ban|options]
+//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr|indices|ban|participants|options]
 //   npm run hub -- data lots [SBIN …] [--derive] [--check]
 //   npm run hub -- data status
 //   npm run hub -- data quality [--full] [--check price_outlier] [--all]
@@ -58,7 +58,7 @@ const USAGE = `Usage:
   hub keys list
   hub keys revoke <id>
   hub data backfill --tf 1d|15m|5m [--years N] [--symbols SBIN,INFY,…]
-  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo|pr|indices|ban|options]
+  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo|pr|indices|ban|participants|options]
   hub data lots [SYMBOL …] [--derive] [--check]
   hub data status
   hub data symbols [SYMBOL …] [--date YYYY-MM-DD] [--refresh]
@@ -262,7 +262,7 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
 
   if (action === "nse-history") {
     const only = flag(rest, "--only");
-    const ONLY: Record<string, NseHistoryParams["datasets"]> = { cash: ["cash_bhav"], fo: ["fo_bhav"], pr: ["pr"], indices: ["index_close"], ban: ["fo_ban"], options: ["options"] };
+    const ONLY: Record<string, NseHistoryParams["datasets"]> = { cash: ["cash_bhav"], fo: ["fo_bhav"], pr: ["pr"], indices: ["index_close"], ban: ["fo_ban"], participants: ["fo_participants"], options: ["options"] };
     const datasets: NseHistoryParams["datasets"] = only === undefined ? [...HISTORY_DATASETS] : (ONLY[only] ?? []);
     const params: NseHistoryParams = { from: flag(rest, "--from") ?? isoDay(ARCHIVE_FROM.cash_bhav), to: flag(rest, "--to") ?? isoDay(lastHistoryDay(Date.now())), datasets };
     const invalid = validateNseHistory(params, istParts().day);
@@ -343,6 +343,8 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     console.log(`  F&O bhavcopy    last session ${fresh.foBhav.lastSession ?? "—"}   checked ${fmt(fresh.foBhav.lastAttemptAt)}${fresh.foBhav.lastError ? `   error: ${fresh.foBhav.lastError}` : ""}`);
     console.log(`                  ${fresh.foBhav.sessions} sessions stored, from ${fresh.foBhav.firstSession ?? "—"}`);
     console.log(`  option summaries  last session ${fresh.options.lastSession ?? "—"}   ${fresh.options.sessions} sessions, from ${fresh.options.firstSession ?? "—"} (\`hub data nse-history --only options\`)`);
+    console.log(`  participant OI  last session ${fresh.participants.lastSession ?? "—"}   checked ${fmt(fresh.participants.lastAttemptAt)}${fresh.participants.lastError ? `   error: ${fresh.participants.lastError}` : ""}`);
+    console.log(`                  ${fresh.participants.sessions} sessions stored, from ${fresh.participants.firstSession ?? "—"} (\`hub data nse-history --only participants\`)`);
     console.log(`  lot sizes       ${fresh.lots.count} (${fresh.lots.source ?? "—"})   fetched ${fmt(fresh.lots.lastSuccessAt)}`);
     console.log(`  F&O ban         for ${fresh.foBan.tradeDate ?? "—"}   fetched ${fmt(fresh.foBan.lastSuccessAt)}`);
     console.log(`                  ${fresh.foBan.sessions} trade dates stored, from ${fresh.foBan.firstSession ?? "—"}`);

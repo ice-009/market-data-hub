@@ -38,6 +38,8 @@ export function dataFreshness(db: Db) {
       const span = optionSpan(db);
       return { lastSession: day(span.last), firstSession: day(span.first), sessions: span.days };
     })(),
+    // NSE's participant-wise F&O open interest (src/nse/participantStore.ts).
+    participants: { lastSession: day(lastOkDay(db, "fo_participants")), ...archive("fo_participants"), ...run("fo_participants") },
     indexFile: { lastSession: day(lastOkDay(db, "index_close")), ...archive("index_close"), unmappedNames: unmappedIndexNames(db).length, ...run("index_close") },
     lots: { count: (lots?.count as number | undefined) ?? 0, source: (lots?.source as string | undefined) ?? null, ...run("lots") },
     foBan: { tradeDate: ban ? isoDay(ban.tradeDate) : null, ...archive("fo_ban"), ...run("fo_ban") },

@@ -1,3 +1,4 @@
+import { LONG_FIELDS, PARTICIPANTS, POSITION_FIELDS, SHORT_FIELDS, type ParticipantPositions, type ParticipantRow, type PositionField } from "../nse/parsers/participantOi.js";
 import type { DayDataset, DayStatus } from "../nse/store.js";
 import { DAY_MS, isoDay, isWeekday } from "../time.js";
 import type { Finding } from "./store.js";
@@ -31,8 +32,12 @@ import type { Finding } from "./store.js";
 //                     loses a tenth or more at once, other than stocks whose
 //                     last contract just expired (a cut-off file)         info / problem
 //   lot_file_mismatch NSE's lot file disagrees with the newest F&O bhavcopy  warning
+//   participant_oi    a participant OI file that doesn't add up (a row's totals,
+//                     the four participants against NSE's TOTAL row, longs
+//                     against shorts) beyond rounding, or whose DII row writes
+//                     more index options than the FII row (labels swapped?)  warning
 
-export const DATASET_LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip", index_close: "Index file", fo_ban: "F&O ban list" };
+export const DATASET_LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip", index_close: "Index file", fo_ban: "F&O ban list", fo_participants: "Participant OI file" };
 /** The day files the session calendar is checked against (the ban list isn't one: NSE's archive of it starts in 2008). */
 export type CalendarDataset = Exclude<DayDataset, "fo_ban">;
 
@@ -55,8 +60,8 @@ export interface DayRecord {
 }
 
 export interface CalendarInput {
-  /** Every asked day per dataset (nse_days). */
-  days: Record<CalendarDataset, ReadonlyMap<number, DayRecord>>;
+  /** Every asked day per dataset (nse_days); participant OI (newer) may be left out. */
+  days: Record<Exclude<CalendarDataset, "fo_participants">, ReadonlyMap<number, DayRecord>> & { fo_participants?: ReadonlyMap<number, DayRecord> };
   /** Weekend days the hub knows NSE traded on (WEEKEND_SESSIONS). */
   weekendSessions: readonly number[];
   /** Weekend sessions older than this are reported as info, not warnings (the evening run is long past them). */
@@ -74,9 +79,14 @@ export interface CalendarInput {
   calendarNote?: string;
 }
 
-/** Datasets whose "ok" proves a day was a session. The PR zip isn't one (it's a bundle of notices). */
+/**
+ * Datasets whose "ok" proves a day was a session. The PR zip isn't one (it's a
+ * bundle of notices), nor the participant OI file (a clearing report, checked
+ * like the others but not taken as evidence).
+ */
 const SESSION_EVIDENCE: readonly CalendarDataset[] = ["cash_bhav", "fo_bhav", "index_close"];
-const CALENDAR_DATASETS: readonly CalendarDataset[] = ["cash_bhav", "fo_bhav", "index_close", "pr"];
+const CALENDAR_DATASETS: readonly CalendarDataset[] = ["cash_bhav", "fo_bhav", "index_close", "pr", "fo_participants"];
+const NONE: ReadonlyMap<number, DayRecord> = new Map();
 
 /**
  * missing_session, unlisted_session, calendar_mismatch and wrong_date, from
@@ -88,9 +98,10 @@ const CALENDAR_DATASETS: readonly CalendarDataset[] = ["cash_bhav", "fo_bhav", "
 export function calendarFindings(input: CalendarInput): Finding[] {
   const out: Finding[] = [];
   const allDays = new Set<number>();
-  for (const dataset of CALENDAR_DATASETS) for (const day of input.days[dataset].keys()) allDays.add(day);
+  const days = (dataset: CalendarDataset) => input.days[dataset] ?? NONE;
+  for (const dataset of CALENDAR_DATASETS) for (const day of days(dataset).keys()) allDays.add(day);
   for (const day of [...allDays].sort((a, b) => a - b)) {
-    const evidence = SESSION_EVIDENCE.filter((dataset) => input.days[dataset].get(day)?.status === "ok");
+    const evidence = SESSION_EVIDENCE.filter((dataset) => days(dataset).get(day)?.status === "ok");
     const listed = isWeekday(day) || input.weekendSessions.includes(day);
     const listedHoliday = input.listed?.holidays.get(day);
     if (evidence.length && listedHoliday !== undefined) {
@@ -115,7 +126,7 @@ export function calendarFindings(input: CalendarInput): Finding[] {
         });
       }
       for (const dataset of CALENDAR_DATASETS) {
-        const record = input.days[dataset].get(day);
+        const record = days(dataset).get(day);
         if (!record || record.status === "ok") continue;
         const knownGap = (input.archiveGaps?.[dataset]?.includes(day) ?? false) || (record.status === "holiday" && record.note !== null && (input.gapNotes?.includes(record.note) ?? false));
         const answered =
@@ -136,7 +147,7 @@ export function calendarFindings(input: CalendarInput): Finding[] {
     if (!listed) continue; // NSE's archive answers weekend URLs with Friday's file: expected.
     if (listedHoliday !== undefined) continue; // the list says so: no file is expected
     const noFile = CALENDAR_DATASETS.filter((dataset) => {
-      const record = input.days[dataset].get(day);
+      const record = days(dataset).get(day);
       return record?.status === "holiday" && (input.calendarNote === undefined || record.note !== input.calendarNote);
     });
     if (noFile.length) {
@@ -154,7 +165,7 @@ export function calendarFindings(input: CalendarInput): Finding[] {
       continue;
     }
     for (const dataset of CALENDAR_DATASETS) {
-      const record = input.days[dataset].get(day);
+      const record = days(dataset).get(day);
       if (record?.status !== "mismatch") continue;
       out.push({
         check: "wrong_date",
@@ -438,6 +449,70 @@ export function lotFileFindings(fileLots: Readonly<Record<string, number>>, fo: 
       detail: { differ },
     },
   ];
+}
+
+// ------------------------------------------------------------------ participant-wise open interest
+
+/**
+ * NSE's figures are often off by a contract or two (the four participants
+ * against its TOTAL row, longs against shorts: 1–2 contracts on most days
+ * since 2016). A difference up to this many contracts, or this share of the
+ * column's total, is rounding.
+ */
+export const PARTICIPANT_TOLERANCE = { contracts: 5, share: 1e-4 };
+
+const PAIRS: ReadonlyArray<[PositionField, PositionField, string]> = [
+  ["futIdxLong", "futIdxShort", "index futures"],
+  ["futStkLong", "futStkShort", "stock futures"],
+  ["optIdxCallLong", "optIdxCallShort", "index calls"],
+  ["optIdxPutLong", "optIdxPutShort", "index puts"],
+  ["optStkCallLong", "optStkCallShort", "stock calls"],
+  ["optStkPutLong", "optStkPutShort", "stock puts"],
+];
+
+/** participant_oi over stored days (src/nse/participantStore.ts). Pure. */
+export function participantFindings(days: ReadonlyArray<{ day: number; rows: ReadonlyMap<ParticipantRow, ParticipantPositions> }>): Finding[] {
+  const out: Finding[] = [];
+  const off = (a: number, b: number) => Math.abs(a - b) > Math.max(PARTICIPANT_TOLERANCE.contracts, PARTICIPANT_TOLERANCE.share * Math.max(Math.abs(a), Math.abs(b)));
+  for (const { day, rows } of days) {
+    const total = rows.get("total");
+    const problems: string[] = [];
+    for (const who of PARTICIPANTS) {
+      const row = rows.get(who);
+      if (!row) continue;
+      const long = LONG_FIELDS.reduce((sum, field) => sum + row[field], 0);
+      const short = SHORT_FIELDS.reduce((sum, field) => sum + row[field], 0);
+      if (off(long, row.totalLong)) problems.push(`${who.toUpperCase()}'s long positions add up to ${thousands(long)}, its total says ${thousands(row.totalLong)}`);
+      if (off(short, row.totalShort)) problems.push(`${who.toUpperCase()}'s short positions add up to ${thousands(short)}, its total says ${thousands(row.totalShort)}`);
+    }
+    if (total) {
+      for (const field of POSITION_FIELDS) {
+        const sum = PARTICIPANTS.reduce((acc, who) => acc + (rows.get(who)?.[field] ?? 0), 0);
+        if (off(sum, total[field])) problems.push(`${field}: the participants add up to ${thousands(sum)}, NSE's total says ${thousands(total[field])}`);
+      }
+      for (const [long, short, name] of PAIRS) if (off(total[long], total[short])) problems.push(`${name}: ${thousands(total[long])} contracts long but ${thousands(total[short])} short`);
+    }
+    if (problems.length) {
+      out.push({ check: "participant_oi", day, subject: "totals", severity: "warning", message: `Participant OI file of ${dayName(day)} doesn't add up: ${list(problems, 4)}.`, detail: { problems } });
+    }
+    // DIIs (funds, insurers) write few index options; FIIs write hundreds of thousands of contracts.
+    const dii = rows.get("dii");
+    const fii = rows.get("fii");
+    if (dii && fii) {
+      const written = (row: ParticipantPositions) => row.optIdxCallShort + row.optIdxPutShort;
+      if (written(dii) > written(fii)) {
+        out.push({
+          check: "participant_oi",
+          day,
+          subject: "fii_dii",
+          severity: "warning",
+          message: `Participant OI file of ${dayName(day)}: the DII row has more index options written (${thousands(written(dii))} contracts short) than the FII row (${thousands(written(fii))}). DIIs write few options: the rows may carry each other's labels (PARTICIPANT_FII_DII_SWAPPED in src/nse/datasets.ts).`,
+          detail: { diiWritten: written(dii), fiiWritten: written(fii) },
+        });
+      }
+    }
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------ stored candles against the bhavcopy

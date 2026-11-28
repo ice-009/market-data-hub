@@ -221,7 +221,7 @@ describe("queueEndOfDayHistory", () => {
     t = makeHub();
     expect(queueEndOfDayHistory(t.db, 0, now)).toBeNull();
     const job = queueEndOfDayHistory(t.db, 1, now)!;
-    expect(job).toMatchObject({ kind: "nse_history", params: { from: "2025-11-17", to: "2026-11-17", datasets: ["cash_bhav", "fo_bhav", "pr", "index_close"] } });
+    expect(job).toMatchObject({ kind: "nse_history", params: { from: "2025-11-17", to: "2026-11-17", datasets: ["cash_bhav", "fo_bhav", "pr", "index_close", "fo_participants"] } });
     expect(queueEndOfDayHistory(t.db, 1, now)).toBeNull(); // still open
     updateJob(t.db, job.id, { state: "done" }, now);
     for (let day = d("2025-11-17"); day <= d("2026-11-17"); day += DAY_MS) {
@@ -230,6 +230,11 @@ describe("queueEndOfDayHistory", () => {
       markDay(t.db, "pr", day, "holiday", 0, now);
       markDay(t.db, "index_close", day, "holiday", 0, now);
     }
+    // A hub from before participant OI (#28): its filled window is queued once more, for that file alone.
+    const again = queueEndOfDayHistory(t.db, 1, now)!;
+    expect(again).toMatchObject({ kind: "nse_history", params: { datasets: expect.arrayContaining(["fo_participants"]) } });
+    updateJob(t.db, again.id, { state: "done" }, now);
+    for (let day = d("2025-11-17"); day <= d("2026-11-17"); day += DAY_MS) markDay(t.db, "fo_participants", day, "holiday", 0, now);
     expect(queueEndOfDayHistory(t.db, 1, now)).toBeNull();
     expect(getJob(t.db, job.id)?.state).toBe("done");
   });
