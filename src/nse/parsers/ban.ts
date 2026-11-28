@@ -5,7 +5,10 @@
 //   Securities in Ban For Trade Date 05-NOV-2026:
 //   1,ABFRL
 //   2,HINDCOPPER
-// or "…: NIL" on days with nothing in ban. Pure. (Ported from Tradex, MIT.)
+// or "…: NIL" on days with nothing in ban. The archived files
+// (archives/fo/sec_ban/fo_secban_DDMMYYYY.csv, from 2008) also spell the month
+// out ("03-January-2011") or start "Sr. No.,Securities in Ban For Trade Date
+// 07-Jan-2008". Pure. (Ported from Tradex, MIT.)
 
 export interface FnoBanList {
   /** IST trade date the list is for (UTC midnight ms), when the header has one. */
@@ -21,9 +24,9 @@ export function parseFnoBan(text: string): FnoBanList {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
-    const date = line.match(/(\d{1,2})-([A-Za-z]{3})-(\d{4})/);
+    const date = line.match(/(\d{1,2})-([A-Za-z]{3,9})-(\d{4})/);
     if (date && /ban/i.test(line)) {
-      const month = MONTHS[date[2].toUpperCase()];
+      const month = MONTHS[date[2].slice(0, 3).toUpperCase()];
       if (month !== undefined) tradeDate = Date.UTC(Number(date[3]), month, Number(date[1]));
       continue;
     }

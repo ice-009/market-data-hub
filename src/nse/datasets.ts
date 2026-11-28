@@ -13,11 +13,13 @@ import { parseCmBhav } from "./parsers/cmBhav.js";
 import { corporateActionsFileDay, parseCorporateActions, type CorporateActionRow } from "./parsers/corporateActions.js";
 import { aggregateStockFutures, parseFoBhav, parseFoBhavLegacy } from "./parsers/foBhav.js";
 import { parseIndexClose } from "./parsers/indexClose.js";
+import { parsePdIndices, priceFileDay } from "./parsers/prIndices.js";
 import { mtoKey, parseMto } from "./parsers/mto.js";
 import { parseFnoBan } from "./parsers/ban.js";
 import { parseNseLots } from "./parsers/lots.js";
 import { boardMeetingsFileDay, parseBoardMeetings, resultsEvents } from "./parsers/results.js";
 import { parseSymbolChanges } from "./parsers/symbolChange.js";
+import type { IndexCloseRow } from "./parsers/indexClose.js";
 import { dayStatuses, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeCorporateActions, writeFoDay, writeIndexDay, writeIsins, writeLots, writePrDay, writeSymbolChanges, type DayDataset, type DayStatus } from "./store.js";
 import { ZipError, isZip, unzipFile, unzipSingle } from "./unzip.js";
 
@@ -27,7 +29,8 @@ import { ZipError, isZip, unzipFile, unzipSingle } from "./unzip.js";
 //   index_close  content/indices/ind_close_all_DDMMYYYY.csv: every NSE index's OHLC
 //              (from Feb/Mar 2012); extends index candles (src/history/fromIndices.ts)
 //   lots       fo_mktlots.csv (fallback: the lot column of the latest F&O bhavcopy)
-//   fo_ban     fo_secban.csv
+//   fo_ban     fo_secban.csv (the next session's); the archive's
+//              archives/fo/sec_ban/fo_secban_DDMMYYYY.csv for past trade dates (from 2008)
 //   pr         PRDDMMYY.zip, the daily "PR" bundle (since 2010): its board-meetings file
 //              bmDDMMYYYY.txt fills the results calendar, its corporate-actions file
 //              bcDDMMYYYY.csv the corporate actions (bonus, split, dividend… with ex-dates)
@@ -55,7 +58,7 @@ export interface NseContext {
 }
 
 /** Don't ask for today's file before this (minutes after IST midnight). */
-export const PUBLISH_MIN: Record<DayDataset, number> = { cash_bhav: 17 * 60 + 30, fo_bhav: 18 * 60, pr: 17 * 60 + 30, index_close: 18 * 60 };
+export const PUBLISH_MIN: Record<DayDataset, number> = { cash_bhav: 17 * 60 + 30, fo_bhav: 18 * 60, pr: 17 * 60 + 30, index_close: 18 * 60, fo_ban: 18 * 60 };
 
 /**
  * Weekend days NSE held a session on (cash, F&O and index files all stored),
@@ -69,21 +72,37 @@ export const WEEKEND_SESSIONS: readonly number[] = [...calendar().listedSessions
 
 /**
  * Sessions whose file NSE's archive doesn't have (every URL tried answers
- * 404), checked by hand: the data-quality check reports them as known gaps
- * (info), not as missing sessions.
+ * 404) or has only under another date, checked by hand: the data-quality
+ * check reports them as known gaps (info), not as missing sessions.
  *   fo_bhav 30 Mar 2021: fo30MAR2021bhav.csv.zip and the UDiFF name both 404;
  *   the day's F&O market-activity report (archives/fo/mkt/fo30032021.zip)
  *   exists but has no settlement price, change in OI, underlying or lot.
+ *   pr 2 Jan 2018: PR020118.zip's board-meetings file is named for 2 Jan 2019.
+ * Index files are found by the hub itself: a session without one is read from
+ * the PR zip's price file, and one whose PR zip has no index rows either is
+ * recorded with INDEX_GAP_NOTE, a known gap too.
  */
 export const ARCHIVE_GAPS: Readonly<Record<DayDataset, readonly number[]>> = {
   cash_bhav: [],
   fo_bhav: [Date.UTC(2021, 2, 30)],
-  pr: [],
+  pr: [Date.UTC(2018, 0, 2)],
   index_close: [],
+  fo_ban: [],
 };
+
+/** nse_days note of an index day read from the PR zip's price file (ind_close_all 404s). */
+export const INDEX_FROM_PR_NOTE = "index file missing: read from the PR zip's price file";
+/** nse_days note of a session with neither an index file nor index rows in its PR zip. */
+export const INDEX_GAP_NOTE = "index file missing, and no index rows in the PR zip";
 
 /** The last session of NSE's old file formats (Fri 5 Jul 2024); the current ones start on Mon 8 Jul 2024. */
 export const LEGACY_LAST_DAY = Date.UTC(2024, 6, 5);
+
+/**
+ * NSE's archive of daily ban lists starts between 2 Oct 2007 and 7 Jan 2008
+ * (fo_secban_07012008.csv is there; 1 Oct, 2 Jul and 2 Jan 2007 answer 404).
+ */
+export const FO_BAN_FROM = Date.UTC(2007, 9, 1);
 
 /**
  * The first session worth asking NSE's archive for: the cash market's first (3
@@ -92,7 +111,7 @@ export const LEGACY_LAST_DAY = Date.UTC(2024, 6, 5);
  * zip's first year (2010; 2008 and 2009 answer 404) and NSE's index file's
  * start in the second half of Feb 2012 (15 Feb: none; 1 Mar: there).
  */
-export const ARCHIVE_FROM: Record<DayDataset, number> = { cash_bhav: Date.UTC(1994, 10, 3), fo_bhav: Date.UTC(2001, 10, 9), pr: Date.UTC(2010, 0, 1), index_close: Date.UTC(2012, 1, 16) };
+export const ARCHIVE_FROM: Record<DayDataset, number> = { cash_bhav: Date.UTC(1994, 10, 3), fo_bhav: Date.UTC(2001, 10, 9), pr: Date.UTC(2010, 0, 1), index_close: Date.UTC(2012, 1, 16), fo_ban: FO_BAN_FROM };
 
 /** Delivery positions (MTO files) start in 2002 (none in 2001 when checked); earlier days have no delivery %. */
 export const MTO_FROM = Date.UTC(2002, 0, 1);
@@ -160,6 +179,8 @@ export const indexCloseUrl = (archiveUrl: string, day: number) => `${archiveUrl}
 export const mtoUrl = (archiveUrl: string, day: number) => `${archiveUrl}/archives/equities/mto/MTO_${ddmmyyyy(day)}.DAT`;
 
 export const prUrl = (archiveUrl: string, day: number) => `${archiveUrl}/archives/equities/bhavcopy/pr/PR${ddmmyy(day)}.zip`;
+
+export const banUrl = (archiveUrl: string, day: number) => `${archiveUrl}/archives/fo/sec_ban/fo_secban_${ddmmyyyy(day)}.csv`;
 
 export type DayOutcome = DayStatus | "not_yet";
 
@@ -332,10 +353,58 @@ export async function importCorporateActions(ctx: NseContext, day: number): Prom
   return actions ? "ok" : "mismatch";
 }
 
+/** Parse an archived ban list for `day` (fo_secban_DDMMYYYY.csv). */
+export function readBanFile(ctx: NseContext, day: number, body: Buffer): DayParse {
+  const list = parseFnoBan(body.toString("utf8"));
+  const wrong = checkDate(list.tradeDate, false, day);
+  if (wrong) return { kind: "mismatch", note: wrong };
+  return {
+    kind: "ok",
+    badRows: 0,
+    store: () => {
+      writeBan(ctx.db, day, list.symbols, ctx.clock());
+      return list.symbols.length;
+    },
+  };
+}
+
+/**
+ * The index rows of `day`'s PR zip (its price file PdDDMMYY.csv), for a
+ * session NSE's index file is missing for: null when the zip, or index rows in
+ * it, aren't there. Throws NseError when NSE won't serve it.
+ */
+export async function indexRowsFromPr(ctx: NseContext, day: number): Promise<IndexCloseRow[] | null> {
+  const response = await ctx.nse.get(prUrl(ctx.urls.archiveUrl, day));
+  if (response.status === 404 || !response.body.length) return null;
+  const file = fromZip(response.body, () => unzipFile(response.body, (name) => priceFileDay(name.split("/").pop()!) !== null));
+  if (!file || priceFileDay(file.name.split("/").pop()!) !== day) return null;
+  const rows = parsePdIndices(file.data.toString("latin1")).rows;
+  return rows.length ? rows : null;
+}
+
+/**
+ * A past session (its cash bhavcopy stored) whose index file NSE's archive
+ * doesn't have: its index rows from the PR zip, or, when that has none, the
+ * day recorded as a known gap (INDEX_GAP_NOTE), so it isn't asked for again.
+ */
+export async function importIndexFromPr(ctx: NseContext, day: number, options: ImportOptions = {}): Promise<DayOutcome> {
+  const rows = await indexRowsFromPr(ctx, day);
+  if (!rows) {
+    markDay(ctx.db, "index_close", day, "holiday", 0, ctx.clock(), INDEX_GAP_NOTE);
+    return "holiday";
+  }
+  writeIndexDay(ctx.db, day, rows, ctx.clock(), INDEX_FROM_PR_NOTE);
+  if (options.extend ?? true) syncIndexSeries(ctx.db, ctx.clock(), day);
+  ctx.log.info("index file missing; index closes read from the PR zip", { day: isoDay(day), rows: rows.length });
+  return "ok";
+}
+
+const cashSession = (db: Db, day: number) => (db.prepare("select status from nse_days where dataset = 'cash_bhav' and day = ?").get(day) as { status: string } | undefined)?.status === "ok";
+
 /** nse_days note of a past day NSE answered with an empty file (HTTP 200, no bytes). */
 export const EMPTY_FILE_NOTE = "NSE served an empty file";
 
-const DAY_URL: Record<DayDataset, (archiveUrl: string, day: number) => string> = { cash_bhav: cashBhavUrl, fo_bhav: foBhavUrl, pr: prUrl, index_close: indexCloseUrl };
+const DAY_URL: Record<DayDataset, (archiveUrl: string, day: number) => string> = { cash_bhav: cashBhavUrl, fo_bhav: foBhavUrl, pr: prUrl, index_close: indexCloseUrl, fo_ban: banUrl };
 
 /**
  * Download, check and store one day. A day the calendar lists as an exchange
@@ -355,6 +424,8 @@ export async function importDay(ctx: NseContext, dataset: DayDataset, day: numbe
   if (response.status === 404) {
     // Today's file may just not be out yet; an earlier weekday without a file is a holiday.
     if (day >= today) return "not_yet";
+    // A session without an index file: the PR zip's price file has the indices too (#57).
+    if (dataset === "index_close" && day >= ARCHIVE_FROM.pr && cashSession(ctx.db, day)) return importIndexFromPr(ctx, day, options);
     markDay(ctx.db, dataset, day, "holiday", 0, ctx.clock());
     return "holiday";
   }
@@ -370,6 +441,7 @@ export async function importDay(ctx: NseContext, dataset: DayDataset, day: numbe
   if (dataset === "fo_bhav") parsed = readFoFile(ctx, day, response.body);
   else if (dataset === "pr") parsed = readPrFile(ctx, day, response.body);
   else if (dataset === "index_close") parsed = readIndexFile(ctx, day, response.body, options);
+  else if (dataset === "fo_ban") parsed = readBanFile(ctx, day, response.body);
   else {
     parsed = readCashFile(ctx, day, response.body, options);
     // An old-format day's delivery % is a second file, asked for only once the prices check out.
@@ -429,6 +501,8 @@ export interface SyncOptions extends ImportOptions {
   isinsOnly?: boolean;
   /** Read only the corporate actions of stored PR days (importCorporateActions). */
   actionsOnly?: boolean;
+  /** Read index rows from the PR zips of sessions without an index file (importIndexFromPr). */
+  indexFromPr?: boolean;
 }
 
 /**
@@ -436,7 +510,7 @@ export interface SyncOptions extends ImportOptions {
  * order). Stops after MAX_CONSECUTIVE_FAILURES hard failures in a row.
  */
 export async function syncDays(ctx: NseContext, dataset: DayDataset, days: number[], shouldStop: () => boolean = () => false, onDay?: (day: number, outcome: DayOutcome | "failed") => void, options: SyncOptions = {}): Promise<SyncResult> {
-  const { record = true, isinsOnly = false, actionsOnly = false, ...importOptions } = options;
+  const { record = true, isinsOnly = false, actionsOnly = false, indexFromPr = false, ...importOptions } = options;
   const result: SyncResult = { stored: 0, failed: 0, stopped: null };
   let consecutive = 0;
   let lastError = "";
@@ -446,7 +520,13 @@ export async function syncDays(ctx: NseContext, dataset: DayDataset, days: numbe
       break;
     }
     try {
-      const outcome = isinsOnly ? await importIsins(ctx, day) : actionsOnly ? await importCorporateActions(ctx, day) : await importDay(ctx, dataset, day, importOptions);
+      const outcome = isinsOnly
+        ? await importIsins(ctx, day)
+        : actionsOnly
+          ? await importCorporateActions(ctx, day)
+          : indexFromPr
+            ? await importIndexFromPr(ctx, day, importOptions)
+            : await importDay(ctx, dataset, day, importOptions);
       if (outcome === "ok") result.stored += 1;
       consecutive = 0;
       onDay?.(day, outcome);

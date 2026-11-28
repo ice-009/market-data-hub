@@ -21,6 +21,7 @@ import { listingOf, loadRenames, storedListing } from "./reference/renames.js";
 import { getUniverse } from "./reference/universe.js";
 import { brokerStatus, dataFreshness, dataMode, diskStatus } from "./status.js";
 import { ARCHIVE_FROM, refreshSymbolChanges } from "./nse/datasets.js";
+import { checkDerivedLots, deriveStoredLots, lotHistory, lotSources } from "./nse/lotHistory.js";
 import { readRuns } from "./nse/store.js";
 import { logFindings, runQuality } from "./quality/run.js";
 import { CHECKS, readFindings, type CheckName } from "./quality/store.js";
@@ -33,7 +34,8 @@ import { DAY_MS, isoDay, istParts, parseIsoDay } from "./time.js";
 //   npm run hub -- keys list
 //   npm run hub -- keys revoke key_1a2b3c4d5e6f
 //   npm run hub -- data backfill --tf 1d --years 5 [--symbols SBIN,INFY]
-//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr|indices]
+//   npm run hub -- data nse-history [--from 1994-11-03] [--to 2024-07-05] [--only cash|fo|pr|indices|ban]
+//   npm run hub -- data lots [SBIN …] [--derive] [--check]
 //   npm run hub -- data status
 //   npm run hub -- data quality [--full] [--check price_outlier] [--all]
 //   npm run hub -- data calendar [--from 2026-01-01] [--to 2026-12-31]
@@ -56,7 +58,8 @@ const USAGE = `Usage:
   hub keys list
   hub keys revoke <id>
   hub data backfill --tf 1d|15m|5m [--years N] [--symbols SBIN,INFY,…]
-  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo|pr|indices]
+  hub data nse-history [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--only cash|fo|pr|indices|ban]
+  hub data lots [SYMBOL …] [--derive] [--check]
   hub data status
   hub data symbols [SYMBOL …] [--date YYYY-MM-DD] [--refresh]
   hub data adjustments [SYMBOL …] [--rebuild] [--check [--symbols A,B,…] [--tolerance 0.005] [--json]]
@@ -259,7 +262,7 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
 
   if (action === "nse-history") {
     const only = flag(rest, "--only");
-    const ONLY: Record<string, NseHistoryParams["datasets"]> = { cash: ["cash_bhav"], fo: ["fo_bhav"], pr: ["pr"], indices: ["index_close"] };
+    const ONLY: Record<string, NseHistoryParams["datasets"]> = { cash: ["cash_bhav"], fo: ["fo_bhav"], pr: ["pr"], indices: ["index_close"], ban: ["fo_ban"] };
     const datasets: NseHistoryParams["datasets"] = only === undefined ? [...HISTORY_DATASETS] : (ONLY[only] ?? []);
     const params: NseHistoryParams = { from: flag(rest, "--from") ?? isoDay(ARCHIVE_FROM.cash_bhav), to: flag(rest, "--to") ?? isoDay(lastHistoryDay(Date.now())), datasets };
     const invalid = validateNseHistory(params, istParts().day);
@@ -341,6 +344,7 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     console.log(`                  ${fresh.foBhav.sessions} sessions stored, from ${fresh.foBhav.firstSession ?? "—"}`);
     console.log(`  lot sizes       ${fresh.lots.count} (${fresh.lots.source ?? "—"})   fetched ${fmt(fresh.lots.lastSuccessAt)}`);
     console.log(`  F&O ban         for ${fresh.foBan.tradeDate ?? "—"}   fetched ${fmt(fresh.foBan.lastSuccessAt)}`);
+    console.log(`                  ${fresh.foBan.sessions} trade dates stored, from ${fresh.foBan.firstSession ?? "—"}`);
     console.log(`  results (PR)    last session ${fresh.resultsCalendar.lastSession ?? "—"}   checked ${fmt(fresh.resultsCalendar.lastAttemptAt)}${fresh.resultsCalendar.lastError ? `   error: ${fresh.resultsCalendar.lastError}` : ""}`);
     console.log(`                  ${fresh.resultsCalendar.upcoming} upcoming events; ${fresh.resultsCalendar.sessions} sessions stored, from ${fresh.resultsCalendar.firstSession ?? "—"}`);
     console.log(`  symbol changes  ${fresh.symbolChanges.count} renames   fetched ${fmt(fresh.symbolChanges.lastSuccessAt)}   ISINs read for ${fresh.symbolChanges.isins.days} days`);
@@ -491,6 +495,34 @@ async function data(db: Db, action: string, rest: string[]): Promise<number> {
     const run = lastAdjustmentRun(db);
     console.log(`Split/bonus factors: ${stats.factors} for ${stats.symbols} tickers${stats.first === null ? "" : `, ex-dates ${isoDay(stats.first)} – ${isoDay(stats.last!)}`} (${Object.entries(stats.bySource).map(([source, n]) => `${source} ${n}`).join(", ")}); last derived ${fmt(run?.derivedAt ?? null)}.`);
     console.log(`Corporate actions: ${stats.corporateActions} from ${stats.corporateActionDays} PR days' bc files.`);
+    return 0;
+  }
+
+  if (action === "lots") {
+    // Lots before NSE's files carried them (#49): derived from the stored open interest.
+    if (rest.includes("--derive")) {
+      const started = Date.now();
+      const derived = deriveStoredLots(db);
+      console.log(`Derived the lot of ${derived.days} old-format stock-days for ${derived.symbols} stocks${derived.first === null ? "" : ` (${isoDay(derived.first)} – ${isoDay(derived.last!)})`} in ${((Date.now() - started) / 1000).toFixed(1)} s; ${derived.low} with low confidence.`);
+    }
+    if (rest.includes("--check")) {
+      const check = checkDerivedLots(db);
+      const pct = (part: number, whole: number) => (whole ? `${((100 * part) / whole).toFixed(2)}%` : "—");
+      console.log(`Derived against NSE's own lot column (${check.days} stock-days from 8 Jul 2024): high confidence ${check.highRight}/${check.high} right (${pct(check.highRight, check.high)}), low ${check.lowRight}/${check.low} right.`);
+      for (const wrong of check.wrong) console.log(`  ${wrong.symbol.padEnd(12)} ${isoDay(wrong.day)}  derived ${wrong.derived}, NSE ${wrong.lot}`);
+      if (check.wrong.length) return 1;
+    }
+    const named = rest.filter((arg) => !arg.startsWith("--")).map((arg) => arg.trim().toUpperCase());
+    for (const symbol of named) {
+      const changes = lotHistory(db, Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, symbol)[symbol] ?? [];
+      console.log(`${symbol}: ${changes.length ? `${changes.length} change point(s)` : "no lots stored"}`);
+      for (const change of changes) console.log(`  ${isoDay(change.day)}  ${String(change.lot).padStart(7)}  ${change.source}${change.confidence === "low" ? " (low confidence)" : ""}`);
+    }
+    if (!named.length && !rest.includes("--derive") && !rest.includes("--check")) {
+      const sources = lotSources(db);
+      const span = (value: { from: number; to: number } | null) => (value ? `${isoDay(value.from)} – ${isoDay(value.to)}` : "none");
+      console.log(`Lot history: NSE's lot column ${span(sources.bhavcopy)}; derived from open interest ${span(sources.derived)} (\`hub data lots --derive\` rebuilds it, \`--check\` compares it with NSE's column).`);
+    }
     return 0;
   }
 

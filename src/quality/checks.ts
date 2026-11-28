@@ -8,7 +8,8 @@ import type { Finding } from "./store.js";
 //
 //   missing_session   a session (another NSE file of that day is stored) whose file
 //                     NSE answered with 404 or with another day's file; info
-//                     for a known gap in NSE's archive (ARCHIVE_GAPS)       problem / info
+//                     for a known gap in NSE's archive (ARCHIVE_GAPS, or an
+//                     index day whose PR zip has no index rows either)      problem / info
 //   unlisted_session  a weekend session the hub's calendar (reference/holidays,
 //                     `hub data calendar`) doesn't list, so the evening run
 //                     won't expect its files                                warning
@@ -31,7 +32,9 @@ import type { Finding } from "./store.js";
 //                     last contract just expired (a cut-off file)         info / problem
 //   lot_file_mismatch NSE's lot file disagrees with the newest F&O bhavcopy  warning
 
-export const DATASET_LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip", index_close: "Index file" };
+export const DATASET_LABEL: Record<DayDataset, string> = { cash_bhav: "Cash bhavcopy", fo_bhav: "F&O bhavcopy", pr: "PR zip", index_close: "Index file", fo_ban: "F&O ban list" };
+/** The day files the session calendar is checked against (the ban list isn't one: NSE's archive of it starts in 2008). */
+export type CalendarDataset = Exclude<DayDataset, "fo_ban">;
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -53,13 +56,15 @@ export interface DayRecord {
 
 export interface CalendarInput {
   /** Every asked day per dataset (nse_days). */
-  days: Record<DayDataset, ReadonlyMap<number, DayRecord>>;
+  days: Record<CalendarDataset, ReadonlyMap<number, DayRecord>>;
   /** Weekend days the hub knows NSE traded on (WEEKEND_SESSIONS). */
   weekendSessions: readonly number[];
   /** Weekend sessions older than this are reported as info, not warnings (the evening run is long past them). */
   recentFrom: number;
   /** Sessions NSE's archive has no file for, per dataset (ARCHIVE_GAPS): reported as info. */
   archiveGaps?: Partial<Record<DayDataset, readonly number[]>>;
+  /** nse_days notes of days the hub found to be gaps in NSE's archive itself (INDEX_GAP_NOTE): info too. */
+  gapNotes?: readonly string[];
   /**
    * The holiday list (src/calendar): holidays named by NSE's list or a person
    * (without a special session that day), by day; and the years whose list is known.
@@ -70,8 +75,8 @@ export interface CalendarInput {
 }
 
 /** Datasets whose "ok" proves a day was a session. The PR zip isn't one (it's a bundle of notices). */
-const SESSION_EVIDENCE: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "index_close"];
-const CALENDAR_DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "index_close", "pr"];
+const SESSION_EVIDENCE: readonly CalendarDataset[] = ["cash_bhav", "fo_bhav", "index_close"];
+const CALENDAR_DATASETS: readonly CalendarDataset[] = ["cash_bhav", "fo_bhav", "index_close", "pr"];
 
 /**
  * missing_session, unlisted_session, calendar_mismatch and wrong_date, from
@@ -112,8 +117,11 @@ export function calendarFindings(input: CalendarInput): Finding[] {
       for (const dataset of CALENDAR_DATASETS) {
         const record = input.days[dataset].get(day);
         if (!record || record.status === "ok") continue;
-        const knownGap = record.status === "holiday" && (input.archiveGaps?.[dataset]?.includes(day) ?? false);
-        const answered = record.status === "holiday" ? `NSE had no file for it (404)${knownGap ? ", a known gap in its archive" : ""}` : `NSE served another day's file (${record.note ?? "wrong date"})`;
+        const knownGap = (input.archiveGaps?.[dataset]?.includes(day) ?? false) || (record.status === "holiday" && record.note !== null && (input.gapNotes?.includes(record.note) ?? false));
+        const answered =
+          record.status === "holiday"
+            ? `NSE had no file for it (404${record.note && knownGap ? `; ${record.note}` : ""})${knownGap ? ", a known gap in its archive" : ""}`
+            : `NSE served another day's file (${record.note ?? "wrong date"})${knownGap ? ", a known gap in its archive" : ""}`;
         out.push({
           check: "missing_session",
           day,

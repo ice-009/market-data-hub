@@ -14,7 +14,7 @@ import { parseCmBhav } from "../src/nse/parsers/cmBhav.js";
 import { parseDdMmYyyy, parseIndexClose } from "../src/nse/parsers/indexClose.js";
 import type { CashBhavRow } from "../src/nse/parsers/cashBhav.js";
 import { checkedDays, coverageStatuses, dayStatuses, markDay, readIndexCloses, writeCashDay, type DayDataset } from "../src/nse/store.js";
-import { calendarFindings, type DayRecord } from "../src/quality/checks.js";
+import { calendarFindings, type CalendarDataset, type DayRecord } from "../src/quality/checks.js";
 import { DAY_MS, parseDmyDay, parseIsoDay } from "../src/time.js";
 import { ist, makeHub, type TestHub } from "./support/hub.js";
 import { fakeFetch, fakeTime, makeZip, type Route } from "./support/nse.js";
@@ -110,7 +110,7 @@ describe("the session calendar (#43, #44)", () => {
   });
 
   it("reports a session NSE's archive has no file for as a known gap (info), not a problem", () => {
-    const days: Record<DayDataset, Map<number, DayRecord>> = {
+    const days: Record<CalendarDataset, Map<number, DayRecord>> = {
       cash_bhav: records([["2021-03-30", "ok"], ["2021-03-31", "ok"]]),
       fo_bhav: records([["2021-03-30", "holiday"], ["2021-03-31", "holiday"]]),
       index_close: records([["2021-03-30", "ok"], ["2021-03-31", "ok"]]),

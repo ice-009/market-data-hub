@@ -19,8 +19,13 @@ import type { SymbolChangeRow } from "./parsers/symbolChange.js";
 // F&O membership is "has a fo_futures row that day". (F&O tables ported from
 // Tradex's foBhavStore, MIT.)
 
-/** `pr` is the daily PR zip (its board meetings fill the results calendar); `index_close` NSE's index file. */
-export type DayDataset = "cash_bhav" | "fo_bhav" | "pr" | "index_close";
+/**
+ * `pr` is the daily PR zip (its board meetings fill the results calendar);
+ * `index_close` NSE's index file; `fo_ban` the F&O ban list of each trade date
+ * (the evening run stores the next session's, `hub data nse-history --only ban`
+ * the archive's).
+ */
+export type DayDataset = "cash_bhav" | "fo_bhav" | "pr" | "index_close" | "fo_ban";
 export type DayStatus = "ok" | "holiday" | "mismatch";
 export type DatasetName = DayDataset | "lots" | "fo_ban" | "symbol_changes";
 
@@ -103,8 +108,8 @@ export function cashCloses(db: Db, symbols: string[], from: number, to: number):
 
 // ------------------------------------------------------------------ index closes
 
-/** Replace one trade day's index rows and mark the day "ok". */
-export function writeIndexDay(db: Db, day: number, rows: IndexCloseRow[], checkedAt: number) {
+/** Replace one trade day's index rows and mark the day "ok" (`note`: where they came from, when not the index file). */
+export function writeIndexDay(db: Db, day: number, rows: IndexCloseRow[], checkedAt: number, note: string | null = null) {
   const insert = db.prepare(
     `insert or replace into index_closes (day, name, symbol, o, h, l, c, points_change, change_pct, volume, turnover_cr, pe, pb, div_yield)
      values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -112,7 +117,7 @@ export function writeIndexDay(db: Db, day: number, rows: IndexCloseRow[], checke
   db.transaction(() => {
     db.prepare("delete from index_closes where day = ?").run(day);
     for (const row of rows) insert.run(day, row.name, indexSymbolForName(row.name), row.open, row.high, row.low, row.close, row.pointsChange, row.changePct, row.volume, row.turnoverCr, row.pe, row.pb, row.divYield);
-    markDay(db, "index_close", day, "ok", rows.length, checkedAt);
+    markDay(db, "index_close", day, "ok", rows.length, checkedAt, note);
   })();
 }
 
@@ -299,8 +304,12 @@ export function readLots(db: Db): Record<string, number> {
   return Object.fromEntries(rows.map((row) => [row.symbol, row.lot]));
 }
 
+/** Store one trade date's ban list ([] = nobody in the ban) and record the day as stored. */
 export function writeBan(db: Db, tradeDate: number, symbols: string[], fetchedAt: number) {
-  db.prepare("insert into fo_ban (trade_date, symbols, fetched_at) values (?, ?, ?) on conflict(trade_date) do update set symbols = excluded.symbols, fetched_at = excluded.fetched_at").run(tradeDate, JSON.stringify(symbols), fetchedAt);
+  db.transaction(() => {
+    db.prepare("insert into fo_ban (trade_date, symbols, fetched_at) values (?, ?, ?) on conflict(trade_date) do update set symbols = excluded.symbols, fetched_at = excluded.fetched_at").run(tradeDate, JSON.stringify(symbols), fetchedAt);
+    markDay(db, "fo_ban", tradeDate, "ok", symbols.length, fetchedAt);
+  })();
 }
 
 export function latestBan(db: Db): { tradeDate: number; symbols: string[]; fetchedAt: number } | null {

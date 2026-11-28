@@ -2,11 +2,11 @@ import { isFuture } from "../broker/symbols.js";
 import { readKv, writeKv, type Db } from "../db.js";
 import type { Calendar } from "../calendar/calendar.js";
 import { CALENDAR_NOTE, isListedHoliday, syncCalendar } from "../calendar/store.js";
-import { ARCHIVE_FROM, ARCHIVE_GAPS } from "../nse/datasets.js";
+import { ARCHIVE_FROM, ARCHIVE_GAPS, INDEX_GAP_NOTE } from "../nse/datasets.js";
 import { lastOkDay, readLots, readRuns, type DayDataset } from "../nse/store.js";
 import type { Logger } from "../log.js";
 import { DAY_MS, MINUTE_MS, isoDay, isWeekday, istParts } from "../time.js";
-import { CashScanner, VOL_WINDOW, brokerFindings, calendarFindings, candleGapFindings, foFindings, lotFileFindings, type CashRow, type ComparedDay, type CorporateActionHook, type DayRecord, type PriceAdjuster } from "./checks.js";
+import { CashScanner, VOL_WINDOW, brokerFindings, calendarFindings, candleGapFindings, foFindings, lotFileFindings, type CalendarDataset, type CashRow, type ComparedDay, type CorporateActionHook, type DayRecord, type PriceAdjuster } from "./checks.js";
 import { checkedQualityDays, forgetQualityDays, markQualityDays, saveFindings, type CheckName, type Finding } from "./store.js";
 
 // Runs the data-quality checks (./checks.ts) over what's stored, cheaply and
@@ -80,7 +80,7 @@ export const RECENT_GAP_DAYS = 14;
 /** Weekend sessions further back than this are info, not warnings. */
 const UNLISTED_RECENT_DAYS = 365;
 
-const DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close"];
+const DATASETS: readonly CalendarDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close"];
 /** The hub's own calendar: a change (a holiday, session or archive gap added) recomputes the calendar findings. */
 const calendarVersion = (cal: Calendar) => [cal.signature(), ...Object.entries(ARCHIVE_GAPS).map(([dataset, days]) => `${dataset}:${days.join(",")}`)].join("|");
 
@@ -96,14 +96,14 @@ export function readQualityState(db: Db): QualityState {
   return readKv<QualityState>(db, STATE_KEY) ?? {};
 }
 
-type Records = Record<DayDataset, Map<number, DayRecord & { checkedAt: number }>>;
+type Records = Record<CalendarDataset, Map<number, DayRecord & { checkedAt: number }>>;
 
 function readRecords(db: Db): { records: Records; signature: string } {
   const records = Object.fromEntries(DATASETS.map((dataset) => [dataset, new Map()])) as Records;
   const rows = db.prepare("select dataset, day, status, note, checked_at from nse_days").all() as Array<{ dataset: DayDataset; day: number; status: DayRecord["status"]; note: string | null; checked_at: number }>;
   let newest = 0;
   for (const row of rows) {
-    records[row.dataset]?.set(row.day, { status: row.status, note: row.note, checkedAt: row.checked_at });
+    records[row.dataset as CalendarDataset]?.set(row.day, { status: row.status, note: row.note, checkedAt: row.checked_at });
     newest = Math.max(newest, row.checked_at);
   }
   return { records, signature: `${rows.length}|${newest}` };
@@ -242,7 +242,7 @@ export function runQuality(db: Db, options: QualityOptions = {}): QualityResult 
   const calendarSignature = `${signature}|${calendarVersion(cal)}`;
   if (state.calendar !== calendarSignature) {
     const listed = listedCalendar(cal);
-    const findings = calendarFindings({ days: records, weekendSessions: listed.weekendSessions, recentFrom: today - UNLISTED_RECENT_DAYS * DAY_MS, archiveGaps: ARCHIVE_GAPS, listed, calendarNote: CALENDAR_NOTE });
+    const findings = calendarFindings({ days: records, weekendSessions: listed.weekendSessions, recentFrom: today - UNLISTED_RECENT_DAYS * DAY_MS, archiveGaps: ARCHIVE_GAPS, gapNotes: [INDEX_GAP_NOTE], listed, calendarNote: CALENDAR_NOTE });
     for (const check of ["missing_session", "unlisted_session", "calendar_mismatch", "wrong_date"] as const) save(check, null, findings);
     state.calendar = calendarSignature;
   }

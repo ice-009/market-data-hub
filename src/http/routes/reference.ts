@@ -10,7 +10,8 @@ import { getUniverse, isUniverse, UNIVERSES } from "../../reference/universe.js"
 import { banTarget } from "../../jobs/scheduler.js";
 import { DAY_MS, isoDay, istDayKey } from "../../time.js";
 import { errorBody, requireScope, type HubEnv } from "../common.js";
-import { banHistory, banKnownFrom } from "./pointInTime.js";
+import { banGaps, banHistory, banKnownFrom } from "./pointInTime.js";
+import { lotsKnownFrom, lotsOn } from "../../nse/lotHistory.js";
 import { ParamError, parseRange, parseTime } from "../params.js";
 
 // Reference data, all from the hub's own store (filled by the NSE jobs):
@@ -21,7 +22,7 @@ import { ParamError, parseRange, parseTime } from "../params.js";
 //   GET /v1/fo/members?from&to             fo       F&O list on every stored trade day in a range
 //   GET /v1/fo/contracts?symbol            fo       a stock's near/next futures contracts (hub tickers)
 //   GET /v1/fo/ban[?date]                  fo       the F&O ban list (newest, or a stored trade date's)
-//   GET /v1/lots[?symbol]                  history  stock-futures lot sizes
+//   GET /v1/lots[?symbol][&date]           history  stock-futures lot sizes (today's, or a past F&O day's)
 //   GET /v1/results-calendar?from&to       history  results dates from the PR zip's board meetings
 //   GET /v1/market/regime[?universe]       history  NIFTY trend + breadth
 //   GET /v1/indices                        history  indices and synthetic baskets with daily history, sector map
@@ -149,13 +150,38 @@ export function referenceRoutes(app: Hono<HubEnv>, hub: Hub) {
       // A past trade date: exactly that day's stored list; never a nearby day's or today's.
       const stored = banHistory(hub.db, date, date)[0];
       const knownFrom = banKnownFrom(hub.db);
-      if (!stored) return c.json({ ...errorBody(`No F&O ban list is stored for ${isoDay(date)} (stored from ${knownFrom === null ? "never" : isoDay(knownFrom)}).`, "no_data"), knownFrom: knownFrom === null ? null : isoDay(knownFrom) }, 404);
+      if (!stored) {
+        const gap = knownFrom !== null && date >= knownFrom ? banGaps(hub.db, date, date)[0] : undefined;
+        const why = gap?.reason === "no_file" ? "NSE's archive has no list for that session" : gap ? "not downloaded yet" : `stored from ${knownFrom === null ? "never" : isoDay(knownFrom)}`;
+        return c.json({ ...errorBody(`No F&O ban list is stored for ${isoDay(date)} (${why}).`, "no_data"), knownFrom: knownFrom === null ? null : isoDay(knownFrom), ...(gap ? { reason: gap.reason } : {}) }, 404);
+      }
       return c.json({ tradeDate: isoDay(stored.tradeDate), symbols: stored.symbols, fetchedAt: stored.fetchedAt, current: stored.tradeDate >= banTarget(Date.now()) });
     }
     return c.json({ tradeDate: isoDay(ban.tradeDate), symbols: ban.symbols, fetchedAt: ban.fetchedAt, current: ban.tradeDate >= banTarget(Date.now()) });
   });
 
   app.get("/v1/lots", requireScope("history"), (c) => {
+    let date: number | undefined;
+    try {
+      date = parseTime("date", c.req.query("date"), "start", true);
+    } catch (error) {
+      return c.json(bad(error), 400);
+    }
+    if (date !== undefined) {
+      // A past day: the lots of the newest stored F&O day on or before it, each with its source.
+      const knownFrom = lotsKnownFrom(hub.db);
+      const on = knownFrom !== null && date >= knownFrom ? lotsOn(hub.db, date) : null;
+      if (!on) return c.json({ ...errorBody(`No lot sizes are known for ${isoDay(date)} (known from ${knownFrom === null ? "never" : isoDay(knownFrom)}).`, "no_data"), knownFrom: knownFrom === null ? null : isoDay(knownFrom) }, 404);
+      const entry = (lot: (typeof on.lots)[number]) => ({ lot: lot.lot, source: lot.source, ...(lot.confidence === "low" ? { confidence: "low" as const } : {}) });
+      const raw = c.req.query("symbol");
+      if (raw !== undefined) {
+        const ticker = normalizeSymbol(raw);
+        const lot = on.lots.find((row) => row.symbol === ticker);
+        if (!ticker || !lot) return c.json(errorBody(`${raw} had no stock futures on ${isoDay(on.day)}.`, "not_found"), 404);
+        return c.json({ symbol: ticker, date: isoDay(date), foDate: isoDay(on.day), foDay: on.day, ...entry(lot) });
+      }
+      return c.json({ date: isoDay(date), foDate: isoDay(on.day), foDay: on.day, count: on.lots.length, lots: Object.fromEntries(on.lots.map((lot) => [lot.symbol, entry(lot)])) });
+    }
     const lots = readLots(hub.db);
     const run = readRuns(hub.db).get("lots");
     if (!Object.keys(lots).length) return c.json(notReady("The lot-size file"), 503);
