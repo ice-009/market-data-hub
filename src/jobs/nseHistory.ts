@@ -6,10 +6,11 @@ import { fillSessionGaps } from "../history/fromBhav.js";
 import { syncIndexSeries } from "../history/fromIndices.js";
 import { ARCHIVE_FROM, ISIN_FROM, LEGACY_LAST_DAY, WEEKEND_SESSIONS, daysToCheck, syncDays, type DayOutcome, type NseContext } from "../nse/datasets.js";
 import { checkedDays, corporateActionDaysRead, isinDaysRead, type DayDataset } from "../nse/store.js";
+import { importOptions, optionDays } from "../nse/optionImport.js";
 import { isMarketOpen } from "../calendar/calendar.js";
 import { syncCalendar } from "../calendar/store.js";
 import { DAY_MS, isWeekday, isoDay, istParts, parseIsoDay } from "../time.js";
-import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "./backfill.js";
+import { getJob, resumeTime, updateJob, type HistoryDataset, type Job, type NseHistoryParams } from "./backfill.js";
 
 // NSE history (`hub data nse-history`): NSE's archive files for every session
 // in a range — the cash bhavcopy back to the first session (3 Nov 1994), with
@@ -46,8 +47,15 @@ import { getJob, resumeTime, updateJob, type Job, type NseHistoryParams } from "
 // their zip read again, once — about 4,200 requests for 2010 on. When a run
 // stops, every split and bonus factor is derived again from what is stored
 // (src/history/adjustments.ts).
+//
+// Option summaries (market-data-hub#30, src/nse/optionImport.ts): an F&O day
+// downloaded here stores them with its futures. Stored F&O days whose options
+// weren't read (downloaded before the hub kept them), and the options-only
+// months from 4 Jun 2001, have their F&O file read again, once — the
+// "options" dataset, after each year's F&O files: about 6,300 requests for
+// 2001 → 2026 (~2 hours).
 
-export const HISTORY_DATASETS: readonly DayDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close"];
+export const HISTORY_DATASETS: readonly HistoryDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close", "options"];
 
 /** A message for invalid parameters, or null. `today` is the IST day key (the evening run owns it). */
 export function validateNseHistory(params: NseHistoryParams, today: number): string | null {
@@ -56,7 +64,7 @@ export function validateNseHistory(params: NseHistoryParams, today: number): str
   if (from === null || to === null) return "--from and --to must be dates like 1994-11-03.";
   if (from > to) return "--from must be on or before --to.";
   if (to >= today) return "--to must be before today (the evening run fetches today's files).";
-  if (!params.datasets.length || params.datasets.some((dataset) => !HISTORY_DATASETS.includes(dataset))) return "--only must be cash, fo, pr or indices.";
+  if (!params.datasets.length || params.datasets.some((dataset) => !HISTORY_DATASETS.includes(dataset))) return "--only must be cash, fo, pr, indices or options.";
   return null;
 }
 
@@ -92,10 +100,11 @@ export function corporateActionDays(db: Db, from: number, to: number): number[] 
     .sort((a, b) => a - b);
 }
 
-export const HISTORY_LABEL: Record<DayDataset, string> = { cash_bhav: "cash", fo_bhav: "F&O", pr: "PR", index_close: "indices" };
+export const HISTORY_LABEL: Record<HistoryDataset, string> = { cash_bhav: "cash", fo_bhav: "F&O", pr: "PR", index_close: "indices", options: "options" };
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-const tally = (counts: Record<"ok" | "holiday" | "mismatch" | "isins" | "actions", number>) =>
-  `${plural(counts.ok, "session", "sessions")} stored, ${plural(counts.holiday, "day", "days")} without a file${counts.mismatch ? `, ${plural(counts.mismatch, "file", "files")} for another date` : ""}${counts.isins ? `, ISINs read for ${plural(counts.isins, "stored day", "stored days")}` : ""}${counts.actions ? `, corporate actions read for ${plural(counts.actions, "stored day", "stored days")}` : ""}`;
+type Tally = Record<"ok" | "holiday" | "mismatch" | "isins" | "actions" | "options", number>;
+const tally = (counts: Tally) =>
+  `${plural(counts.ok, "session", "sessions")} stored, ${plural(counts.holiday, "day", "days")} without a file${counts.mismatch ? `, ${plural(counts.mismatch, "file", "files")} for another date` : ""}${counts.isins ? `, ISINs read for ${plural(counts.isins, "stored day", "stored days")}` : ""}${counts.actions ? `, corporate actions read for ${plural(counts.actions, "stored day", "stored days")}` : ""}${counts.options ? `, options read for ${plural(counts.options, "day", "days")}` : ""}`;
 
 /**
  * Run one NSE history job to its end, a pause, or a cancel. Returns the job's
@@ -122,10 +131,11 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
   // F&O weekend sessions are found as the cash market's years are fetched, so they aren't in the starting count.
   const isins = datasets.includes("cash_bhav");
   const actions = datasets.includes("pr");
-  const total = datasets.reduce((sum, dataset) => sum + historyDays(ctx.db, dataset, from, to).length, 0) + (isins ? isinDays(ctx.db, from, to).length : 0) + (actions ? corporateActionDays(ctx.db, from, to).length : 0);
+  const days = (dataset: HistoryDataset, dayFrom: number, dayTo: number) => (dataset === "options" ? optionDays(ctx.db, dayFrom, dayTo) : historyDays(ctx.db, dataset, dayFrom, dayTo));
+  const total = datasets.reduce((sum, dataset) => sum + days(dataset, from, to).length, 0) + (isins ? isinDays(ctx.db, from, to).length : 0) + (actions ? corporateActionDays(ctx.db, from, to).length : 0);
   let done = 0;
   let failed = 0;
-  const counts: Record<"ok" | "holiday" | "mismatch" | "isins" | "actions", number> = { ok: 0, holiday: 0, mismatch: 0, isins: 0, actions: 0 };
+  const counts: Tally = { ok: 0, holiday: 0, mismatch: 0, isins: 0, actions: 0, options: 0 };
   updateJob(ctx.db, id, { state: "running", total, done: 0, failed: 0, startedAt: job.startedAt ?? now, resumeAfter: null, message: total ? `Asking NSE for ${total} days…` : "Everything is already stored." }, now);
   onProgress?.(getJob(ctx.db, id)!);
 
@@ -145,7 +155,7 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
   };
   let refused: string | null = null;
 
-  const onDay = (label: string, only: "isins" | "actions" | null) => (day: number, outcome: DayOutcome | "failed") => {
+  const onDay = (label: string, only: "isins" | "actions" | "options" | null) => (day: number, outcome: DayOutcome | "failed") => {
     done += 1;
     if (outcome === "failed") failed += 1;
     else if (only) counts[only] += outcome === "ok" ? 1 : 0;
@@ -158,6 +168,18 @@ export async function runNseHistory(ctx: NseContext, id: number, onProgress?: (j
     const yearFrom = Math.max(from, Date.UTC(year, 0, 1));
     const yearTo = Math.min(to, Date.UTC(year, 11, 31));
     for (const dataset of datasets) {
+      if (dataset === "options") {
+        // Stored F&O days whose options weren't read yet (those just downloaded were).
+        const optionPass = optionDays(ctx.db, yearFrom, yearTo);
+        if (!optionPass.length) continue;
+        const result = await syncDays(ctx, "fo_bhav", optionPass, shouldStop, onDay("Options", "options"), { record: false, importer: importOptions });
+        if (halt) break outer;
+        if (result.stopped) {
+          refused = result.stopped;
+          break outer;
+        }
+        continue;
+      }
       const passes: Array<{ label: string; only: "isins" | "actions" | null; days: () => number[] }> = [{ label: HISTORY_LABEL[dataset], only: null, days: () => historyDays(ctx.db, dataset, yearFrom, yearTo) }];
       // After the year's cash files: stored days whose ISINs weren't read yet (those just downloaded were).
       if (dataset === "cash_bhav") passes.push({ label: "ISINs", only: "isins", days: () => isinDays(ctx.db, yearFrom, yearTo) });

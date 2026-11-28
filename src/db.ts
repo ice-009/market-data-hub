@@ -17,6 +17,7 @@ import Database from "better-sqlite3";
 //   7  adjustments             corporate_actions, corporate_action_days, adjustment_factors; see src/history/adjustments.ts
 //   8  data quality            quality_findings, quality_checked; datasets.failures; see src/quality/store.ts
 //  11  trading calendar        calendar_days (holidays and sessions added by hand); see src/calendar/store.ts
+//  13  option summaries        option_summaries, option_days (from the F&O bhavcopy); see src/nse/optionStore.ts
 
 export type Db = Database.Database;
 
@@ -288,6 +289,46 @@ const MIGRATIONS: Array<string | undefined> = [
      open_min integer,
      close_min integer,
      updated_at integer not null
+   );`,
+  // 12: reserved for work in review (NSE reference history, market-data-hub#49/#50).
+  undefined,
+  // Daily option summaries (market-data-hub#30): one row per underlying per F&O
+  // day, read from every option row of the bhavcopy (src/nse/optionSummary.ts).
+  // Totals cover every listed expiry; near_* and next_* the first two expiries
+  // after the day. OI in shares, volume in contracts, IVs as decimals, flags a
+  // bit mask (FLAGS). option_days: F&O days whose option rows were read
+  // (status as in nse_days), so `hub data nse-history --only options` reads
+  // each day once.
+  `create table option_summaries (
+     symbol text not null,
+     day integer not null,
+     nse_symbol text not null,
+     kind text not null check (kind in ('index', 'stock')),
+     spot real,
+     lot integer,
+     expiries integer not null,
+     call_oi real not null, put_oi real not null,
+     call_chg_oi real not null, put_chg_oi real not null,
+     call_volume real not null, put_volume real not null,
+     iv30 real,
+     flags integer not null,
+     near_expiry integer, near_forward real, near_atm_strike real, near_straddle real,
+     near_atm_iv real, near_call_iv real, near_put_iv real, near_cp_spread real, near_iv25_put real, near_iv25_call real,
+     near_max_pain real, near_call_wall real, near_call_wall_oi real, near_put_wall real, near_put_wall_oi real,
+     near_call_oi real, near_put_oi real, near_strikes integer, near_liquid integer, near_flags integer,
+     next_expiry integer, next_forward real, next_atm_strike real, next_straddle real,
+     next_atm_iv real, next_call_iv real, next_put_iv real, next_cp_spread real, next_iv25_put real, next_iv25_call real,
+     next_max_pain real, next_call_wall real, next_call_wall_oi real, next_put_wall real, next_put_wall_oi real,
+     next_call_oi real, next_put_oi real, next_strikes integer, next_liquid integer, next_flags integer,
+     primary key (symbol, day)
+   ) without rowid;
+   create index option_summaries_day on option_summaries (day);
+   create table option_days (
+     day integer primary key,
+     status text not null,
+     rows integer not null default 0,
+     checked_at integer not null,
+     note text
    );`,
 ];
 
