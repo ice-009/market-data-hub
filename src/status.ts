@@ -6,6 +6,7 @@ import { hubVolumes } from "./disk.js";
 import { candleStats } from "./history/store.js";
 import type { Hub } from "./hub.js";
 import { listJobs } from "./jobs/backfill.js";
+import { optionSpan } from "./nse/optionStore.js";
 import { countResults, isinStats, lastOkDay, latestBan, readRuns, storedDays, unmappedIndexNames, type DayDataset } from "./nse/store.js";
 import { qualitySummary } from "./quality/summary.js";
 import { isoDay, istParts } from "./time.js";
@@ -32,6 +33,11 @@ export function dataFreshness(db: Db) {
   return {
     cashBhav: { lastSession: day(lastOkDay(db, "cash_bhav")), ...archive("cash_bhav"), ...run("cash_bhav") },
     foBhav: { lastSession: day(lastOkDay(db, "fo_bhav")), ...archive("fo_bhav"), ...run("fo_bhav") },
+    // Option summaries come with the F&O bhavcopy (src/nse/optionStore.ts).
+    options: (() => {
+      const span = optionSpan(db);
+      return { lastSession: day(span.last), firstSession: day(span.first), sessions: span.days };
+    })(),
     indexFile: { lastSession: day(lastOkDay(db, "index_close")), ...archive("index_close"), unmappedNames: unmappedIndexNames(db).length, ...run("index_close") },
     lots: { count: (lots?.count as number | undefined) ?? 0, source: (lots?.source as string | undefined) ?? null, ...run("lots") },
     foBan: { tradeDate: ban ? isoDay(ban.tradeDate) : null, ...archive("fo_ban"), ...run("fo_ban") },

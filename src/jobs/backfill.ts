@@ -34,11 +34,14 @@ export interface BackfillParams {
 }
 
 /** `hub data nse-history` (src/jobs/nseHistory.ts): NSE's archive files for a range of days. */
+/** What an NSE history job downloads: a day dataset, or "options" (the option summaries of stored F&O days). */
+export type HistoryDataset = DayDataset | "options";
+
 export interface NseHistoryParams {
   /** ISO days, inclusive. */
   from: string;
   to: string;
-  datasets: DayDataset[];
+  datasets: HistoryDataset[];
 }
 
 /** A row of the `jobs` table: a broker backfill or an NSE history download. */

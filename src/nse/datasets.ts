@@ -22,6 +22,8 @@ import { parseSymbolChanges } from "./parsers/symbolChange.js";
 import type { IndexCloseRow } from "./parsers/indexClose.js";
 import { dayStatuses, lotsFromFoBhav, markDay, recordRun, writeBan, writeCashDay, writeCorporateActions, writeFoDay, writeIndexDay, writeIsins, writeLots, writePrDay, writeSymbolChanges, type DayDataset, type DayStatus } from "./store.js";
 import { ZipError, isZip, unzipFile, unzipSingle } from "./unzip.js";
+import { writeOptionDay } from "./optionStore.js";
+import { summarizeFoCsv } from "./optionFile.js";
 
 // NSE's daily files, downloaded from its free public archive — no broker calls:
 //   cash_bhav  sec_bhavdata_full_DDMMYYYY.csv: close, volume, delivery % per stock
@@ -205,7 +207,7 @@ function fromZip<T>(body: Buffer, read: () => T): T {
   }
 }
 
-const unzipped = (body: Buffer): string => fromZip(body, () => unzipSingle(body).data.toString("utf8"));
+export const unzipped = (body: Buffer): string => fromZip(body, () => unzipSingle(body).data.toString("utf8"));
 
 export interface ImportOptions {
   /** Extend stored daily candles from a cash day (the evening run). History downloads don't: the days are older than any series' end. */
@@ -257,7 +259,12 @@ async function legacyDelivery(ctx: NseContext, day: number): Promise<Map<string,
   return parsed.deliveryPct;
 }
 
-/** Parse a zipped F&O bhavcopy for `day` (the old format up to LEGACY_LAST_DAY). */
+/**
+ * Parse a zipped F&O bhavcopy for `day` (the old format up to LEGACY_LAST_DAY):
+ * stock futures, and the day's option summaries (src/nse/optionFile.ts) —
+ * stored with it unless they couldn't be computed (logged; the day's options
+ * are then read again by `hub data nse-history --only options`).
+ */
 export function readFoFile(ctx: NseContext, day: number, body: Buffer): DayParse {
   const csv = unzipped(body);
   const parsed = isLegacyDay(day) ? parseFoBhavLegacy(csv) : parseFoBhav(csv);
@@ -265,11 +272,18 @@ export function readFoFile(ctx: NseContext, day: number, body: Buffer): DayParse
   if (wrong) return { kind: "mismatch", note: wrong };
   if (!parsed.contracts.length) throw new NseError("no stock-futures rows in the F&O bhavcopy (format change?)", null, false);
   const records = aggregateStockFutures(parsed.contracts, day);
+  let options: ReturnType<typeof summarizeFoCsv> | null = null;
+  try {
+    options = summarizeFoCsv(day, csv);
+  } catch (error) {
+    ctx.log.warn("option summaries couldn't be computed; the futures are stored without them", { day: isoDay(day), error });
+  }
   return {
     kind: "ok",
     badRows: parsed.badRows,
     store: () => {
       writeFoDay(ctx.db, day, records, ctx.clock());
+      if (options?.kind === "ok") writeOptionDay(ctx.db, day, options.summaries, ctx.clock());
       return records.length;
     },
   };
@@ -503,6 +517,8 @@ export interface SyncOptions extends ImportOptions {
   actionsOnly?: boolean;
   /** Read index rows from the PR zips of sessions without an index file (importIndexFromPr). */
   indexFromPr?: boolean;
+  /** Read each day with this instead (the option summaries of stored F&O days: src/nse/optionFile.ts). */
+  importer?: (ctx: NseContext, day: number) => Promise<DayOutcome>;
 }
 
 /**
@@ -510,7 +526,7 @@ export interface SyncOptions extends ImportOptions {
  * order). Stops after MAX_CONSECUTIVE_FAILURES hard failures in a row.
  */
 export async function syncDays(ctx: NseContext, dataset: DayDataset, days: number[], shouldStop: () => boolean = () => false, onDay?: (day: number, outcome: DayOutcome | "failed") => void, options: SyncOptions = {}): Promise<SyncResult> {
-  const { record = true, isinsOnly = false, actionsOnly = false, indexFromPr = false, ...importOptions } = options;
+  const { record = true, isinsOnly = false, actionsOnly = false, indexFromPr = false, importer, ...importOptions } = options;
   const result: SyncResult = { stored: 0, failed: 0, stopped: null };
   let consecutive = 0;
   let lastError = "";
@@ -520,13 +536,15 @@ export async function syncDays(ctx: NseContext, dataset: DayDataset, days: numbe
       break;
     }
     try {
-      const outcome = isinsOnly
-        ? await importIsins(ctx, day)
-        : actionsOnly
-          ? await importCorporateActions(ctx, day)
-          : indexFromPr
-            ? await importIndexFromPr(ctx, day, importOptions)
-            : await importDay(ctx, dataset, day, importOptions);
+      const outcome = importer
+        ? await importer(ctx, day)
+        : isinsOnly
+          ? await importIsins(ctx, day)
+          : actionsOnly
+            ? await importCorporateActions(ctx, day)
+            : indexFromPr
+              ? await importIndexFromPr(ctx, day, importOptions)
+              : await importDay(ctx, dataset, day, importOptions);
       if (outcome === "ok") result.stored += 1;
       consecutive = 0;
       onDay?.(day, outcome);
