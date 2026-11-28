@@ -9,7 +9,7 @@ instant they start. Query dates are `YYYY-MM-DD` (IST) or epoch ms. For intraday
 the start of that IST day and `to` its end.
 
 **Scopes.** `history`: candles, universes, lots, results calendar, regime, ticker renames, data quality. `fo`: everything under
-`/v1/fo`. `live`: quotes and the price stream. `admin` holds every scope (and alone may pin live
+`/v1/fo` and `/v1/options`. `live`: quotes and the price stream. `admin` holds every scope (and alone may pin live
 symbols).
 
 | Endpoint | Scope | Source |
@@ -23,6 +23,8 @@ symbols).
 | `GET /v1/fo/members?date` / `?from&to` | fo | NSE F&O bhavcopy |
 | `GET /v1/fo/contracts?symbol` | fo | NSE F&O bhavcopy |
 | `GET /v1/fo/ban` | fo | NSE `fo_secban.csv` |
+| `GET /v1/options/summary?symbol[&from&to]` | fo | daily option summaries from the NSE F&O bhavcopy |
+| `GET /v1/options/day[?date][&kind]` | fo | daily option summaries from the NSE F&O bhavcopy |
 | `GET /v1/lots[?symbol]` | history | NSE `fo_mktlots.csv` (fallback: F&O bhavcopy lots) |
 | `GET /v1/results-calendar?from&to[&symbol]` | history | board meetings from NSE's daily PR zip |
 | `GET /v1/calendar[?from&to]` | history | trading days, holidays and special sessions: NSE's holiday circular + what its archive shows |
@@ -393,6 +395,114 @@ GET /v1/lots/history?symbol=SBIN
   "lastDate": "2026-11-19", "lastDay": 1795046400000,
   "lots": { "SBIN": [ { "date": "2024-07-08", "day": 1720396800000, "lot": 1500 },
                       { "date": "2024-12-27", "day": 1735257600000, "lot": 750 } ] } }
+```
+
+## Option summaries: /v1/options
+
+Every option row of NSE's F&O bhavcopy (index and stock options, back to the first ones on
+**4 Jun 2001**), boiled down to **one row per underlying per day** (market-data-hub#30): open interest,
+volume, put–call ratios, max pain, OI walls, the ATM straddle and implied volatility. Not every
+strike: that would be ~150 million rows (10 GB or more); the summaries are ~1 million (~275 MB).
+They come with the evening's F&O file, and [`data nse-history --only options`](#data-nse-history)
+reads the archive's.
+
+**Method** (`src/nse/optionSummary.ts`).
+
+- **Totals** cover every listed expiry: call and put OI (shares) and its change (each contract's
+  own, so an expired series isn't "unwound" the next day), contracts traded, `pcrOi` = put OI / call
+  OI, `pcrVolume` = put / call contracts.
+- **near** and **next** are the first two expiries *after* the trade day (a series on its last day
+  has no time value left to read). For indices with weekly expiries they're the weeklies.
+- **Prices.** A contract's settlement price is used only when it traded that day and its settlement
+  agrees with its close within 2%. NSE's settlement price of an untraded option is a theoretical
+  value, and on thin contracts in the current files it can be far off the trades (BANKNIFTY 56100 CE,
+  25 Nov 2025 expiry, on 1 Oct 2025: 35 contracts traded, close 820.50, settlement 1,384.80).
+- **Forward.** The same-expiry future's settlement price; without one (weekly index expiries),
+  put–call parity at the strike where the usable call and put are closest, F = K + (C − P)/DF
+  (`FORWARD_PARITY`); else another expiry's forward, or the underlying's price, carried at r
+  (`FORWARD_CARRY`); else none (`NO_FORWARD`: no IV, straddle or delta).
+- **IV: Black-76** on the forward, `C = DF·(F·N(d1) − K·N(d2))`, solved by bisection to 1e-6.
+  **Time** is ACT/365 in calendar days, close to close: T = (expiry − trade day) / 365. **Rate**: a
+  step function of year — approximate averages of India's 91-day T-bill yield (`RISK_FREE` in
+  `src/nse/optionMath.ts`, 3.5% in 2020–21, 6.75% in 2023–24…). It only discounts (the forward
+  carries interest and dividends): a whole point of error moves a one-month ATM IV by under 0.1%
+  of itself.
+- **ATM** is the listed strike nearest the forward. `atmIv`: the mean of its call and put IVs; without
+  either, interpolated at the forward between the nearest usable strikes on either side (within 10%),
+  else the nearest within 5%, else the ATM settlement prices if their call and put IVs agree within
+  20% (`ATM_THEORETICAL`); outside 2–300% it's dropped (`IV_OUT_OF_RANGE`). `callIv`/`putIv` are the
+  ATM strike's own.
+- **Straddle** = the ATM call + put; a leg without a usable price comes from the other by put–call
+  parity, both from Black-76 at the ATM IV when neither traded (`ATM_UNTRADED`). It is roughly the
+  move priced to expiry; `expectedMovePct` = straddle / forward × 100 (≈ 0.8 × σ√T).
+- **iv30**: ATM IV at a constant 30 calendar days, interpolating total variance σ²T between the
+  nearest *clean* expiries either side of 30 days (an ATM IV read from traded prices on the expiry's
+  own forward, at least 3 days out); flat beyond. For indices that is usually the monthlies, as
+  India VIX uses — a thinly traded weekly is skipped.
+- **cpSpread**: call IV − put IV over strikes where both legs are usable, OI-weighted (Cremers &
+  Weinbaum 2010); only with a futures forward (a parity forward makes it ~0 by construction).
+- **iv25Put / iv25Call**: IV at 25 delta (forward delta), interpolated in delta between usable
+  out-of-the-money strikes; null without strikes on both sides. `skew25` = put − call.
+- **maxPain**: the strike where option holders' payout at expiry, on the day's OI, is smallest.
+  **callWall / putWall**: the strikes with the most call / put OI (resistance / support).
+- **Lots.** The current files carry one. For the old files it's estimated from notional turnover
+  (`VAL_INLAKH` is (strike + premium) × shares) over contracts traded: the volume-weighted median
+  over traded contracts whose premium is under 5% of the strike (`lotEstimated`, flag
+  `LOT_ESTIMATED`; within 1% of NSE's published lots on every day checked). `optionShares` =
+  contracts × lot; `optionToStock` = that / the cash bhavcopy's volume that day (Johnson & So 2012).
+- **American-style** stock options (old files' `CA`/`PA`, until NSE moved stock options to European
+  style around 2011) are read as European: flag `AMERICAN`; puts' IV is a little high.
+- **Flags** (row: `LOT_ESTIMATED`, `AMERICAN`; per expiry: the rest): `FORWARD_PARITY`,
+  `FORWARD_CARRY`, `NO_FORWARD`, `ATM_THEORETICAL`, `FEW_STRIKES` (under 3 strikes with a usable
+  price), `IV_OUT_OF_RANGE`, `ATM_UNTRADED`.
+
+**Checked against India VIX** (NSE's index file): NIFTY's iv30 sits just under VIX, as ATM IV should
+(VIX also prices the out-of-the-money wings) — 23.2 vs 25.25 on 13 Jul 2020, 12.1 vs 12.7 on 5 Jul
+2024, 9.6 vs 10.29 on 1 Oct 2025, 14.5 vs 16.84 on 26 Nov 2026. Lots matched NSE's (RELIANCE 600 in
+2001, 250 in 2010, 505 in 2020; NIFTY 25 in 2024), the straddle agrees with 0.8·σ√T·F, and max pain
+and the walls are checked by brute force in `test/options.test.ts`. Stock ATM IVs: median 52% in
+Nov 2001, 36% in Oct 2010, 51% in Jul 2020, 26% in Oct 2025.
+
+### GET /v1/options/summary?symbol=NIFTY[&from&to]
+
+One underlying (an index such as `NIFTY`, `BANKNIFTY`, or a stock), day by day, oldest first.
+Default range: the year up to today. A stock follows its listing across ticker renames, as
+`/v1/candles` does (`ticker` is the name it traded under that day). `knownFrom` / `lastDate`: the
+first and newest stored option days. `ivPercentile`: the share (0–100) of the 365 calendar days up to
+and including that day whose iv30 was lower (null with under 60 of them) — nothing after the day is
+read, so a past day's answer never changes. IVs are decimals (0.179 = 17.9%); OI in shares, volume
+in contracts. `400` without a symbol, `503 not_ready` before anything is stored.
+
+```json
+GET /v1/options/summary?symbol=RELIANCE&from=2025-10-01&to=2025-10-01
+{ "symbol": "RELIANCE", "from": "2025-10-01", "to": "2025-10-01", "knownFrom": "2001-06-04", "knownFromDay": 991612800000,
+  "lastDate": "2026-11-26", "lastDay": 1795651200000,
+  "days": [ { "date": "2025-10-01", "day": 1759276800000, "ticker": "RELIANCE", "kind": "stock", "spot": 1368.7,
+      "lot": 500, "lotEstimated": false, "expiries": 3, "callOi": 45961500, "putOi": 37253000, "callChgOi": 2963000, "putChgOi": 3226000,
+      "callVolume": 108543, "putVolume": 60601, "pcrOi": 0.8105, "pcrVolume": 0.5583, "optionShares": 84572000,
+      "stockVolume": 13004912, "optionToStock": 6.5032, "iv30": 0.1788, "ivPercentile": 12.4, "flags": [],
+      "near": { "expiry": "2025-10-28", "expiryDay": 1761609600000, "days": 27, "forward": 1377.4, "atmStrike": 1380,
+        "straddle": 53.35, "expectedMovePct": 3.873, "atmIv": 0.1789, "callIv": 0.1808, "putIv": 0.177, "cpSpread": 0.0031,
+        "iv25Put": 0.1822, "iv25Call": 0.1771, "skew25": 0.0051, "maxPain": 1390, "callWall": 1400, "callWallOi": 5836500,
+        "putWall": 1400, "putWallOi": 2287500, "callOi": 41155000, "putOi": 33300000, "pcrOi": 0.8091,
+        "strikes": 42, "liquidStrikes": 40, "flags": [] },
+      "next": { "expiry": "2025-11-25", … } } ] }
+```
+
+(Illustrative: numbers as computed from that day's file; the OI totals and volumes are rounded.)
+
+### GET /v1/options/day[?date=YYYY-MM-DD][&kind=stock|index]
+
+Every underlying on the newest stored option day on or before `date` (default today) — a screener's
+cross-section — each row the same shape as a day above plus `symbol`. `ivPercentile` ranks each
+symbol's iv30 against its own year up to that day. `404 not_found` when nothing is stored on or
+before `date`, `503 not_ready` before anything is.
+
+```json
+GET /v1/options/day?date=2025-10-02&kind=index
+{ "date": "2025-10-01", "day": 1759276800000, "count": 5,
+  "rows": [ { "symbol": "BANKNIFTY", "date": "2025-10-01", "kind": "index", "iv30": 0.1059, … },
+            { "symbol": "NIFTY", "date": "2025-10-01", "kind": "index", "iv30": 0.0962, … }, … ] }
 ```
 
 ## GET /v1/results-calendar
@@ -1104,7 +1214,7 @@ stops, the index candles and the synthetic baskets are rebuilt from what is stor
 [split and bonus factor](#split-and-bonus-adjustment) is derived again.
 
 - `--from` defaults to 1994-11-03, `--to` to yesterday (IST); `--only cash`, `--only fo`,
-  `--only pr` or `--only indices` for one dataset. Days already checked (`nse_days`) are never asked for again, so a later run only fills
+  `--only pr`, `--only indices` or `--only options` for one dataset. Days already checked (`nse_days`) are never asked for again, so a later run only fills
   what's missing: run it once for the whole archive, then again whenever you like.
 - NSE changed formats on **8 Jul 2024**. Before that the hub reads the old files:
   `cmDDMONYYYYbhav.csv.zip` + `MTO_DDMMYYYY.DAT` (delivery %) for cash, `foDDMONYYYYbhav.csv.zip`
@@ -1120,6 +1230,13 @@ stops, the index candles and the synthetic baskets are rebuilt from what is stor
   (`isin_symbols`, for renames). Stored days whose ISINs weren't read — downloaded before the hub kept
   them — have just their cash file read again, once, whenever the cash market is included: about 3,400
   requests (an hour) for 2011 to 5 Jul 2024. Prices and delivery % already stored are left alone.
+- **Option summaries** ([/v1/options](#option-summaries-v1options)). An F&O day downloaded here
+  stores its option summaries with its futures. Stored F&O days whose options weren't read
+  (downloaded before the hub kept them), and the options-only months from 4 Jun 2001 (index options
+  from 4 Jun, stock options from 2 Jul, stock futures only from 9 Nov 2001), have their F&O file read
+  again, once — `--only options`, or any run that includes it (the default does): about 6,300
+  requests (~2 hours) for 2001 → 2026, ~275 MB in `hub.db`. `fo_futures` and `nse_days` are left
+  alone; days read are recorded in `option_days`.
 - **Corporate actions.** Likewise stored PR days whose `bc` file wasn't read (downloaded before the
   hub kept it) have their PR zip read again, once, whenever the PR zip is included: about 4,200
   requests (1.3 hours) for 2010 on. Results already stored are left alone.
@@ -1272,6 +1389,7 @@ they compress *less* than real prices — treat the backup sizes as an upper bou
 | NSE history, cash bhavcopy (`cash_bhav` + its day index), 3 Nov 1994 → Nov 2026 | 12.1 M (7,809 sessions, ~800 → ~2,300 a day) | 1.35 GB | |
 | NSE history, F&O futures (`fo_futures` + index), 9 Nov 2001 → Nov 2026 | 0.78 M (~40 → ~215 underlyings a day) | 0.14 GB | |
 | **NSE history, both** (`hub data nse-history`) | | **1.49 GB** | **0.52 GB** (2.9×) |
+| Option summaries (`option_summaries` + its day index), 4 Jun 2001 → Nov 2026 (measured ~265 bytes a row on real 2001–2025 days) | ~1.0 M (~30 → ~225 underlyings a day) | ~0.28 GB | |
 | Broker candles for the F&O universe + indices (230 series: 1d × 5 y, 15m × 1 y, 5m × 1 y) | 6.3 M | 0.44 GB | 0.12 GB (3.7×) |
 | Live 1-minute bars (`HUB_LIVE_RETENTION_DAYS` 30: ~21 sessions × 375 minutes per symbol) | ~7,900 per symbol | ~0.7 MB per symbol kept live (estimate, not measured) | |
 | Each further year of evening runs (cash ~2,300 + F&O ~215 rows a session) | ~0.6 M | ~75 MB | ~25 MB |
@@ -1323,6 +1441,8 @@ free space and what the backups take.
 | `live_subscriptions` | the persistent set: symbol → origin `config` (`HUB_LIVE_SYMBOLS`) or `pin` (API), added time |
 | `quality_findings` | (check, trade day, subject) → severity, message, detail (JSON), first / last seen, resolved (migration 8; 7 is held for split/bonus factors, market-data-hub#20) |
 | `quality_checked` | (check, trade day) → when the per-day checks looked at it |
+| `option_summaries` | (symbol, day) → kind, spot, lot, expiries; call/put OI, ΔOI and contracts over every expiry; iv30; flags; for the near and next expiry: expiry, forward, ATM strike, straddle, ATM/call/put IV, call–put IV spread, 25-delta put/call IV, max pain, call/put walls and their OI, call/put OI, strikes listed and usable, flags (migration 13; 12 is held for NSE reference history in review) |
+| `option_days` | F&O days whose option rows were read: `ok` / `holiday` / `mismatch`, rows, checked time, note |
 | `calendar_days` | trading-calendar days added by hand (`hub data calendar`): day → `holiday` / `session`, name, session hours (minutes after IST midnight; null = regular) (migration 11; 10 is held for split/bonus work in review) |
 
 Other files in the data directory: `fyers-token.json` (mode 600, the broker access token),

@@ -1,4 +1,5 @@
 import type { Db } from "../db.js";
+import type { DayDataset } from "../nse/store.js";
 import { DAY_MS, isoDay, parseIsoDay } from "../time.js";
 import { enqueueJob, type Job, type NseHistoryParams } from "./backfill.js";
 import { historyDays, lastHistoryDay } from "./nseHistory.js";
@@ -6,7 +7,8 @@ import { historyDays, lastHistoryDay } from "./nseHistory.js";
 /** What daily candles and F&O history need. */
 // The index file gives NIFTY and the sector indices (the market regime) without a broker; the
 // PR zip's corporate actions give the split and bonus factors (src/history/adjustments.ts).
-const EOD_DATASETS: NseHistoryParams["datasets"] = ["cash_bhav", "fo_bhav", "pr", "index_close"];
+// (Option summaries come with the F&O files downloaded; older stored days are left to `--only options`.)
+const EOD_DATASETS: DayDataset[] = ["cash_bhav", "fo_bhav", "pr", "index_close"];
 
 // End-of-day mode (no broker configured) has only NSE's files to build daily
 // candles from, and the evening job keeps just the last couple of weeks. So
